@@ -1,4 +1,5 @@
 mod adapters;
+mod app;
 mod config;
 mod domain;
 
