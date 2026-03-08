@@ -30,3 +30,4 @@ clap = { version = "4", features = ["derive"] }
 tabled = "0.17"
 toml = "0.8"
 dirs = "6"
+trait-variant = "0.1"
