@@ -4,3 +4,4 @@ build/
 .env
 .vitest/
 .react-router/
+bookmarks.jsonl
