@@ -1,0 +1,46 @@
+<div id="add-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    <div class="bg-[#1e2235] rounded-xl border border-gray-700 p-6 w-full max-w-md">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-medium">Add Bookmark</h2>
+            <button onclick="document.getElementById('add-modal').classList.add('hidden')"
+                    class="text-gray-500 hover:text-gray-300">&times;</button>
+        </div>
+        <form hx-post="/bookmarks"
+              hx-target="#bookmark-grid"
+              hx-swap="afterbegin"
+              hx-on::after-request="if(event.detail.successful) document.getElementById('add-modal').classList.add('hidden')"
+              class="space-y-4">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">URL</label>
+                <input type="url" name="url" required placeholder="https://example.com"
+                       class="w-full px-3 py-2 rounded-lg bg-[#0f1117] border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Title</label>
+                <input type="text" name="title" placeholder="Optional title"
+                       class="w-full px-3 py-2 rounded-lg bg-[#0f1117] border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Description</label>
+                <input type="text" name="description" placeholder="Optional description"
+                       class="w-full px-3 py-2 rounded-lg bg-[#0f1117] border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Tags</label>
+                <input type="text" name="tags_input" placeholder="development, coding, productivity (comma separated)"
+                       class="w-full px-3 py-2 rounded-lg bg-[#0f1117] border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500">
+            </div>
+            <div class="flex gap-3 justify-end">
+                <button type="button"
+                        onclick="document.getElementById('add-modal').classList.add('hidden')"
+                        class="px-4 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-gray-200">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white">
+                    Add Bookmark
+                </button>
+            </div>
+        </form>
+    </div>
+</div>

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "components/header.html" %}
+{% include "components/filters.html" %}
+<main class="px-6 py-4">
+    <div id="bookmark-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        {% include "bookmarks/list.html" %}
+    </div>
+</main>
+{% include "bookmarks/add_modal.html" %}
+{% endblock %}

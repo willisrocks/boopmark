@@ -1,0 +1,42 @@
+<header class="flex items-center justify-between px-6 py-3 border-b border-gray-800">
+    <div class="flex items-center gap-2">
+        <span class="text-red-500 text-xl">🔖</span>
+        <span class="font-bold text-lg">BoopMark</span>
+    </div>
+    <div class="flex-1 max-w-xl mx-8">
+        <input type="search"
+               name="search"
+               placeholder="Search bookmarks..."
+               class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
+               hx-get="/bookmarks"
+               hx-trigger="keyup changed delay:300ms"
+               hx-target="#bookmark-grid"
+               hx-push-url="true"
+               hx-include="[name='tags'],[name='sort']">
+    </div>
+    <div class="flex items-center gap-4">
+        <button onclick="document.getElementById('add-modal').classList.remove('hidden')"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
+            + Add Bookmark
+        </button>
+        {% if let Some(user) = user %}
+        <div class="relative group">
+            {% if let Some(ref img) = user.image %}
+            <img src="{{ img }}" class="w-8 h-8 rounded-full cursor-pointer" alt="">
+            {% else %}
+            <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center cursor-pointer text-sm">
+                {{ user.email.chars().next().unwrap_or('?') }}
+            </div>
+            {% endif %}
+            <div class="hidden group-hover:block absolute right-0 top-10 bg-[#1e2235] border border-gray-700 rounded-lg p-3 min-w-[200px] z-50">
+                <p class="text-sm text-gray-400">{{ user.name.as_deref().unwrap_or("") }}</p>
+                <p class="text-xs text-gray-500 mb-2">{{ user.email }}</p>
+                <a href="/settings/api-keys" class="block text-sm text-gray-300 hover:text-white py-1">API Keys</a>
+                <form method="post" action="/auth/logout">
+                    <button class="text-sm text-gray-300 hover:text-white py-1">Sign Out</button>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</header>
