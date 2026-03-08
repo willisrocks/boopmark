@@ -1,7 +1,3 @@
-node_modules/
-dist/
-build/
+/target
 .env
-.vitest/
-.react-router/
-bookmarks.jsonl
+.workgraph
