@@ -51,7 +51,7 @@ async fn main() {
             )))
         }
         StorageBackend::S3 => {
-            let s3_config = aws_config::from_env().load().await;
+            let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
             let s3_client = aws_sdk_s3::Client::new(&s3_config);
             let storage = Arc::new(S3Storage::new(
                 s3_client,

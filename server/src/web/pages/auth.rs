@@ -1,16 +1,29 @@
+use askama::Template;
 use axum::extract::{Query, State};
-use axum::response::Redirect;
+use axum::response::{Html, IntoResponse, Redirect};
 use axum::Router;
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use serde::Deserialize;
 
 use crate::web::state::AppState;
 
+#[derive(Template)]
+#[template(path = "auth/login.html")]
+struct LoginPage;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/auth/login", axum::routing::get(login_page))
         .route("/auth/google", axum::routing::get(google_redirect))
         .route("/auth/google/callback", axum::routing::get(google_callback))
         .route("/auth/logout", axum::routing::post(logout))
+}
+
+async fn login_page() -> impl IntoResponse {
+    match LoginPage.render() {
+        Ok(body) => Html(body).into_response(),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// Redirect the user to Google's OAuth consent screen.
@@ -89,6 +102,7 @@ async fn google_callback(
     let cookie = Cookie::build(("session", session_token))
         .path("/")
         .http_only(true)
+        .secure(true)
         .same_site(axum_extra::extract::cookie::SameSite::Lax)
         .build();
 
