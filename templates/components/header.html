@@ -1,6 +1,6 @@
 <header class="flex items-center justify-between px-6 py-3 border-b border-gray-800">
     <div class="flex items-center gap-2">
-        <span class="text-red-500 text-xl">🔖</span>
+        <span class="text-red-500 text-xl">&#128278;</span>
         <span class="font-bold text-lg">BoopMark</span>
     </div>
     <div class="flex-1 max-w-xl mx-8">
@@ -21,15 +21,15 @@
         </button>
         {% if let Some(user) = user %}
         <div class="relative group">
-            {% if let Some(ref img) = user.image %}
+            {% if let Some(img) = user.image %}
             <img src="{{ img }}" class="w-8 h-8 rounded-full cursor-pointer" alt="">
             {% else %}
             <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center cursor-pointer text-sm">
-                {{ user.email.chars().next().unwrap_or('?') }}
+                {{ user.email_initial }}
             </div>
             {% endif %}
             <div class="hidden group-hover:block absolute right-0 top-10 bg-[#1e2235] border border-gray-700 rounded-lg p-3 min-w-[200px] z-50">
-                <p class="text-sm text-gray-400">{{ user.name.as_deref().unwrap_or("") }}</p>
+                <p class="text-sm text-gray-400">{{ user.display_name }}</p>
                 <p class="text-xs text-gray-500 mb-2">{{ user.email }}</p>
                 <a href="/settings/api-keys" class="block text-sm text-gray-300 hover:text-white py-1">API Keys</a>
                 <form method="post" action="/auth/logout">

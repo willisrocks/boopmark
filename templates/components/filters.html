@@ -5,14 +5,14 @@
         </svg>
         Filters
     </button>
-    {% for tag in all_tags %}
+    {% for tag in filter_tags %}
     <button class="px-3 py-1 text-xs rounded-full border
-                    {% if active_tags.contains(&tag) %}bg-blue-600 border-blue-500 text-white{% else %}bg-[#1a1d2e] border-gray-700 text-gray-400 hover:border-gray-500{% endif %}"
-            hx-get="/bookmarks?tags={{ tag }}"
+                    {% if tag.active %}bg-blue-600 border-blue-500 text-white{% else %}bg-[#1a1d2e] border-gray-700 text-gray-400 hover:border-gray-500{% endif %}"
+            hx-get="/bookmarks?tags={{ tag.name }}"
             hx-target="#bookmark-grid"
             hx-push-url="true"
             hx-include="[name='search'],[name='sort']">
-        {{ tag }}
+        {{ tag.name }}
     </button>
     {% endfor %}
     <div class="ml-auto">
