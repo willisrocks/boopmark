@@ -2,6 +2,7 @@ use crate::domain::error::DomainError;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+#[derive(sqlx::FromRow)]
 pub struct Session {
     pub id: Uuid,
     pub user_id: Uuid,
