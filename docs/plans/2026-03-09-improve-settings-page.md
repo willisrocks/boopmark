@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
-**Goal:** Make `/settings` clearly reflect saved Anthropic configuration, limit model selection to the current official Anthropic model IDs, and render the page inside BoopMark's normal app shell without breaking encrypted settings persistence.
+**Goal:** Make `/settings` clearly reflect saved Anthropic configuration, restrict model selection to the current official Anthropic model IDs, and render the page inside BoopMark's normal app shell without breaking encrypted settings persistence.
 
-**Architecture:** Keep the existing encrypted `user_llm_settings` storage and route structure, but move Anthropic model handling to a server-owned allow-list so the service, template, and tests all use the same labels and full API values. Reuse the existing header component on Settings by passing the same user view data plus a simple page-context flag so BoopMark branding and navigation stay visible while header controls remain safe off the bookmarks grid. Preserve the current keep/replace/clear key semantics: the UI never rehydrates the secret, it only shows saved state, replace state, or cleared state.
+**Architecture:** Keep the existing encrypted `user_llm_settings` storage and route structure, but move Anthropic model handling to a server-owned allow-list so the service, template, and tests all use the same labels and full API values. Normalize the legacy `claude-haiku-4-5` alias to the new full Haiku identifier and coerce every other unsupported saved or submitted value back to the supported default, so the finished page truly exposes only the official options. Reuse the existing header component on Settings by passing the same user view data plus a simple page-context flag so BoopMark branding and navigation stay visible while header controls remain safe off the bookmarks grid. Preserve the current keep/replace/clear key semantics: the UI never rehydrates the secret, it only shows truthful saved-state messaging, replace state, or cleared state.
 
 **Tech Stack:** Rust, Axum, Askama templates, Tailwind CSS, Playwright
 
@@ -14,7 +14,7 @@ Anthropic model source already confirmed from the official live docs on March 9,
 
 ### Task 1: Refresh the worktree `.env` and capture failing browser expectations
 
-Start with the browser contract so the implementation is driven by the user-visible behavior: saved-key masking, explicit replace/clear flow, current model select options, and the restored app shell on `/settings`.
+Start with the browser contract so the implementation is driven by the user-visible behavior: truthful saved-key status, explicit replace/clear flow, current model select options, and the restored app shell on `/settings`.
 
 **Files:**
 - Modify: `tests/e2e/settings.spec.js`
@@ -57,8 +57,9 @@ await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
 await page.getByLabel("Anthropic model").selectOption("claude-sonnet-4-6");
 await page.getByRole("button", { name: "Save settings" }).click();
 
-await expect(page.getByText("Saved Anthropic API key is active")).toBeVisible();
-await expect(page.getByLabel("Anthropic API key")).toBeDisabled();
+await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
+await expect(page.getByText("Anthropic API key saved securely")).toBeVisible();
+await expect(page.getByLabel("Anthropic API key")).toHaveCount(0);
 await page.getByText("Replace saved key").click();
 await expect(page.getByTestId("anthropic-api-key-replacement")).toBeVisible();
 await page.getByLabel("Replacement Anthropic API key").fill(anthropicApiKey);
@@ -77,6 +78,16 @@ await expect(page.getByLabel("Anthropic API key")).toBeEditable();
 ```
 
 Keep the helper that reads `ANTHROPIC_API_KEY` from the copied worktree `.env`; do not add a fake fallback.
+
+Also add one browser assertion that only the official values are present in the model select:
+
+```js
+await expect(page.locator("#anthropic_model option")).toHaveValues([
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+  "claude-haiku-4-5-20251001",
+]);
+```
 
 **Step 3: Run the browser spec and verify it fails on current code**
 
@@ -134,6 +145,14 @@ fn normalize_model_maps_the_previous_haiku_alias_to_the_current_full_id() {
         "claude-haiku-4-5-20251001"
     );
 }
+
+#[test]
+fn normalize_model_rejects_unsupported_values_back_to_the_default() {
+    assert_eq!(
+        normalize_model(Some("claude-3-7-sonnet-latest".into())),
+        "claude-haiku-4-5-20251001"
+    );
+}
 ```
 
 Add a view-level assertion so saved state remains presence-only:
@@ -150,6 +169,22 @@ assert_eq!(DEFAULT_ANTHROPIC_MODEL, "claude-haiku-4-5-20251001");
 assert_eq!(ANTHROPIC_MODEL_OPTIONS.len(), 3);
 ```
 
+Add one load-path test proving an unsupported stored value is normalized before rendering:
+
+```rust
+repo.stored.lock().expect("stored lock").replace(LlmSettings {
+    user_id,
+    enabled: true,
+    anthropic_api_key_encrypted: Some(vec![1, 2, 3]),
+    anthropic_model: "claude-3-7-sonnet-latest".into(),
+    created_at: Utc::now(),
+    updated_at: Utc::now(),
+});
+
+let view = service.load(user_id).await.expect("load");
+assert_eq!(view.anthropic_model, "claude-haiku-4-5-20251001");
+```
+
 **Step 2: Run the unit tests and verify they fail**
 
 Run:
@@ -161,6 +196,7 @@ cargo test -p boopmark-server app::settings -- --nocapture
 Expected:
 - FAIL because the default model constant is still `claude-haiku-4-5`.
 - FAIL because there is no shared allow-list for the three official model IDs.
+- FAIL because unsupported saved and submitted model values are not yet coerced back to the supported default.
 
 **Step 3: Implement the shared model metadata and normalization**
 
@@ -199,13 +235,12 @@ fn normalize_model(model: Option<String>) -> String {
         Some(value) if ANTHROPIC_MODEL_OPTIONS.iter().any(|option| option.value == value) => {
             value.to_string()
         }
-        Some(value) if !value.is_empty() => value.to_string(),
         _ => DEFAULT_ANTHROPIC_MODEL.to_string(),
     }
 }
 ```
 
-Keep the last branch so older custom values already stored from the free-text era are not silently destroyed before the user intentionally changes them.
+This is the deliberate migration policy: old supported alias values move to the current official full ID, and every other unsupported value collapses to the supported default so the finished `select` never exposes arbitrary models.
 
 **Step 4: Run the unit tests and verify they pass**
 
@@ -317,17 +352,7 @@ struct SettingsPage {
 }
 ```
 
-Populate `user: Some(user.clone().into())`, `header_shows_bookmark_actions: false`, and build `anthropic_model_options` from `ANTHROPIC_MODEL_OPTIONS`, prepending one extra selected option only when the saved value is a legacy custom value that is not in the official list:
-
-```rust
-ModelOptionView {
-    label: "Saved custom model (change to replace)",
-    value: current_model.clone(),
-    selected: true,
-}
-```
-
-That avoids silently overwriting old free-text values while still making the new official choices primary.
+Populate `user: Some(user.clone().into())`, `header_shows_bookmark_actions: false`, and build `anthropic_model_options` only from `ANTHROPIC_MODEL_OPTIONS`. Do not prepend a synthetic custom option. By this point `SettingsService::load` must already have normalized any unsupported stored value back to `DEFAULT_ANTHROPIC_MODEL`, so the select always contains exactly the three official choices.
 
 **Step 2: Make the shared header safe on `/settings`**
 
@@ -365,17 +390,13 @@ Render the saved-key branch like this:
 
 ```html
 {% if has_anthropic_api_key %}
-<div class="rounded-lg border border-gray-700 bg-[#1a1d2e] px-4 py-3">
-    <p class="text-sm font-medium text-gray-200">Saved Anthropic API key is active.</p>
-    <p class="text-xs text-gray-400 mt-1">Use Replace to enter a new key, or clear it on save to make the field editable again.</p>
-</div>
-<input
-    id="anthropic_api_key"
-    type="password"
-    value="sk-ant-••••••••••••"
-    disabled
-    class="w-full ..."
+<div
+    data-testid="anthropic-api-key-status"
+    class="rounded-lg border border-gray-700 bg-[#1a1d2e] px-4 py-3"
 >
+    <p class="text-sm font-medium text-gray-200">Anthropic API key saved securely.</p>
+    <p class="text-xs text-gray-400 mt-1">Use Replace to enter a new key, or clear it on save to remove the stored key and make the field editable again.</p>
+</div>
 <details class="space-y-2">
     <summary class="cursor-pointer text-sm text-blue-300">Replace saved key</summary>
     <div data-testid="anthropic-api-key-replacement" class="space-y-2">
@@ -404,7 +425,7 @@ Replace the free-text model input with a select rendered from `anthropic_model_o
 <p class="text-xs text-gray-400">Default: Claude Haiku 4.5 (`claude-haiku-4-5-20251001`).</p>
 ```
 
-This keeps the page truthful: saved key state is visible, direct editing is opt-in, and official model choices use friendly labels with full saved IDs.
+This keeps the page truthful: saved key state is visible without inventing a pseudo-secret, direct editing is opt-in, and official model choices use friendly labels with full saved IDs.
 
 **Step 4: Run the targeted browser and backend tests**
 
@@ -412,13 +433,14 @@ Run:
 
 ```bash
 cargo test -p boopmark-server app::settings -- --nocapture
-npx playwright test tests/e2e/settings.spec.js tests/e2e/profile-menu.spec.js
+npx playwright test tests/e2e/settings.spec.js tests/e2e/profile-menu.spec.js tests/e2e/suggest.spec.js
 ```
 
 Expected:
 - PASS for the settings service unit tests.
-- PASS for the settings E2E flow, including saved-key masking, replace, clear, and the model select.
+- PASS for the settings E2E flow, including truthful saved-key status, replace, clear, and the model select.
 - PASS for the profile-menu navigation smoke test, confirming the settings page still looks like BoopMark and remains reachable from the normal shell.
+- PASS for `suggest.spec.js`, confirming the shared bookmarks-header branch still opens the add modal and keeps the main app shell behavior intact after the header conditional is introduced.
 - PASS for `/bookmarks` rendering with the unchanged live-search/add-bookmark header branch because `GridPage` now explicitly supplies `header_shows_bookmark_actions: true`.
 
 **Step 5: Commit the UI and shell change**
