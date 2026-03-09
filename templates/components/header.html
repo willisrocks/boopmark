@@ -25,11 +25,11 @@
             <button
                 type="button"
                 data-testid="profile-menu-trigger"
-                aria-haspopup="menu"
+                aria-label="Open profile menu"
                 class="block cursor-pointer"
             >
                 {% if let Some(img) = user.image %}
-                <img src="{{ img }}" class="w-8 h-8 rounded-full" alt="{{ user.display_name }}">
+                <img src="{{ img }}" class="w-8 h-8 rounded-full" alt="">
                 {% else %}
                 <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-sm">
                     {{ user.email_initial }}
@@ -39,7 +39,6 @@
             <div aria-hidden="true" class="absolute right-0 h-3 min-w-[200px]" style="top: 100%;"></div>
             <div
                 data-testid="profile-menu"
-                role="menu"
                 style="top: 100%;"
                 class="hidden group-hover:block group-focus-within:block absolute right-0 bg-[#1e2235] border border-gray-700 rounded-lg p-3 min-w-[200px] z-50"
             >
