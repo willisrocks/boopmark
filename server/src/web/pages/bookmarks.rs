@@ -132,7 +132,10 @@ pub async fn list(
     };
 
     let filter = BookmarkFilter {
-        search: query.search,
+        search: query.search.and_then(|s| {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        }),
         tags: if active_tags.is_empty() {
             None
         } else {
@@ -145,15 +148,6 @@ pub async fn list(
     let bookmarks = with_bookmarks!(&state.bookmarks, svc => svc.list(user.id, filter).await)
         .unwrap_or_default();
 
-    let all_tags = collect_all_tags(&bookmarks);
-    let filter_tags: Vec<TagView> = all_tags
-        .into_iter()
-        .map(|name| {
-            let active = active_tags.contains(&name);
-            TagView { name, active }
-        })
-        .collect();
-
     let bookmark_views: Vec<BookmarkView> = bookmarks.into_iter().map(Into::into).collect();
 
     if is_htmx(&headers) {
@@ -161,6 +155,21 @@ pub async fn list(
             bookmarks: bookmark_views,
         })
     } else {
+        // Full-page load: query all distinct tags for the filter bar.
+        // This is a lightweight query (SELECT DISTINCT unnest(tags)) that
+        // returns the complete tag set regardless of active filters.
+        let all_tag_names = with_bookmarks!(&state.bookmarks, svc =>
+            svc.all_tags(user.id).await
+        )
+        .unwrap_or_default();
+        let filter_tags: Vec<TagView> = all_tag_names
+            .into_iter()
+            .map(|name| {
+                let active = active_tags.contains(&name);
+                TagView { name, active }
+            })
+            .collect();
+
         render(&GridPage {
             user: Some(user.into()),
             header_shows_bookmark_actions: true,
@@ -300,17 +309,6 @@ pub async fn delete(
         Ok(()) => Html("").into_response(),
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
-}
-
-fn collect_all_tags(bookmarks: &[Bookmark]) -> Vec<String> {
-    let mut tags: Vec<String> = bookmarks
-        .iter()
-        .flat_map(|b| b.tags.iter().cloned())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    tags.sort();
-    tags
 }
 
 fn fill_if_blank(current: Option<String>, suggested: Option<String>) -> String {

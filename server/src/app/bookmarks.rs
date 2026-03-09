@@ -83,6 +83,10 @@ where
         self.repo.delete(id, user_id).await
     }
 
+    pub async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError> {
+        self.repo.all_tags(user_id).await
+    }
+
     pub async fn extract_metadata(&self, url: &str) -> Result<UrlMetadata, DomainError> {
         self.metadata.extract(url).await
     }

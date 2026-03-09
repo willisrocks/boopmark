@@ -18,4 +18,5 @@ pub trait BookmarkRepository: Send + Sync {
         input: UpdateBookmark,
     ) -> Result<Bookmark, DomainError>;
     async fn delete(&self, id: Uuid, user_id: Uuid) -> Result<(), DomainError>;
+    async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError>;
 }
