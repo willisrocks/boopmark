@@ -1,4 +1,3 @@
-use crate::adapters::anthropic::AnthropicEnricher;
 use crate::adapters::postgres::PostgresPool;
 use crate::adapters::scraper::HtmlMetadataExtractor;
 use crate::adapters::storage::local::LocalStorage;
@@ -7,6 +6,7 @@ use crate::app::auth::AuthService;
 use crate::app::bookmarks::BookmarkService;
 use crate::app::settings::SettingsService;
 use crate::config::Config;
+use crate::domain::ports::llm_enricher::LlmEnricher;
 use std::sync::Arc;
 
 /// Application state shared across all request handlers.
@@ -19,7 +19,7 @@ pub struct AppState {
     pub auth: Arc<AuthService<PostgresPool, PostgresPool, PostgresPool>>,
     pub settings: Arc<SettingsService<PostgresPool>>,
     pub config: Arc<Config>,
-    pub enricher: Arc<AnthropicEnricher>,
+    pub enricher: Arc<dyn LlmEnricher>,
 }
 
 #[derive(Clone)]

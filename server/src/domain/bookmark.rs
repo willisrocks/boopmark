@@ -58,5 +58,4 @@ pub struct UrlMetadata {
     pub description: Option<String>,
     pub image_url: Option<String>,
     pub domain: Option<String>,
-    pub tags: Option<Vec<String>>,
 }

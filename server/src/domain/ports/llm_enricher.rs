@@ -1,4 +1,6 @@
 use crate::domain::error::DomainError;
+use std::future::Future;
+use std::pin::Pin;
 
 /// Raw scraped metadata sent to the LLM for enrichment.
 pub struct EnrichmentInput {
@@ -14,12 +16,11 @@ pub struct EnrichmentOutput {
     pub tags: Vec<String>,
 }
 
-#[trait_variant::make(Send)]
 pub trait LlmEnricher: Send + Sync {
-    async fn enrich(
+    fn enrich(
         &self,
         api_key: &str,
         model: &str,
         input: EnrichmentInput,
-    ) -> Result<EnrichmentOutput, DomainError>;
+    ) -> Pin<Box<dyn Future<Output = Result<EnrichmentOutput, DomainError>> + Send + '_>>;
 }

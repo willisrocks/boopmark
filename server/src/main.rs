@@ -14,6 +14,7 @@ use app::bookmarks::BookmarkService;
 use app::secrets::SecretBox;
 use app::settings::SettingsService;
 use config::{Config, StorageBackend};
+use domain::ports::llm_enricher::LlmEnricher;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use web::state::{AppState, Bookmarks};
@@ -77,7 +78,7 @@ async fn main() {
     let auth_service = Arc::new(AuthService::new(db.clone(), db.clone(), db.clone()));
     let secret_box = Arc::new(SecretBox::new(&config.llm_settings_encryption_key));
     let settings_service = Arc::new(SettingsService::new(db.clone(), secret_box));
-    let enricher = Arc::new(AnthropicEnricher::new());
+    let enricher: Arc<dyn LlmEnricher> = Arc::new(AnthropicEnricher::new());
 
     let state = AppState {
         bookmarks,

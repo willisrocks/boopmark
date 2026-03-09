@@ -7,11 +7,19 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UrlMetadata};
-use crate::domain::ports::llm_enricher::{EnrichmentInput, EnrichmentOutput, LlmEnricher};
+use crate::domain::ports::llm_enricher::{EnrichmentInput, EnrichmentOutput};
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
 use crate::web::pages::shared::UserView;
 use crate::web::state::{AppState, Bookmarks};
+
+fn non_empty(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
 
 macro_rules! with_bookmarks {
     ($bookmarks:expr, $svc:ident => $body:expr) => {
@@ -180,6 +188,7 @@ pub struct SuggestForm {
     url: String,
     title: Option<String>,
     description: Option<String>,
+    tags_input: Option<String>,
 }
 
 pub async fn create(
@@ -223,10 +232,14 @@ pub async fn suggest(
     // Attempt LLM enrichment if user has it configured
     let enrichment = try_llm_enrich(&state, user.id, &form.url, &metadata).await;
 
-    let suggest_tags = enrichment
-        .as_ref()
-        .map(|e| e.tags.join(", "))
-        .unwrap_or_default();
+    // Preserve user-typed tags; only use LLM tags if user hasn't typed any
+    let user_tags = form.tags_input.and_then(non_empty);
+    let suggest_tags = user_tags.unwrap_or_else(|| {
+        enrichment
+            .as_ref()
+            .map(|e| e.tags.join(", "))
+            .unwrap_or_default()
+    });
 
     render(&SuggestFields {
         suggest_title: fill_if_blank(
@@ -254,11 +267,14 @@ async fn try_llm_enrich(
     url: &str,
     metadata: &Option<UrlMetadata>,
 ) -> Option<EnrichmentOutput> {
-    let (api_key, model) = state
-        .settings
-        .get_decrypted_api_key(user_id)
-        .await
-        .ok()??;
+    let (api_key, model) = match state.settings.get_decrypted_api_key(user_id).await {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, error = %e, "failed to load LLM settings for enrichment");
+            return None;
+        }
+    };
 
     let input = EnrichmentInput {
         url: url.to_string(),
@@ -266,11 +282,13 @@ async fn try_llm_enrich(
         scraped_description: metadata.as_ref().and_then(|m| m.description.clone()),
     };
 
-    state
-        .enricher
-        .enrich(&api_key, &model, input)
-        .await
-        .ok()
+    match state.enricher.enrich(&api_key, &model, input).await {
+        Ok(output) => Some(output),
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, url = %url, error = %e, "LLM enrichment failed, falling back to scrape-only");
+            None
+        }
+    }
 }
 
 pub async fn delete(
@@ -300,12 +318,4 @@ fn fill_if_blank(current: Option<String>, suggested: Option<String>) -> String {
         .and_then(non_empty)
         .or_else(|| suggested.and_then(non_empty))
         .unwrap_or_default()
-}
-
-fn non_empty(value: String) -> Option<String> {
-    if value.trim().is_empty() {
-        None
-    } else {
-        Some(value)
-    }
 }

@@ -193,7 +193,6 @@ mod tests {
                 description: Some("Suggested description".to_string()),
                 image_url: Some("https://example.com/preview.png".to_string()),
                 domain: Some("github.com".to_string()),
-                tags: None,
             },
         );
 

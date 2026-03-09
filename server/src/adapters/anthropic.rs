@@ -1,6 +1,8 @@
 use crate::domain::error::DomainError;
 use crate::domain::ports::llm_enricher::{EnrichmentInput, EnrichmentOutput, LlmEnricher};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::pin::Pin;
 
 #[derive(Clone)]
 pub struct AnthropicEnricher {
@@ -65,8 +67,33 @@ struct EnrichmentJson {
     tags: Option<Vec<String>>,
 }
 
+/// Extract the first JSON object from a text response by finding the first `{` and last `}`.
+/// Handles markdown fences, leading text, or other noise the LLM may wrap around the JSON.
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end >= start {
+        Some(&text[start..=end])
+    } else {
+        None
+    }
+}
+
 impl LlmEnricher for AnthropicEnricher {
-    async fn enrich(
+    fn enrich(
+        &self,
+        api_key: &str,
+        model: &str,
+        input: EnrichmentInput,
+    ) -> Pin<Box<dyn Future<Output = Result<EnrichmentOutput, DomainError>> + Send + '_>> {
+        let api_key = api_key.to_string();
+        let model = model.to_string();
+        Box::pin(async move { self.do_enrich(&api_key, &model, input).await })
+    }
+}
+
+impl AnthropicEnricher {
+    async fn do_enrich(
         &self,
         api_key: &str,
         model: &str,
@@ -113,13 +140,10 @@ impl LlmEnricher for AnthropicEnricher {
             .find_map(|block| block.text)
             .ok_or_else(|| DomainError::Internal("Anthropic response had no text".to_string()))?;
 
-        // Parse the JSON from the response text, stripping any markdown fences
-        let json_str = text
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
+        // Extract the JSON object from the response, handling markdown fences
+        // or any leading/trailing text the LLM may have added
+        let json_str = extract_json_object(&text)
+            .ok_or_else(|| DomainError::Internal("LLM response contained no JSON object".to_string()))?;
 
         let parsed: EnrichmentJson = serde_json::from_str(json_str)
             .map_err(|e| DomainError::Internal(format!("LLM JSON parse error: {e}")))?;
@@ -173,13 +197,21 @@ mod tests {
     #[test]
     fn parse_enrichment_json_with_markdown_fences() {
         let text = "```json\n{\"title\": \"T\", \"description\": \"D\", \"tags\": [\"a\"]}\n```";
-        let json_str = text
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
+        let json_str = extract_json_object(text).unwrap();
         let parsed: EnrichmentJson = serde_json::from_str(json_str).unwrap();
         assert_eq!(parsed.title.as_deref(), Some("T"));
+    }
+
+    #[test]
+    fn parse_enrichment_json_with_leading_text() {
+        let text = "Here is the JSON:\n{\"title\": \"T\", \"description\": \"D\", \"tags\": [\"a\"]}";
+        let json_str = extract_json_object(text).unwrap();
+        let parsed: EnrichmentJson = serde_json::from_str(json_str).unwrap();
+        assert_eq!(parsed.title.as_deref(), Some("T"));
+    }
+
+    #[test]
+    fn extract_json_object_returns_none_for_no_braces() {
+        assert!(extract_json_object("no json here").is_none());
     }
 }
