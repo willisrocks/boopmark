@@ -22,19 +22,31 @@
         </button>
         {% if let Some(user) = user %}
         <div class="relative group">
-            {% if let Some(img) = user.image %}
-            <img src="{{ img }}" class="w-8 h-8 rounded-full cursor-pointer" alt="">
-            {% else %}
-            <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center cursor-pointer text-sm">
-                {{ user.email_initial }}
-            </div>
-            {% endif %}
-            <div class="hidden group-hover:block absolute right-0 top-10 bg-[#1e2235] border border-gray-700 rounded-lg p-3 min-w-[200px] z-50">
+            <button
+                type="button"
+                data-testid="profile-menu-trigger"
+                aria-label="Open profile menu"
+                class="block cursor-pointer"
+            >
+                {% if let Some(img) = user.image %}
+                <img src="{{ img }}" class="w-8 h-8 rounded-full" alt="">
+                {% else %}
+                <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-sm">
+                    {{ user.email_initial }}
+                </div>
+                {% endif %}
+            </button>
+            <div aria-hidden="true" class="absolute right-0 h-3 min-w-[200px]" style="top: 100%;"></div>
+            <div
+                data-testid="profile-menu"
+                style="top: 100%;"
+                class="hidden group-hover:block group-focus-within:block absolute right-0 bg-[#1e2235] border border-gray-700 rounded-lg p-3 min-w-[200px] z-50"
+            >
                 <p class="text-sm text-gray-400">{{ user.display_name }}</p>
                 <p class="text-xs text-gray-500 mb-2">{{ user.email }}</p>
-                <a href="/settings/api-keys" class="block text-sm text-gray-300 hover:text-white py-1">API Keys</a>
+                <a href="/settings/api-keys" data-testid="profile-menu-api-keys" class="block text-sm text-gray-300 hover:text-white py-1">API Keys</a>
                 <form method="post" action="/auth/logout">
-                    <button class="text-sm text-gray-300 hover:text-white py-1">Sign Out</button>
+                    <button data-testid="profile-menu-sign-out" class="text-sm text-gray-300 hover:text-white py-1">Sign Out</button>
                 </form>
             </div>
         </div>

@@ -1,5 +1,6 @@
 mod auth;
 pub mod bookmarks;
+mod settings;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -14,6 +15,7 @@ pub fn routes() -> Router<AppState> {
         .route("/bookmarks/suggest", post(bookmarks::suggest))
         .route("/bookmarks/{id}", delete(bookmarks::delete))
         .merge(auth::routes())
+        .merge(settings::routes())
 }
 
 async fn home(MaybeUser(user): MaybeUser) -> axum::response::Redirect {
