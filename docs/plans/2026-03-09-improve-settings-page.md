@@ -4,7 +4,7 @@
 
 **Goal:** Make `/settings` clearly reflect saved Anthropic configuration, offer the current official Anthropic model IDs for new selections, and render the page inside BoopMark's normal app shell without breaking encrypted settings persistence.
 
-**Architecture:** Keep the existing encrypted `user_llm_settings` storage and route structure, but move the official Anthropic choices to a server-owned allow-list so the service, template, and tests all use the same labels and full API values. Do not silently migrate or overwrite previously saved non-official model strings: if a user already has one stored, render it as the current selected value alongside the three current official options and preserve it on unrelated saves until the user explicitly chooses a different model. Reuse the existing header component on Settings by passing the same user view data plus a simple page-context flag so BoopMark branding and navigation stay visible while header controls remain safe off the bookmarks grid. Preserve the current keep/replace/clear key semantics: the UI never rehydrates the secret, it only shows truthful saved-state messaging, replace state, or cleared state.
+**Architecture:** Keep the existing encrypted `user_llm_settings` storage and route structure, but move the official Anthropic choices to a server-owned allow-list so the service, template, and tests all use the same labels and full API values. Do not silently migrate or overwrite previously saved non-official model strings: if a user already has one stored, render it as the current selected value alongside the three current official options and preserve it on unrelated saves until the user explicitly chooses a different model. Enforce that distinction on save: new submissions may only choose one of the official allow-listed values, except that the currently stored legacy/custom value may be re-submitted unchanged so unrelated saves do not destroy it. Reuse the existing header component on Settings by passing the same user view data plus a simple page-context flag so BoopMark branding and navigation stay visible while header controls remain safe off the bookmarks grid. Preserve the current keep/replace/clear key semantics: the UI never rehydrates the secret, it only shows truthful saved-state messaging, replace state, or cleared state.
 
 **Tech Stack:** Rust, Axum, Askama templates, Tailwind CSS, Playwright
 
@@ -79,7 +79,7 @@ await expect(page.getByLabel("Anthropic API key")).toBeEditable();
 
 Keep the helper that reads `ANTHROPIC_API_KEY` from the copied worktree `.env`; do not add a fake fallback.
 
-Also add one browser assertion that only the official values are present in the model select:
+Also add one browser assertion for the fresh/default path after `resetSettings(page)` has already saved an official model value:
 
 ```js
 await expect(page.locator("#anthropic_model option")).toHaveValues([
@@ -88,6 +88,8 @@ await expect(page.locator("#anthropic_model option")).toHaveValues([
   "claude-haiku-4-5-20251001",
 ]);
 ```
+
+Document in the test name or comments that this exact-three-options assertion is for the normal official-only path. The preserved-legacy path is covered separately in unit tests because the E2E reset helper intentionally leaves the account on an official model before the main assertions run.
 
 **Step 3: Run the browser spec and verify it fails on current code**
 
@@ -205,6 +207,25 @@ let view = service
 assert_eq!(view.anthropic_model, "claude-3-7-sonnet-latest");
 ```
 
+Add one save-path test proving a newly submitted unsupported model is rejected instead of being written through:
+
+```rust
+let err = service
+    .save(
+        user_id,
+        SaveLlmSettingsInput {
+            enabled: true,
+            anthropic_api_key: None,
+            clear_anthropic_api_key: false,
+            anthropic_model: Some("claude-3-7-sonnet-latest".into()),
+        },
+    )
+    .await
+    .expect_err("unsupported submitted model should fail");
+
+assert!(matches!(err, DomainError::InvalidInput(_)));
+```
+
 **Step 2: Run the unit tests and verify they fail**
 
 Run:
@@ -217,6 +238,7 @@ Expected:
 - FAIL because the default model constant is still `claude-haiku-4-5`.
 - FAIL because there is no shared allow-list for the three official model IDs.
 - FAIL because there is no explicit test coverage protecting existing custom model values from being overwritten on load or unrelated saves.
+- FAIL because a newly submitted unsupported model still saves successfully instead of being rejected.
 
 **Step 3: Implement the shared model metadata and normalization**
 
@@ -246,7 +268,7 @@ pub const ANTHROPIC_MODEL_OPTIONS: [AnthropicModelOption; 3] = [
 ];
 ```
 
-Update `normalize_model` in `server/src/app/settings.rs`:
+Keep `normalize_model` for load/display normalization only:
 
 ```rust
 fn normalize_model(model: Option<String>) -> String {
@@ -258,6 +280,36 @@ fn normalize_model(model: Option<String>) -> String {
 ```
 
 Keep normalization intentionally narrow: blank submissions still resolve to the new default `claude-haiku-4-5-20251001`, but any non-empty current value is preserved so an unrelated settings save cannot destroy an existing model choice.
+
+Add a dedicated save-path validator in `server/src/app/settings.rs` that enforces the allow-list while still permitting the already-stored legacy value to round-trip unchanged:
+
+```rust
+fn resolve_model_for_save(
+    existing: Option<&LlmSettings>,
+    submitted: Option<String>,
+) -> Result<String, DomainError> {
+    let normalized = normalize_model(submitted);
+    if ANTHROPIC_MODEL_OPTIONS
+        .iter()
+        .any(|option| option.value == normalized)
+    {
+        return Ok(normalized);
+    }
+
+    if existing
+        .map(|settings| settings.anthropic_model.trim() == normalized)
+        .unwrap_or(false)
+    {
+        return Ok(normalized);
+    }
+
+    Err(DomainError::InvalidInput(
+        "Unsupported Anthropic model selection".into(),
+    ))
+}
+```
+
+Update `SettingsService::save` to load the existing settings before validation, call `resolve_model_for_save(existing.as_ref(), input.anthropic_model)`, and return `DomainError::InvalidInput` for any forged unsupported submission that is not the already-stored current value.
 
 **Step 4: Run the unit tests and verify they pass**
 
@@ -369,7 +421,7 @@ struct SettingsPage {
 }
 ```
 
-Populate `user: Some(user.clone().into())`, `header_shows_bookmark_actions: false`, and build `anthropic_model_options` from `ANTHROPIC_MODEL_OPTIONS`, prepending one selected preservation option only when the current saved value is not one of the three official values:
+Populate `user: Some(user.clone().into())`, `header_shows_bookmark_actions: false`, and build `anthropic_model_options` from a small helper in `server/src/web/pages/settings.rs`, prepending one selected preservation option only when the current saved value is not one of the three official values:
 
 ```rust
 ModelOptionView {
@@ -380,6 +432,18 @@ ModelOptionView {
 ```
 
 That preservation option is not a new recommendation and should appear only when the database already contains a non-official model value. Its job is to keep existing persistence intact until the user explicitly chooses one of the official options.
+
+Add unit tests for that helper in `server/src/web/pages/settings.rs`:
+
+```rust
+#[test]
+fn official_models_render_only_the_three_official_options() { ... }
+
+#[test]
+fn legacy_saved_model_gets_one_preservation_option_plus_the_official_options() { ... }
+```
+
+That keeps the legacy-preservation branch verifiable without making the main E2E path contradictory.
 
 **Step 2: Make the shared header safe on `/settings`**
 
@@ -403,6 +467,8 @@ Update `templates/components/header.html` so:
 ```
 
 Do this only after `GridPage` is already supplying `header_shows_bookmark_actions: true`; otherwise `/bookmarks` will stop rendering. The settings branch keeps the header visible and gives a deterministic path back to the rest of the app without targeting a missing `#bookmark-grid` or missing add-bookmark modal.
+
+While you are already in `server/src/web/pages/settings.rs`, update the POST handler to translate `DomainError::InvalidInput` from the new save validator into `400 Bad Request` instead of a generic `500`, so forged unsupported submissions are rejected cleanly.
 
 **Step 3: Replace the isolated settings card behavior with the new form UX**
 
