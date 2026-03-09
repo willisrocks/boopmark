@@ -14,6 +14,7 @@ impl HtmlMetadataExtractor {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
+                .user_agent("Boopmark/1.0 (+https://boopmark.app)")
                 .build()
                 .unwrap(),
         }
@@ -51,7 +52,11 @@ impl MetadataExtractor for HtmlMetadataExtractor {
         let description = select_meta(&document, "og:description")
             .or_else(|| select_meta_name(&document, "description"));
 
-        let image_url = select_meta(&document, "og:image").map(|img| resolve_url(url_str, &img));
+        let image_url = select_meta(&document, "og:image")
+            .or_else(|| select_meta_name(&document, "og:image"))
+            .or_else(|| select_meta(&document, "twitter:image"))
+            .or_else(|| select_meta_name(&document, "twitter:image"))
+            .map(|img| resolve_url(url_str, &img));
 
         Ok(UrlMetadata {
             title,
@@ -90,4 +95,93 @@ fn resolve_url(base: &str, relative: &str) -> String {
         .and_then(|b| b.join(relative))
         .map(|u| u.to_string())
         .unwrap_or_else(|_| relative.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_og_image_from_property() {
+        let html = Html::parse_document(
+            r#"<html><head>
+                <meta property="og:image" content="https://example.com/image.png">
+                <meta property="og:title" content="Test Title">
+                <meta property="og:description" content="Test Desc">
+            </head><body></body></html>"#,
+        );
+        let img = select_meta(&html, "og:image");
+        assert_eq!(img, Some("https://example.com/image.png".to_string()));
+    }
+
+    #[test]
+    fn falls_back_to_name_attribute() {
+        let html = Html::parse_document(
+            r#"<html><head>
+                <meta name="og:image" content="https://example.com/name.png">
+            </head><body></body></html>"#,
+        );
+        // select_meta (property) should return None
+        assert_eq!(select_meta(&html, "og:image"), None);
+        // select_meta_name should find it
+        let img = select_meta_name(&html, "og:image");
+        assert_eq!(img, Some("https://example.com/name.png".to_string()));
+    }
+
+    #[test]
+    fn falls_back_to_twitter_image() {
+        let html = Html::parse_document(
+            r#"<html><head>
+                <meta name="twitter:image" content="https://example.com/tw.png">
+            </head><body></body></html>"#,
+        );
+        let img = select_meta(&html, "og:image")
+            .or_else(|| select_meta_name(&html, "og:image"))
+            .or_else(|| select_meta(&html, "twitter:image"))
+            .or_else(|| select_meta_name(&html, "twitter:image"));
+        assert_eq!(img, Some("https://example.com/tw.png".to_string()));
+    }
+
+    #[test]
+    fn no_image_meta_returns_none() {
+        let html = Html::parse_document(
+            r#"<html><head><title>No images</title></head><body></body></html>"#,
+        );
+        let img = select_meta(&html, "og:image")
+            .or_else(|| select_meta_name(&html, "og:image"))
+            .or_else(|| select_meta(&html, "twitter:image"))
+            .or_else(|| select_meta_name(&html, "twitter:image"));
+        assert_eq!(img, None);
+    }
+
+    #[test]
+    fn resolve_url_handles_absolute() {
+        assert_eq!(
+            resolve_url("https://example.com/page", "https://cdn.example.com/img.jpg"),
+            "https://cdn.example.com/img.jpg"
+        );
+    }
+
+    #[test]
+    fn resolve_url_handles_relative() {
+        assert_eq!(
+            resolve_url("https://example.com/page", "/img.jpg"),
+            "https://example.com/img.jpg"
+        );
+    }
+
+    #[test]
+    fn og_image_takes_priority_over_twitter_image() {
+        let html = Html::parse_document(
+            r#"<html><head>
+                <meta property="og:image" content="https://example.com/og.png">
+                <meta name="twitter:image" content="https://example.com/tw.png">
+            </head><body></body></html>"#,
+        );
+        let img = select_meta(&html, "og:image")
+            .or_else(|| select_meta_name(&html, "og:image"))
+            .or_else(|| select_meta(&html, "twitter:image"))
+            .or_else(|| select_meta_name(&html, "twitter:image"));
+        assert_eq!(img, Some("https://example.com/og.png".to_string()));
+    }
 }

@@ -70,7 +70,11 @@ where
     }
 
     async fn download_and_store_image(&self, image_url: &str) -> Result<String, DomainError> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .user_agent("Boopmark/1.0 (+https://boopmark.app)")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| DomainError::Internal(format!("client build error: {e}")))?;
         let resp = client.get(image_url).send().await
             .map_err(|e| DomainError::Internal(format!("image fetch error: {e}")))?;
 
