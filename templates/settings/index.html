@@ -35,24 +35,11 @@
                         class="rounded-lg border border-gray-700 bg-[#1a1d2e] px-4 py-3"
                     >
                         <p class="text-sm font-medium text-gray-200">Anthropic API key saved securely.</p>
-                        <p class="text-xs text-gray-400 mt-1">Choose one action below: keep using it, replace it, or remove it.</p>
                     </div>
-                    <fieldset class="space-y-3">
-                        <legend class="text-sm font-medium text-gray-200">Saved key action</legend>
-                        <label class="flex items-start gap-2 text-sm text-gray-300">
-                            <input type="radio" name="anthropic_api_key_action" value="keep" aria-label="Keep current saved key" checked>
-                            <span>Keep current saved key</span>
-                        </label>
-                        <label class="flex items-start gap-2 text-sm text-gray-300">
-                            <input type="radio" name="anthropic_api_key_action" value="replace" aria-label="Replace saved key">
-                            <span>Replace saved key</span>
-                        </label>
-                        <label class="flex items-start gap-2 text-sm text-gray-300">
-                            <input type="radio" name="anthropic_api_key_action" value="clear" aria-label="Clear saved key">
-                            <span>Clear saved key</span>
-                        </label>
-                        <div id="anthropic-api-key-action-region"></div>
-                    </fieldset>
+                    <label class="flex items-center gap-2 text-sm text-gray-300">
+                        <input type="checkbox" name="delete_anthropic_api_key" data-testid="delete-anthropic-api-key">
+                        <span>Delete saved key</span>
+                    </label>
                     {% else %}
                     <input
                         id="anthropic_api_key"
@@ -86,51 +73,4 @@
         </section>
     </div>
 </main>
-{% if has_anthropic_api_key %}
-<template id="anthropic-api-key-replacement-template">
-    <div data-testid="anthropic-api-key-replacement" class="space-y-2">
-        <label for="anthropic_api_key_replacement" class="block text-sm font-medium text-gray-200">Replacement Anthropic API key</label>
-        <input
-            id="anthropic_api_key_replacement"
-            name="anthropic_api_key"
-            type="password"
-            autocomplete="off"
-            class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
-        >
-    </div>
-</template>
-<template id="anthropic-api-key-clear-template">
-    <p class="text-xs text-gray-400">Saving will remove the stored Anthropic API key.</p>
-</template>
-<script>
-    const actionRegion = document.getElementById("anthropic-api-key-action-region");
-    const replacementTemplate = document.getElementById("anthropic-api-key-replacement-template");
-    const clearTemplate = document.getElementById("anthropic-api-key-clear-template");
-    const actionInputs = document.querySelectorAll('input[name="anthropic_api_key_action"]');
-
-    function renderAnthropicApiKeyAction() {
-        const selected = document.querySelector('input[name="anthropic_api_key_action"]:checked');
-        actionRegion.replaceChildren();
-
-        if (!selected) {
-            return;
-        }
-
-        if (selected.value === "replace") {
-            actionRegion.appendChild(replacementTemplate.content.cloneNode(true));
-            return;
-        }
-
-        if (selected.value === "clear") {
-            actionRegion.appendChild(clearTemplate.content.cloneNode(true));
-        }
-    }
-
-    actionInputs.forEach((input) => {
-        input.addEventListener("change", renderAnthropicApiKeyAction);
-    });
-
-    renderAnthropicApiKeyAction();
-</script>
-{% endif %}
 {% endblock %}

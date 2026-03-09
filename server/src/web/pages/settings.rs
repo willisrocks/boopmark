@@ -44,7 +44,7 @@ struct SettingsQuery {
 #[derive(Deserialize)]
 struct SettingsForm {
     llm_enabled: Option<String>,
-    anthropic_api_key_action: Option<String>,
+    delete_anthropic_api_key: Option<String>,
     anthropic_api_key: Option<String>,
     anthropic_model: Option<String>,
 }
@@ -109,24 +109,15 @@ async fn save_settings(
     Form(form): Form<SettingsForm>,
 ) -> axum::response::Response {
     let enabled = form.llm_enabled.is_some();
-    let api_key_action = form.anthropic_api_key_action.as_deref();
+    let delete_key = form.delete_anthropic_api_key.is_some();
     let submitted_api_key = form
         .anthropic_api_key
         .filter(|value| !value.trim().is_empty());
 
-    let (anthropic_api_key, clear_anthropic_api_key) = match api_key_action {
-        Some("replace") if submitted_api_key.is_none() => {
-            return axum::http::StatusCode::BAD_REQUEST.into_response();
-        }
-        Some("replace") => (submitted_api_key.clone(), false),
-        Some("clear") => (None, true),
-        Some("keep") if submitted_api_key.is_some() => {
-            return axum::http::StatusCode::BAD_REQUEST.into_response();
-        }
-        Some("keep") => (None, false),
-        None if submitted_api_key.is_some() => (submitted_api_key, false),
-        None => (None, false),
-        Some(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+    let (anthropic_api_key, clear_anthropic_api_key) = if delete_key {
+        (None, true)
+    } else {
+        (submitted_api_key, false)
     };
 
     match state
