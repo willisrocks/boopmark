@@ -8,6 +8,7 @@ pub struct Config {
     pub session_secret: String,
     pub google_client_id: String,
     pub google_client_secret: String,
+    pub enable_e2e_auth: bool,
     pub storage_backend: StorageBackend,
     pub s3_endpoint: Option<String>,
     pub s3_bucket: String,
@@ -29,11 +30,21 @@ impl Config {
         Self {
             database_url: env::var("DATABASE_URL").expect("DATABASE_URL required"),
             app_url: env::var("APP_URL").unwrap_or_else(|_| "http://localhost:4000".into()),
-            port: env::var("PORT").unwrap_or_else(|_| "4000".into()).parse().unwrap(),
+            port: env::var("PORT")
+                .unwrap_or_else(|_| "4000".into())
+                .parse()
+                .unwrap(),
             session_secret: env::var("SESSION_SECRET").expect("SESSION_SECRET required"),
             google_client_id: env::var("GOOGLE_CLIENT_ID").expect("GOOGLE_CLIENT_ID required"),
-            google_client_secret: env::var("GOOGLE_CLIENT_SECRET").expect("GOOGLE_CLIENT_SECRET required"),
-            storage_backend: match env::var("STORAGE_BACKEND").unwrap_or_else(|_| "local".into()).as_str() {
+            google_client_secret: env::var("GOOGLE_CLIENT_SECRET")
+                .expect("GOOGLE_CLIENT_SECRET required"),
+            enable_e2e_auth: env::var("ENABLE_E2E_AUTH")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+                .unwrap_or(false),
+            storage_backend: match env::var("STORAGE_BACKEND")
+                .unwrap_or_else(|_| "local".into())
+                .as_str()
+            {
                 "s3" => StorageBackend::S3,
                 _ => StorageBackend::Local,
             },

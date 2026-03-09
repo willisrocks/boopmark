@@ -1,7 +1,7 @@
+use super::PostgresPool;
 use crate::domain::error::DomainError;
 use crate::domain::ports::user_repo::UserRepository;
 use crate::domain::user::{CreateUser, User};
-use super::PostgresPool;
 use uuid::Uuid;
 
 impl UserRepository for PostgresPool {

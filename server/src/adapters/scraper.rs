@@ -52,8 +52,7 @@ impl MetadataExtractor for HtmlMetadataExtractor {
         let description = select_meta(&document, "og:description")
             .or_else(|| select_meta_name(&document, "description"));
 
-        let image_url = extract_image_url(&document)
-            .map(|img| resolve_url(url_str, &img));
+        let image_url = extract_image_url(&document).map(|img| resolve_url(url_str, &img));
 
         Ok(UrlMetadata {
             title,
@@ -141,7 +140,10 @@ mod tests {
                 <meta name="twitter:image" content="https://example.com/tw.png">
             </head><body></body></html>"#,
         );
-        assert_eq!(extract_image_url(&html), Some("https://example.com/tw.png".to_string()));
+        assert_eq!(
+            extract_image_url(&html),
+            Some("https://example.com/tw.png".to_string())
+        );
     }
 
     #[test]
@@ -155,7 +157,10 @@ mod tests {
     #[test]
     fn resolve_url_handles_absolute() {
         assert_eq!(
-            resolve_url("https://example.com/page", "https://cdn.example.com/img.jpg"),
+            resolve_url(
+                "https://example.com/page",
+                "https://cdn.example.com/img.jpg"
+            ),
             "https://cdn.example.com/img.jpg"
         );
     }
@@ -176,15 +181,15 @@ mod tests {
                 <meta name="twitter:image" content="https://example.com/tw.png">
             </head><body></body></html>"#,
         );
-        assert_eq!(extract_image_url(&html), Some("https://example.com/og.png".to_string()));
+        assert_eq!(
+            extract_image_url(&html),
+            Some("https://example.com/og.png".to_string())
+        );
     }
 
     #[test]
     fn resolve_url_handles_data_uri() {
         let data_uri = "data:image/png;base64,iVBORw0KGgo=";
-        assert_eq!(
-            resolve_url("https://example.com/page", data_uri),
-            data_uri
-        );
+        assert_eq!(resolve_url("https://example.com/page", data_uri), data_uri);
     }
 }

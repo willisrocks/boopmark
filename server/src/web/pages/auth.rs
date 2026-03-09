@@ -1,7 +1,7 @@
 use askama::Template;
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Redirect};
-use axum::Router;
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use serde::Deserialize;
 
@@ -9,18 +9,25 @@ use crate::web::state::AppState;
 
 #[derive(Template)]
 #[template(path = "auth/login.html")]
-struct LoginPage;
+struct LoginPage {
+    enable_e2e_auth: bool,
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/auth/login", axum::routing::get(login_page))
+        .route("/auth/test-login", axum::routing::post(test_login))
         .route("/auth/google", axum::routing::get(google_redirect))
         .route("/auth/google/callback", axum::routing::get(google_callback))
         .route("/auth/logout", axum::routing::post(logout))
 }
 
-async fn login_page() -> impl IntoResponse {
-    match LoginPage.render() {
+async fn login_page(State(state): State<AppState>) -> impl IntoResponse {
+    let page = LoginPage {
+        enable_e2e_auth: state.config.enable_e2e_auth,
+    };
+
+    match page.render() {
         Ok(body) => Html(body).into_response(),
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -99,14 +106,39 @@ async fn google_callback(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let cookie = Cookie::build(("session", session_token))
-        .path("/")
-        .http_only(true)
-        .secure(true)
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .build();
+    let cookie = build_session_cookie(&state.config, session_token);
 
     Ok((jar.add(cookie), Redirect::to("/")))
+}
+
+async fn test_login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<(CookieJar, Redirect), axum::http::StatusCode> {
+    if !state.config.enable_e2e_auth {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    let user = state
+        .auth
+        .upsert_user(
+            "e2e@boopmark.local".to_string(),
+            Some("Boopmark E2E".to_string()),
+            None,
+        )
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let token = state
+        .auth
+        .create_session(user.id)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok((
+        jar.add(build_session_cookie(&state.config, token)),
+        Redirect::to("/"),
+    ))
 }
 
 /// Delete the session and clear the cookie.
@@ -118,9 +150,7 @@ async fn logout(
         let _ = state.auth.delete_session(cookie.value()).await;
     }
 
-    let removal = Cookie::build(("session", ""))
-        .path("/")
-        .build();
+    let removal = Cookie::build(("session", "")).path("/").build();
 
     Ok((jar.remove(removal), Redirect::to("/")))
 }
@@ -144,4 +174,13 @@ struct GoogleUserInfo {
 
 fn urlencoding(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+fn build_session_cookie(config: &crate::config::Config, token: String) -> Cookie<'static> {
+    Cookie::build(("session", token))
+        .path("/")
+        .http_only(true)
+        .secure(config.app_url.starts_with("https://"))
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .build()
 }

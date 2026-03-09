@@ -51,7 +51,9 @@ async fn main() {
             )))
         }
         StorageBackend::S3 => {
-            let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+            let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .load()
+                .await;
             let s3_client = aws_sdk_s3::Client::new(&s3_config);
             let storage = Arc::new(S3Storage::new(
                 s3_client,
@@ -61,7 +63,11 @@ async fn main() {
                     .clone()
                     .unwrap_or_else(|| format!("https://{}.s3.amazonaws.com", config.s3_bucket)),
             ));
-            Bookmarks::S3(Arc::new(BookmarkService::new(db.clone(), metadata, storage)))
+            Bookmarks::S3(Arc::new(BookmarkService::new(
+                db.clone(),
+                metadata,
+                storage,
+            )))
         }
     };
 

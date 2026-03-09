@@ -9,6 +9,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Run server:** `cargo run -p boopmark-server`
 - **Run CLI:** `cargo run -p boop`
 - **Local dev stack:** `docker compose up`
+- **Run suggest E2E:** `npx playwright test tests/e2e/suggest.spec.js`
+
+## Testing Notes
+
+- The committed Playwright harness starts its own dedicated E2E server via `scripts/e2e/start-server.sh` on `http://127.0.0.1:4010`; do not point it at an already-running dev server on port `4000`.
+- The E2E bootstrap script sets its own env inline, including `ENABLE_E2E_AUTH=1` and `STORAGE_BACKEND=local`, then waits for Postgres readiness before starting the server.
+- Use Playwright MCP or agent-browser for ad-hoc verification against the same local server, but keep the committed regression in `tests/e2e/suggest.spec.js` as the source of truth.
 
 ## Architecture
 

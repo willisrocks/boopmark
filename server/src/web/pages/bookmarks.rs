@@ -1,8 +1,8 @@
 use askama::Template;
+use axum::Form;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
-use axum::Form;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -86,6 +86,9 @@ struct GridPage {
     bookmarks: Vec<BookmarkView>,
     filter_tags: Vec<TagView>,
     sort: String,
+    suggest_title: String,
+    suggest_description: String,
+    suggest_preview_image_url: Option<String>,
 }
 
 #[derive(Template)]
@@ -98,6 +101,14 @@ struct BookmarkList {
 #[template(path = "bookmarks/card.html")]
 struct BookmarkCard {
     bookmark: BookmarkView,
+}
+
+#[derive(Template)]
+#[template(path = "bookmarks/add_modal_suggest_fields.html")]
+struct SuggestFields {
+    suggest_title: String,
+    suggest_description: String,
+    suggest_preview_image_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -163,6 +174,9 @@ pub async fn list(
             bookmarks: bookmark_views,
             filter_tags,
             sort: sort_str,
+            suggest_title: String::new(),
+            suggest_description: String::new(),
+            suggest_preview_image_url: None,
         })
     }
 }
@@ -173,6 +187,13 @@ pub struct CreateForm {
     title: Option<String>,
     description: Option<String>,
     tags_input: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SuggestForm {
+    url: String,
+    title: Option<String>,
+    description: Option<String>,
 }
 
 pub async fn create(
@@ -202,6 +223,30 @@ pub async fn create(
     }
 }
 
+pub async fn suggest(
+    State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
+    Form(form): Form<SuggestForm>,
+) -> axum::response::Response {
+    let metadata = if form.url.trim().is_empty() {
+        None
+    } else {
+        with_bookmarks!(&state.bookmarks, svc => svc.extract_metadata(&form.url).await).ok()
+    };
+
+    render(&SuggestFields {
+        suggest_title: fill_if_blank(
+            form.title,
+            metadata.as_ref().and_then(|meta| meta.title.clone()),
+        ),
+        suggest_description: fill_if_blank(
+            form.description,
+            metadata.as_ref().and_then(|meta| meta.description.clone()),
+        ),
+        suggest_preview_image_url: metadata.and_then(|meta| meta.image_url),
+    })
+}
+
 pub async fn delete(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -222,4 +267,19 @@ fn collect_all_tags(bookmarks: &[Bookmark]) -> Vec<String> {
         .collect();
     tags.sort();
     tags
+}
+
+fn fill_if_blank(current: Option<String>, suggested: Option<String>) -> String {
+    current
+        .and_then(non_empty)
+        .or_else(|| suggested.and_then(non_empty))
+        .unwrap_or_default()
+}
+
+fn non_empty(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }

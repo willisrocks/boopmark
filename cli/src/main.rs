@@ -239,9 +239,7 @@ async fn run(cli: Cli) -> Result<(), String> {
 
         Commands::Search { query } => {
             let client = AppConfig::load().client()?;
-            let resp = client
-                .get(&format!("/bookmarks?search={query}"))
-                .await?;
+            let resp = client.get(&format!("/bookmarks?search={query}")).await?;
             let bookmarks: Vec<Bookmark> = resp.json().await.map_err(|e| e.to_string())?;
             for bm in &bookmarks {
                 println!(

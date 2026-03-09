@@ -1,7 +1,7 @@
-use aws_sdk_s3::Client;
-use aws_sdk_s3::primitives::ByteStream;
 use crate::domain::error::DomainError;
 use crate::domain::ports::storage::ObjectStorage;
+use aws_sdk_s3::Client;
+use aws_sdk_s3::primitives::ByteStream;
 
 #[derive(Clone)]
 pub struct S3Storage {
@@ -12,12 +12,21 @@ pub struct S3Storage {
 
 impl S3Storage {
     pub fn new(client: Client, bucket: String, public_url: String) -> Self {
-        Self { client, bucket, public_url }
+        Self {
+            client,
+            bucket,
+            public_url,
+        }
     }
 }
 
 impl ObjectStorage for S3Storage {
-    async fn put(&self, key: &str, data: Vec<u8>, content_type: &str) -> Result<String, DomainError> {
+    async fn put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> Result<String, DomainError> {
         self.client
             .put_object()
             .bucket(&self.bucket)
@@ -31,14 +40,18 @@ impl ObjectStorage for S3Storage {
     }
 
     async fn get(&self, key: &str) -> Result<Vec<u8>, DomainError> {
-        let resp = self.client
+        let resp = self
+            .client
             .get_object()
             .bucket(&self.bucket)
             .key(key)
             .send()
             .await
             .map_err(|e| DomainError::Internal(format!("S3 get error: {e}")))?;
-        let bytes = resp.body.collect().await
+        let bytes = resp
+            .body
+            .collect()
+            .await
             .map_err(|e| DomainError::Internal(format!("S3 read error: {e}")))?;
         Ok(bytes.to_vec())
     }

@@ -1,10 +1,15 @@
+use super::PostgresPool;
 use crate::domain::error::DomainError;
 use crate::domain::ports::api_key_repo::{ApiKey, ApiKeyRepository};
-use super::PostgresPool;
 use uuid::Uuid;
 
 impl ApiKeyRepository for PostgresPool {
-    async fn create(&self, user_id: Uuid, key_hash: &str, name: &str) -> Result<ApiKey, DomainError> {
+    async fn create(
+        &self,
+        user_id: Uuid,
+        key_hash: &str,
+        name: &str,
+    ) -> Result<ApiKey, DomainError> {
         sqlx::query_as::<_, ApiKey>(
             "INSERT INTO api_keys (user_id, key_hash, name) VALUES ($1, $2, $3)
              RETURNING id, user_id, key_hash, name, created_at",
