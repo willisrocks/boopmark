@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark};
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
+use crate::web::pages::shared::UserView;
 use crate::web::state::{AppState, Bookmarks};
 
 macro_rules! with_bookmarks {
@@ -45,27 +46,6 @@ impl From<Bookmark> for BookmarkView {
     }
 }
 
-/// Pre-computed view of a user for templates.
-struct UserView {
-    email: String,
-    display_name: String,
-    email_initial: String,
-    image: Option<String>,
-}
-
-impl From<crate::domain::user::User> for UserView {
-    fn from(u: crate::domain::user::User) -> Self {
-        let email_initial = u.email.chars().next().unwrap_or('?').to_string();
-        let display_name = u.name.clone().unwrap_or_default();
-        Self {
-            email: u.email,
-            display_name,
-            email_initial,
-            image: u.image,
-        }
-    }
-}
-
 /// Tag with pre-computed active state for the filter bar.
 struct TagView {
     name: String,
@@ -83,6 +63,7 @@ fn render(t: &impl Template) -> axum::response::Response {
 #[template(path = "bookmarks/grid.html")]
 struct GridPage {
     user: Option<UserView>,
+    header_shows_bookmark_actions: bool,
     bookmarks: Vec<BookmarkView>,
     filter_tags: Vec<TagView>,
     sort: String,
@@ -171,6 +152,7 @@ pub async fn list(
     } else {
         render(&GridPage {
             user: Some(user.into()),
+            header_shows_bookmark_actions: true,
             bookmarks: bookmark_views,
             filter_tags,
             sort: sort_str,

@@ -1,8 +1,9 @@
-<header class="flex items-center justify-between px-6 py-3 border-b border-gray-800">
-    <div class="flex items-center gap-2">
+<header class="flex items-center justify-between gap-4 px-6 py-3 border-b border-gray-800" role="banner">
+    <a href="/bookmarks" class="flex items-center gap-2">
         <span class="text-red-500 text-xl">&#128278;</span>
         <span class="font-bold text-lg">BoopMark</span>
-    </div>
+    </a>
+    {% if header_shows_bookmark_actions %}
     <div class="flex-1 max-w-xl mx-8">
         <input type="search"
                name="search"
@@ -52,4 +53,48 @@
         </div>
         {% endif %}
     </div>
+    {% else %}
+    <form action="/bookmarks" method="get" class="flex-1 max-w-xl mx-8">
+        <input type="search"
+               name="search"
+               placeholder="Search bookmarks..."
+               class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500">
+    </form>
+    <div class="flex items-center gap-4">
+        <a href="/bookmarks" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
+            Back to bookmarks
+        </a>
+        {% if let Some(user) = user %}
+        <div class="relative group">
+            <button
+                type="button"
+                data-testid="profile-menu-trigger"
+                aria-label="Open profile menu"
+                class="block cursor-pointer"
+            >
+                {% if let Some(img) = user.image %}
+                <img src="{{ img }}" class="w-8 h-8 rounded-full" alt="">
+                {% else %}
+                <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-sm">
+                    {{ user.email_initial }}
+                </div>
+                {% endif %}
+            </button>
+            <div aria-hidden="true" class="absolute right-0 h-3 min-w-[200px]" style="top: 100%;"></div>
+            <div
+                data-testid="profile-menu"
+                style="top: 100%;"
+                class="hidden group-hover:block group-focus-within:block absolute right-0 bg-[#1e2235] border border-gray-700 rounded-lg p-3 min-w-[200px] z-50"
+            >
+                <p class="text-sm text-gray-400">{{ user.display_name }}</p>
+                <p class="text-xs text-gray-500 mb-2">{{ user.email }}</p>
+                <a href="/settings" data-testid="profile-menu-settings" class="block text-sm text-gray-300 hover:text-white py-1">Settings</a>
+                <form method="post" action="/auth/logout">
+                    <button data-testid="profile-menu-sign-out" class="text-sm text-gray-300 hover:text-white py-1">Sign Out</button>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
 </header>

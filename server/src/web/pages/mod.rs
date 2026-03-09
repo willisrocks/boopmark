@@ -1,6 +1,7 @@
 mod auth;
 pub mod bookmarks;
 mod settings;
+pub(crate) mod shared;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
