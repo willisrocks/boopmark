@@ -1,159 +1,180 @@
-# Settings + LLM Integration Implementation Plan
+# Settings LLM Integration Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
-**Goal:** Replace the `API Keys` stub with a real `Settings` page where each signed-in user can enable or disable Anthropic-backed LLM integration, save their own Anthropic API key, and default the model to `claude-haiku-4-5`.
+**Goal:** Replace the placeholder `API Keys` page with a real `Settings` page that lets each signed-in user enable or disable LLM integration, save an Anthropic API key, and use `claude-haiku-4-5` as the default Anthropic model.
 
-**Architecture:** Land the steady-state page directly at `/settings`, not `/settings/api-keys`. Add a dedicated per-user `llm_settings` persistence path in Postgres plus a small settings service, render the saved state through Askama, and submit through a Post/Redirect/Get save flow that never sends the stored Anthropic key back to the browser. For local agent-browser and Playwright E2E only, forward `ANTHROPIC_API_KEY` from the worktree `.env` into the E2E server bootstrap and let browser tests reuse that value when present; do not auto-populate user settings from env.
+**Architecture:** Do not bolt this onto the inbound `api_keys` auth table. Add a dedicated per-user `user_llm_settings` record with `enabled`, `anthropic_api_key`, and `anthropic_model`, then expose it through a small `SettingsService` used only by the `/settings` page handlers. Keep `.env` strictly in the local test harness: Playwright may read `ANTHROPIC_API_KEY` from the worktree `.env` to populate the form during local/browser testing, but the application must never auto-fill a user's saved settings from environment variables.
 
-**Tech Stack:** Rust, Axum, Askama, SQLx/Postgres, Tailwind CSS, Playwright
+**Tech Stack:** Rust, Axum, Askama templates, SQLx/PostgreSQL, Tailwind CSS, Playwright
 
 ---
 
-### Task 1: Rename the product surface from API Keys to Settings
+### Task 1: Prepare the local test harness and capture the new Settings expectations in failing Playwright specs
 
-Switch the visible product language and route first so the app shell points to the right destination before form and persistence work lands.
+Get the worktree ready for local testing, then write the browser tests first so the current `API Keys` stub fails for the right reasons: wrong route, wrong copy, missing form, and no save/reload behavior.
 
 **Files:**
-- Modify: `templates/components/header.html:47`
-- Modify: `server/src/web/pages/settings.rs:8-26`
-- Create: `templates/settings/index.html`
-- Delete: `templates/settings/api_keys.html`
-- Modify: `tests/e2e/profile-menu.spec.js:50-99`
+- Create: `tests/e2e/settings.spec.js`
+- Modify: `tests/e2e/profile-menu.spec.js`
+- Modify: `.env.example`
 
-**Step 1: Write the failing browser expectation for Settings**
-
-In `tests/e2e/profile-menu.spec.js`, replace the old API Keys selectors and assertions:
-
-```js
-const settingsLink = page.getByTestId("profile-menu-settings");
-...
-await settingsLink.click();
-await expect(page).toHaveURL(/\/settings$/);
-await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-```
-
-Update both navigation tests and the keyboard-focus test to stop referring to `profile-menu-api-keys`, `/settings/api-keys`, and `API Keys`.
-
-**Step 2: Run the existing profile-menu spec and verify it fails**
+**Step 1: Refresh the worktree `.env` from the main checkout before testing**
 
 Run:
 
 ```bash
-npx playwright test tests/e2e/profile-menu.spec.js
-```
-
-Expected: FAIL because the header still renders the old selector, link text, and route.
-
-**Step 3: Rewrite the header and route to `/settings`**
-
-Update `templates/components/header.html`:
-
-```html
-<a href="/settings" data-testid="profile-menu-settings" class="block text-sm text-gray-300 hover:text-white py-1">
-    Settings
-</a>
-```
-
-Replace the route shell in `server/src/web/pages/settings.rs`:
-
-```rust
-#[derive(Template)]
-#[template(path = "settings/index.html")]
-struct SettingsPage {
-    email: String,
-    llm_enabled: bool,
-    anthropic_model: String,
-    has_saved_anthropic_key: bool,
-    saved: bool,
-    error: Option<String>,
-}
-
-async fn settings_page(AuthUser(user): AuthUser) -> axum::response::Response {
-    render(&SettingsPage {
-        email: user.email,
-        llm_enabled: false,
-        anthropic_model: "claude-haiku-4-5".into(),
-        has_saved_anthropic_key: false,
-        saved: false,
-        error: None,
-    })
-}
-
-pub fn routes() -> Router<AppState> {
-    Router::new().route("/settings", axum::routing::get(settings_page))
-}
-```
-
-Create `templates/settings/index.html` with the new page heading and an `LLM Integration` section shell. Delete `templates/settings/api_keys.html`.
-
-**Step 4: Run the renamed menu coverage and verify it passes**
-
-Run:
-
-```bash
-npx playwright test tests/e2e/profile-menu.spec.js
+cp /Users/chrisfenton/Code/personal/boopmark/.env /Users/chrisfenton/Code/personal/boopmark/.worktrees/settings-llm-integration/.env
 ```
 
 Expected:
-- PASS.
-- The profile menu still stays open during hover and keyboard transitions.
-- The menu item lands on `/settings`.
-- The page heading reads `Settings`.
+- The worktree has the same local development secrets as the main checkout.
+- This is a local-only prerequisite; `.env` remains ignored by git.
 
-**Step 5: Commit the Settings rename**
+**Step 2: Document the optional Anthropic test secret in `.env.example`**
 
-```bash
-git add templates/components/header.html server/src/web/pages/settings.rs templates/settings/index.html templates/settings/api_keys.html tests/e2e/profile-menu.spec.js
-git commit -m "feat: rename api keys page to settings"
+Append this line to `.env.example`:
+
+```dotenv
+# Optional: used only by local Playwright / agent-browser testing when filling the settings form
+ANTHROPIC_API_KEY=
 ```
 
-### Task 2: Add dedicated per-user LLM settings persistence
+**Step 3: Replace the profile-menu expectations with `Settings`**
 
-The outbound Anthropic configuration needs its own storage model. Do not overload the hashed inbound `api_keys` table.
+Update `tests/e2e/profile-menu.spec.js` so the existing navigation tests now expect the renamed menu item and the new route:
 
-**Files:**
-- Create: `migrations/005_create_llm_settings.sql`
-- Create: `server/src/domain/llm_settings.rs`
-- Create: `server/src/domain/ports/llm_settings_repo.rs`
-- Modify: `server/src/domain/mod.rs`
-- Modify: `server/src/domain/ports/mod.rs`
-- Create: `server/src/adapters/postgres/llm_settings_repo.rs`
-- Modify: `server/src/adapters/postgres/mod.rs`
-- Create: `server/src/app/settings.rs`
-- Modify: `server/src/app/mod.rs`
-- Modify: `server/src/web/state.rs:15-19`
-- Modify: `server/src/main.rs:37-80`
+```js
+const settingsLink = page.getByTestId("profile-menu-settings");
+const settingsBox = await settingsLink.boundingBox();
+if (!triggerBox || !settingsBox) {
+  throw new Error("expected trigger and settings link to have bounding boxes");
+}
 
-**Step 1: Write a failing compile target for the new settings service wiring**
+await moveMouseInSteps(page, center(triggerBox), center(settingsBox));
+await expect(menu).toBeVisible();
 
-Add the new module declarations and `settings` field references first, then try to build before the implementations exist.
-
-```rust
-pub settings: Arc<SettingsService<PostgresPool>>,
+await settingsLink.click();
+await expect(page).toHaveURL(/\/settings$/);
+await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+await expect(page.getByRole("heading", { name: "LLM Integration" })).toBeVisible();
 ```
 
-Expected missing-symbol errors:
-- `settings` module not found
-- `LlmSettingsRepository` not found
-- `llm_settings_repo` module not found
+Also rename the keyboard-navigation assertion to expect `profile-menu-settings`, `/settings`, and the `Settings` heading instead of `API Keys`.
 
-**Step 2: Run the server build and verify it fails for the missing settings modules**
+**Step 4: Create a dedicated failing settings workflow spec**
+
+Create `tests/e2e/settings.spec.js`:
+
+```js
+const { test, expect } = require("@playwright/test");
+const fs = require("node:fs");
+const path = require("node:path");
+
+async function signIn(page) {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Sign in for E2E" }).click();
+  await expect(page).toHaveURL(/\/bookmarks$/);
+}
+
+function readAnthropicApiKeyFromDotEnv() {
+  const envPath = path.resolve(__dirname, "..", "..", ".env");
+  if (!fs.existsSync(envPath)) {
+    return null;
+  }
+
+  const contents = fs.readFileSync(envPath, "utf8");
+  const match = contents.match(/^ANTHROPIC_API_KEY=(.+)$/m);
+  return match ? match[1].trim() : null;
+}
+
+test("settings page shows the default Anthropic model and saves LLM integration", async ({ page }) => {
+  const anthropicApiKey = readAnthropicApiKeyFromDotEnv();
+  test.skip(!anthropicApiKey, "ANTHROPIC_API_KEY is required in .env for this local test");
+
+  await signIn(page);
+  await page.goto("/settings");
+
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "LLM Integration" })).toBeVisible();
+  await expect(page.getByLabel("Enable LLM integration")).not.toBeChecked();
+  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-haiku-4-5");
+
+  await page.getByLabel("Enable LLM integration").check();
+  await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
+  await page.getByRole("button", { name: "Save settings" }).click();
+
+  await expect(page).toHaveURL(/\/settings\?saved=1$/);
+  await expect(page.getByText("Settings saved")).toBeVisible();
+  await expect(page.getByLabel("Enable LLM integration")).toBeChecked();
+  await expect(page.getByText("Anthropic API key saved")).toBeVisible();
+  await expect(page.getByLabel("Anthropic API key")).toHaveValue("");
+
+  await page.reload();
+  await expect(page.getByLabel("Enable LLM integration")).toBeChecked();
+  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-haiku-4-5");
+  await expect(page.getByText("Anthropic API key saved")).toBeVisible();
+});
+
+test("settings page can disable llm integration without deleting the saved key", async ({ page }) => {
+  const anthropicApiKey = readAnthropicApiKeyFromDotEnv();
+  test.skip(!anthropicApiKey, "ANTHROPIC_API_KEY is required in .env for this local test");
+
+  await signIn(page);
+  await page.goto("/settings");
+
+  await page.getByLabel("Enable LLM integration").check();
+  await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
+  await page.getByRole("button", { name: "Save settings" }).click();
+
+  await page.getByLabel("Enable LLM integration").uncheck();
+  await page.getByRole("button", { name: "Save settings" }).click();
+
+  await expect(page.getByLabel("Enable LLM integration")).not.toBeChecked();
+  await expect(page.getByText("Anthropic API key saved")).toBeVisible();
+});
+```
+
+The important behavior here is the boundary: the Playwright test reads `.env`, the product page does not.
+
+**Step 5: Run the two Playwright files and verify they fail on the current code**
 
 Run:
 
 ```bash
-cargo build -p boopmark-server
+npx playwright test tests/e2e/profile-menu.spec.js tests/e2e/settings.spec.js
 ```
 
-Expected: FAIL with unresolved module/type errors for the new settings persistence pieces.
+Expected:
+- `profile-menu.spec.js` fails because the menu item is still `API Keys` and navigation still lands on `/settings/api-keys`.
+- `settings.spec.js` fails because `/settings` and the LLM Integration form do not exist yet.
 
-**Step 3: Create the database table, domain model, repository contract, and Postgres adapter**
+**Step 6: Commit the failing browser coverage**
 
-Create `migrations/005_create_llm_settings.sql`:
+```bash
+git add .env.example tests/e2e/profile-menu.spec.js tests/e2e/settings.spec.js
+git commit -m "test: capture settings llm integration workflow"
+```
+
+### Task 2: Add a dedicated per-user LLM settings persistence layer
+
+Persist these fields separately from inbound API authentication. One row per user is enough for the current product shape and is the cleanest steady-state model.
+
+**Files:**
+- Create: `migrations/005_create_user_llm_settings.sql`
+- Create: `server/src/domain/llm_settings.rs`
+- Create: `server/src/domain/ports/llm_settings_repo.rs`
+- Create: `server/src/adapters/postgres/llm_settings_repo.rs`
+- Modify: `server/src/domain/mod.rs`
+- Modify: `server/src/domain/ports/mod.rs`
+- Modify: `server/src/adapters/postgres/mod.rs`
+
+**Step 1: Create the new migration**
+
+Create `migrations/005_create_user_llm_settings.sql`:
 
 ```sql
-CREATE TABLE llm_settings (
+CREATE TABLE user_llm_settings (
     user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     enabled BOOLEAN NOT NULL DEFAULT FALSE,
     anthropic_api_key TEXT,
@@ -163,11 +184,17 @@ CREATE TABLE llm_settings (
 );
 ```
 
+Do not touch `api_keys`; that table is for inbound bearer auth and cannot serve outbound Anthropic credentials.
+
+**Step 2: Add the domain model and the default model constant**
+
 Create `server/src/domain/llm_settings.rs`:
 
 ```rust
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
+
+pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct LlmSettings {
@@ -180,6 +207,14 @@ pub struct LlmSettings {
 }
 ```
 
+Then export it from `server/src/domain/mod.rs`:
+
+```rust
+pub mod llm_settings;
+```
+
+**Step 3: Define the repository contract**
+
 Create `server/src/domain/ports/llm_settings_repo.rs`:
 
 ```rust
@@ -189,7 +224,7 @@ use uuid::Uuid;
 
 #[trait_variant::make(Send)]
 pub trait LlmSettingsRepository: Send + Sync {
-    async fn find_by_user_id(&self, user_id: Uuid) -> Result<Option<LlmSettings>, DomainError>;
+    async fn get(&self, user_id: Uuid) -> Result<Option<LlmSettings>, DomainError>;
     async fn upsert(
         &self,
         user_id: Uuid,
@@ -200,14 +235,28 @@ pub trait LlmSettingsRepository: Send + Sync {
 }
 ```
 
+Then export it from `server/src/domain/ports/mod.rs`:
+
+```rust
+pub mod llm_settings_repo;
+```
+
+**Step 4: Implement the PostgreSQL adapter**
+
 Create `server/src/adapters/postgres/llm_settings_repo.rs`:
 
 ```rust
+use super::PostgresPool;
+use crate::domain::error::DomainError;
+use crate::domain::llm_settings::LlmSettings;
+use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
+use uuid::Uuid;
+
 impl LlmSettingsRepository for PostgresPool {
-    async fn find_by_user_id(&self, user_id: Uuid) -> Result<Option<LlmSettings>, DomainError> {
+    async fn get(&self, user_id: Uuid) -> Result<Option<LlmSettings>, DomainError> {
         sqlx::query_as::<_, LlmSettings>(
             "SELECT user_id, enabled, anthropic_api_key, anthropic_model, created_at, updated_at
-             FROM llm_settings
+             FROM user_llm_settings
              WHERE user_id = $1",
         )
         .bind(user_id)
@@ -224,11 +273,11 @@ impl LlmSettingsRepository for PostgresPool {
         anthropic_model: &str,
     ) -> Result<LlmSettings, DomainError> {
         sqlx::query_as::<_, LlmSettings>(
-            "INSERT INTO llm_settings (user_id, enabled, anthropic_api_key, anthropic_model)
+            "INSERT INTO user_llm_settings (user_id, enabled, anthropic_api_key, anthropic_model)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (user_id) DO UPDATE
              SET enabled = EXCLUDED.enabled,
-                 anthropic_api_key = COALESCE(EXCLUDED.anthropic_api_key, llm_settings.anthropic_api_key),
+                 anthropic_api_key = EXCLUDED.anthropic_api_key,
                  anthropic_model = EXCLUDED.anthropic_model,
                  updated_at = now()
              RETURNING user_id, enabled, anthropic_api_key, anthropic_model, created_at, updated_at",
@@ -244,29 +293,66 @@ impl LlmSettingsRepository for PostgresPool {
 }
 ```
 
-Wire the new modules into `server/src/domain/mod.rs`, `server/src/domain/ports/mod.rs`, `server/src/adapters/postgres/mod.rs`, `server/src/app/mod.rs`, `server/src/web/state.rs`, and `server/src/main.rs`.
+Wire it into `server/src/adapters/postgres/mod.rs`:
 
-**Step 4: Create the settings service with the default model constant**
+```rust
+pub mod llm_settings_repo;
+```
+
+**Step 5: Run the migration-bearing build**
+
+Run:
+
+```bash
+cargo build -p boopmark-server
+```
+
+Expected:
+- The new domain, port, adapter, and migration compile cleanly.
+- No page code changes are required yet.
+
+**Step 6: Commit the persistence layer**
+
+```bash
+git add migrations/005_create_user_llm_settings.sql server/src/domain/mod.rs server/src/domain/llm_settings.rs server/src/domain/ports/mod.rs server/src/domain/ports/llm_settings_repo.rs server/src/adapters/postgres/mod.rs server/src/adapters/postgres/llm_settings_repo.rs
+git commit -m "feat: add llm settings persistence"
+```
+
+### Task 3: Add a Settings service with test-covered normalization and validation logic
+
+Keep the business rules out of the page handler. This task owns the default model alias, blank-key preservation, and the one real validation rule: enabled LLM integration requires an Anthropic API key, either newly submitted or already stored.
+
+**Files:**
+- Create: `server/src/app/settings.rs`
+- Modify: `server/src/app/mod.rs`
+- Modify: `server/src/web/state.rs`
+- Modify: `server/src/main.rs`
+
+**Step 1: Create the settings service and its helper types**
 
 Create `server/src/app/settings.rs`:
 
 ```rust
+use crate::domain::error::DomainError;
+use crate::domain::llm_settings::{DEFAULT_ANTHROPIC_MODEL, LlmSettings};
+use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::domain::error::DomainError;
-use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
-
-pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
-
-pub struct SettingsSnapshot {
-    pub enabled: bool,
-    pub anthropic_model: String,
-    pub has_saved_anthropic_key: bool,
-}
-
 pub struct SettingsService<R> {
     repo: Arc<R>,
+}
+
+pub struct SettingsView {
+    pub enabled: bool,
+    pub has_anthropic_api_key: bool,
+    pub anthropic_model: String,
+}
+
+pub struct SaveLlmSettingsInput {
+    pub enabled: bool,
+    pub anthropic_api_key: Option<String>,
+    pub anthropic_model: Option<String>,
 }
 
 impl<R> SettingsService<R>
@@ -277,106 +363,200 @@ where
         Self { repo }
     }
 
-    pub async fn get(&self, user_id: Uuid) -> Result<SettingsSnapshot, DomainError> {
-        let row = self.repo.find_by_user_id(user_id).await?;
-        Ok(SettingsSnapshot {
-            enabled: row.as_ref().map(|settings| settings.enabled).unwrap_or(false),
-            anthropic_model: row
-                .as_ref()
-                .map(|settings| settings.anthropic_model.clone())
-                .unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_string()),
-            has_saved_anthropic_key: row
-                .as_ref()
-                .and_then(|settings| settings.anthropic_api_key.as_ref())
-                .map(|value| !value.is_empty())
-                .unwrap_or(false),
-        })
+    pub async fn load(&self, user_id: Uuid) -> Result<SettingsView, DomainError> {
+        let settings = self.repo.get(user_id).await?;
+        Ok(to_view(settings.as_ref()))
     }
 
     pub async fn save(
         &self,
         user_id: Uuid,
-        enabled: bool,
-        anthropic_api_key: Option<&str>,
-        anthropic_model: &str,
-    ) -> Result<(), DomainError> {
-        self.repo
-            .upsert(user_id, enabled, anthropic_api_key, anthropic_model)
+        input: SaveLlmSettingsInput,
+    ) -> Result<SettingsView, DomainError> {
+        let existing = self.repo.get(user_id).await?;
+        let resolved_key = resolve_api_key(
+            input.anthropic_api_key,
+            existing.as_ref().and_then(|settings| settings.anthropic_api_key.clone()),
+        );
+
+        if input.enabled && resolved_key.is_none() {
+            return Err(DomainError::InvalidInput(
+                "Anthropic API key is required when LLM integration is enabled".into(),
+            ));
+        }
+
+        let saved = self
+            .repo
+            .upsert(
+                user_id,
+                input.enabled,
+                resolved_key.as_deref(),
+                &normalize_model(input.anthropic_model),
+            )
             .await?;
-        Ok(())
+
+        Ok(to_view(Some(&saved)))
+    }
+}
+
+fn normalize_model(input: Option<String>) -> String {
+    let value = input.unwrap_or_default().trim().to_string();
+    if value.is_empty() {
+        DEFAULT_ANTHROPIC_MODEL.to_string()
+    } else {
+        value
+    }
+}
+
+fn resolve_api_key(submitted: Option<String>, existing: Option<String>) -> Option<String> {
+    match submitted {
+        Some(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+        _ => existing,
+    }
+}
+
+fn to_view(settings: Option<&LlmSettings>) -> SettingsView {
+    SettingsView {
+        enabled: settings.map(|settings| settings.enabled).unwrap_or(false),
+        has_anthropic_api_key: settings
+            .and_then(|settings| settings.anthropic_api_key.as_ref())
+            .is_some(),
+        anthropic_model: settings
+            .map(|settings| normalize_model(Some(settings.anthropic_model.clone())))
+            .unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_string()),
     }
 }
 ```
 
-Keep default-resolution logic inside the service. It is trivial enough that no extra Rust test file is required unless execution ends up extracting more logic than shown above.
+**Step 2: Add focused unit tests inside `server/src/app/settings.rs`**
 
-**Step 5: Run the server build and verify it passes**
+Append:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_model_defaults_to_latest_haiku_alias() {
+        assert_eq!(normalize_model(None), "claude-haiku-4-5");
+        assert_eq!(normalize_model(Some("   ".into())), "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn blank_api_key_keeps_existing_secret() {
+        let resolved = resolve_api_key(Some("   ".into()), Some("sk-ant-existing".into()));
+        assert_eq!(resolved.as_deref(), Some("sk-ant-existing"));
+    }
+
+    #[test]
+    fn to_view_uses_defaults_when_no_settings_exist() {
+        let view = to_view(None);
+        assert!(!view.enabled);
+        assert!(!view.has_anthropic_api_key);
+        assert_eq!(view.anthropic_model, "claude-haiku-4-5");
+    }
+}
+```
+
+`claude-haiku-4-5` is deliberate here. Anthropic's official Claude Haiku 4.5 announcement on March 4, 2026 says to use that alias via the API.
+
+**Step 3: Wire the service into the app**
+
+Update `server/src/app/mod.rs`:
+
+```rust
+pub mod settings;
+```
+
+Update `server/src/web/state.rs`:
+
+```rust
+use crate::app::settings::SettingsService;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub bookmarks: Bookmarks,
+    pub auth: Arc<AuthService<PostgresPool, PostgresPool, PostgresPool>>,
+    pub settings: Arc<SettingsService<PostgresPool>>,
+    pub config: Arc<Config>,
+}
+```
+
+Update `server/src/main.rs`:
+
+```rust
+use app::settings::SettingsService;
+
+let settings_service = Arc::new(SettingsService::new(db.clone()));
+
+let state = AppState {
+    bookmarks,
+    auth: auth_service,
+    settings: settings_service,
+    config: Arc::new(config.clone()),
+};
+```
+
+**Step 4: Run the focused Rust tests**
 
 Run:
 
 ```bash
-cargo build -p boopmark-server
+cargo test -p boopmark-server settings::tests
 ```
 
 Expected:
-- PASS.
-- The migration is picked up by `sqlx::migrate!`.
-- The server builds with the new settings service and repository wiring.
+- The helper behavior is locked in before the page code lands.
+- The default model and blank-key preservation rules are proven without browser setup.
 
-**Step 6: Commit the persistence layer**
+**Step 5: Commit the service layer**
 
 ```bash
-git add migrations/005_create_llm_settings.sql server/src/domain/llm_settings.rs server/src/domain/ports/llm_settings_repo.rs server/src/domain/mod.rs server/src/domain/ports/mod.rs server/src/adapters/postgres/llm_settings_repo.rs server/src/adapters/postgres/mod.rs server/src/app/settings.rs server/src/app/mod.rs server/src/web/state.rs server/src/main.rs
-git commit -m "feat: persist per-user llm settings"
+git add server/src/app/mod.rs server/src/app/settings.rs server/src/web/state.rs server/src/main.rs
+git commit -m "feat: add llm settings service"
 ```
 
-### Task 3: Implement the Settings form with safe secret-handling semantics
+### Task 4: Replace the API Keys stub with the real Settings page and save flow
 
-Finish the user-facing workflow: render persisted state, validate the submission, and never echo the saved key back into the browser.
+Land the user-facing change here: `/settings`, `Settings` in the menu, `LLM Integration` on the page, GET + POST handlers, default model rendering, validation feedback, and a redirect from the old `/settings/api-keys` path.
 
 **Files:**
 - Modify: `server/src/web/pages/settings.rs`
-- Modify: `templates/settings/index.html`
+- Modify: `templates/components/header.html`
+- Create: `templates/settings/index.html`
+- Delete: `templates/settings/api_keys.html`
 
-**Step 1: Write the failing browser workflow test for save and reload**
+**Step 1: Replace the page handler with GET + POST settings routes**
 
-Create `tests/e2e/settings.spec.js` with a single end-to-end scenario that:
-- signs in
-- opens Settings from the profile menu
-- enables LLM integration
-- fills the Anthropic key and model
-- saves
-- verifies the success flash, checked state, and model value
-- reloads and verifies the saved key input stays blank
-
-Use stable selectors and labels:
-
-```js
-await page.getByTestId("profile-menu-settings").click();
-await page.getByLabel("Enable integration").check();
-await page.getByLabel("Anthropic API key").fill(anthropicKey);
-await page.getByLabel("Anthropic model").fill("claude-haiku-4-5");
-await page.getByRole("button", { name: "Save settings" }).click();
-```
-
-**Step 2: Run the new settings spec and verify it fails**
-
-Run:
-
-```bash
-npx playwright test tests/e2e/settings.spec.js
-```
-
-Expected: FAIL because the page still has no POST handler, no form controls, and no persistence-backed render state.
-
-**Step 3: Add GET/POST handlers and form parsing to `server/src/web/pages/settings.rs`**
-
-Use Axum `State`, `Query`, `Form`, and `Redirect` with a PRG flow:
+Rewrite `server/src/web/pages/settings.rs`:
 
 ```rust
+use askama::Template;
+use axum::Form;
+use axum::Router;
+use axum::extract::{Query, State};
+use axum::response::{Html, IntoResponse, Redirect};
+use serde::Deserialize;
+
+use crate::domain::error::DomainError;
+use crate::web::extractors::AuthUser;
+use crate::web::state::AppState;
+
+#[derive(Template)]
+#[template(path = "settings/index.html")]
+struct SettingsPage {
+    email: String,
+    llm_enabled: bool,
+    has_anthropic_api_key: bool,
+    anthropic_model: String,
+    success_message: Option<String>,
+    error_message: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 struct SettingsQuery {
-    saved: Option<u8>,
+    saved: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -385,156 +565,246 @@ struct SettingsForm {
     anthropic_api_key: Option<String>,
     anthropic_model: Option<String>,
 }
-```
 
-Handler rules:
-- `llm_enabled.is_some()` means enabled.
-- `anthropic_model.trim()` falls back to `DEFAULT_ANTHROPIC_MODEL` when blank.
-- `anthropic_api_key.trim()` becomes `None` when blank so an existing saved key remains unchanged.
-- If integration is enabled and there is neither a new key nor a saved key, re-render with `error = Some("Anthropic API key is required when LLM integration is enabled.".into())`.
-- On success, `Redirect::to("/settings?saved=1")`.
+fn render(t: &impl Template) -> axum::response::Response {
+    match t.render() {
+        Ok(body) => Html(body).into_response(),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
 
-The GET handler should load `state.settings.get(user.id).await` and map it into `SettingsPage`.
+async fn settings_page(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Query(query): Query<SettingsQuery>,
+) -> axum::response::Response {
+    match state.settings.load(user.id).await {
+        Ok(view) => render(&SettingsPage {
+            email: user.email,
+            llm_enabled: view.enabled,
+            has_anthropic_api_key: view.has_anthropic_api_key,
+            anthropic_model: view.anthropic_model,
+            success_message: query.saved.map(|_| "Settings saved".to_string()),
+            error_message: None,
+        }),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
 
-**Step 4: Render the real form in `templates/settings/index.html`**
+async fn save_settings(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Form(form): Form<SettingsForm>,
+) -> axum::response::Response {
+    match state
+        .settings
+        .save(
+            user.id,
+            crate::app::settings::SaveLlmSettingsInput {
+                enabled: form.llm_enabled.is_some(),
+                anthropic_api_key: form.anthropic_api_key,
+                anthropic_model: form.anthropic_model,
+            },
+        )
+        .await
+    {
+        Ok(_) => Redirect::to("/settings?saved=1").into_response(),
+        Err(DomainError::InvalidInput(message)) => render(&SettingsPage {
+            email: user.email,
+            llm_enabled: form.llm_enabled.is_some(),
+            has_anthropic_api_key: state
+                .settings
+                .load(user.id)
+                .await
+                .map(|view| view.has_anthropic_api_key)
+                .unwrap_or(false),
+            anthropic_model: form
+                .anthropic_model
+                .unwrap_or_else(|| "claude-haiku-4-5".to_string()),
+            success_message: None,
+            error_message: Some(message),
+        }),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
 
-Replace the placeholder section with a form containing:
-- a checkbox labeled `Enable integration`
-- a password input labeled `Anthropic API key`
-- a text input labeled `Anthropic model`
-- a `Save settings` submit button
-- a success flash for `saved`
-- an error flash for `error`
-- copy that tells the user a key is already saved and blank preserves it
+async fn legacy_api_keys_redirect() -> Redirect {
+    Redirect::to("/settings")
+}
 
-Use `for` and `id` pairs so Playwright can use `getByLabel(...)`. Keep the API key input `value` empty even when `has_saved_anthropic_key` is true.
-
-**Step 5: Run the settings browser workflow and verify it passes**
-
-Run:
-
-```bash
-npx playwright test tests/e2e/settings.spec.js
-```
-
-Expected:
-- PASS.
-- The default model shown before save is `claude-haiku-4-5`.
-- After save and reload, the checkbox and model stay persisted.
-- The page never renders the saved key value back into the DOM.
-
-**Step 6: Commit the settings form flow**
-
-```bash
-git add server/src/web/pages/settings.rs templates/settings/index.html tests/e2e/settings.spec.js
-git commit -m "feat: add llm integration settings form"
-```
-
-### Task 4: Wire E2E env forwarding and finish browser-level coverage
-
-The user explicitly wants `ANTHROPIC_API_KEY` forwarded only for agent-browser and Playwright E2E work. Keep that test-only and separate from the saved user settings flow.
-
-**Files:**
-- Modify: `scripts/e2e/start-server.sh:1-24`
-- Modify: `tests/e2e/settings.spec.js`
-- Modify: `tests/e2e/profile-menu.spec.js`
-
-**Step 1: Make the E2E server bootstrap forward `ANTHROPIC_API_KEY` from the worktree `.env`**
-
-Update `scripts/e2e/start-server.sh` so it exports the copied worktree key when present before `cargo run`:
-
-```bash
-if [ -f .env ]; then
-  export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(awk -F= '/^ANTHROPIC_API_KEY=/{print substr($0, index($0,$2))}' .env)}"
-fi
-```
-
-If the env var is absent, keep behavior unchanged. Do not write any code that seeds the user settings table from this env var.
-
-**Step 2: Make the Playwright settings spec prefer the real test key when available**
-
-At the top of `tests/e2e/settings.spec.js`, resolve the key like this:
-
-```js
-const fs = require("fs");
-
-function loadAnthropicKey() {
-  if (process.env.ANTHROPIC_API_KEY) {
-    return process.env.ANTHROPIC_API_KEY;
-  }
-
-  try {
-    const line = fs
-      .readFileSync(".env", "utf8")
-      .split(/\r?\n/)
-      .find((entry) => entry.startsWith("ANTHROPIC_API_KEY="));
-    return line ? line.slice("ANTHROPIC_API_KEY=".length).trim() : "";
-  } catch (_) {
-    return "";
-  }
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/settings", axum::routing::get(settings_page).post(save_settings))
+        .route("/settings/api-keys", axum::routing::get(legacy_api_keys_redirect))
 }
 ```
 
-Use `loadAnthropicKey() || "sk-ant-test-placeholder"` when filling the form. This keeps E2E deterministic while still checking the copied `.env` first.
+Do not add `.env` reads here. That boundary belongs only in the test harness.
 
-**Step 3: Expand the browser assertions to cover the approved workflow**
+**Step 2: Rename the header menu item and keep the hover/focus behavior intact**
 
-In `tests/e2e/settings.spec.js`, assert all of these:
-- initial heading is `Settings`
-- section heading is `LLM Integration`
-- default model value is `claude-haiku-4-5`
-- success redirect lands on `/settings?saved=1`
-- reload preserves enabled/model state
-- saved key field stays blank
+Update `templates/components/header.html` so the menu link becomes:
 
-Keep the existing menu-navigation assertions in `tests/e2e/profile-menu.spec.js` passing with the new `profile-menu-settings` selector.
-
-**Step 4: Run the browser suites and verify they pass**
-
-Run:
-
-```bash
-npx playwright test tests/e2e/profile-menu.spec.js tests/e2e/settings.spec.js
+```html
+<a href="/settings" data-testid="profile-menu-settings" class="block text-sm text-gray-300 hover:text-white py-1">Settings</a>
 ```
 
-Expected:
-- PASS.
-- Menu navigation still works.
-- The end-to-end settings workflow passes using the real `.env` key when available.
-- The stored key never reappears in rendered HTML after save or reload.
+Remove the old `profile-menu-api-keys` test ID entirely.
 
-**Step 5: Commit the E2E wiring**
+**Step 3: Create the real settings template**
 
-```bash
-git add scripts/e2e/start-server.sh tests/e2e/settings.spec.js tests/e2e/profile-menu.spec.js
-git commit -m "test: cover settings llm integration flow"
+Create `templates/settings/index.html`:
+
+```html
+{% extends "base.html" %}
+{% block title %}Settings - BoopMark{% endblock %}
+{% block content %}
+<main class="max-w-2xl mx-auto px-6 py-12">
+    <div class="bg-[#1e2235] rounded-xl border border-gray-700 p-8 space-y-8">
+        <div>
+            <h1 class="text-2xl font-bold">Settings</h1>
+            <p class="text-sm text-gray-400 mt-1">{{ email }}</p>
+        </div>
+
+        {% if let Some(message) = success_message %}
+        <div class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+            {{ message }}
+        </div>
+        {% endif %}
+
+        {% if let Some(message) = error_message %}
+        <div class="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            {{ message }}
+        </div>
+        {% endif %}
+
+        <section class="space-y-5">
+            <div>
+                <h2 class="text-lg font-semibold">LLM Integration</h2>
+                <p class="text-sm text-gray-400">Configure Anthropic access for this signed-in account.</p>
+            </div>
+
+            <form method="post" action="/settings" class="space-y-5">
+                <label class="flex items-center gap-3 text-sm font-medium text-gray-200">
+                    <input type="checkbox" name="llm_enabled" {% if llm_enabled %}checked{% endif %}>
+                    Enable LLM integration
+                </label>
+
+                <div class="space-y-2">
+                    <label for="anthropic_api_key" class="block text-sm font-medium text-gray-200">Anthropic API key</label>
+                    <input
+                        id="anthropic_api_key"
+                        name="anthropic_api_key"
+                        type="password"
+                        autocomplete="off"
+                        placeholder="{% if has_anthropic_api_key %}Leave blank to keep the saved key{% else %}sk-ant-...{% endif %}"
+                        class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                    >
+                    {% if has_anthropic_api_key %}
+                    <p class="text-xs text-gray-400">Anthropic API key saved.</p>
+                    {% else %}
+                    <p class="text-xs text-gray-400">No Anthropic API key saved yet.</p>
+                    {% endif %}
+                </div>
+
+                <div class="space-y-2">
+                    <label for="anthropic_model" class="block text-sm font-medium text-gray-200">Anthropic model</label>
+                    <input
+                        id="anthropic_model"
+                        name="anthropic_model"
+                        type="text"
+                        value="{{ anthropic_model }}"
+                        class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
+                    >
+                    <p class="text-xs text-gray-400">Default: claude-haiku-4-5.</p>
+                </div>
+
+                <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
+                    Save settings
+                </button>
+            </form>
+        </section>
+    </div>
+</main>
+{% endblock %}
 ```
 
-### Task 5: Run the final regression pass
+Delete `templates/settings/api_keys.html`; the page is now `Settings`, not `API Keys`.
 
-Finish with the smallest useful regression sweep covering the touched app shell and the existing bookmark flow.
+**Step 4: Keep the page module wired in**
 
-**Files:**
-- Modify: none
+`server/src/web/pages/mod.rs` already merges `settings::routes()`. Leave that intact; do not create a second settings entry point.
 
-**Step 1: Run the final server build and targeted Playwright coverage**
+**Step 5: Run the focused build and browser suites**
 
 Run:
 
 ```bash
 cargo build -p boopmark-server
+npx playwright test tests/e2e/profile-menu.spec.js tests/e2e/settings.spec.js
+```
+
+Expected:
+- The app builds successfully with the new settings service and routes.
+- The profile menu navigates to `/settings`.
+- The new settings workflow passes, including default model rendering and reload-after-save behavior.
+
+**Step 6: Commit the user-facing settings page**
+
+```bash
+git add server/src/web/pages/settings.rs templates/components/header.html templates/settings/index.html
+git rm templates/settings/api_keys.html
+git commit -m "feat: add llm integration settings page"
+```
+
+### Task 5: Run the final regression pass and only keep follow-up fixes that are actually needed
+
+The shared header, settings route, migration path, and local test helper all touch authenticated flows. Finish with the smallest full pass that can catch cross-feature breakage.
+
+**Files:**
+- Modify: only files required by any follow-up fixes discovered here
+
+**Step 1: Run the Rust test suite**
+
+Run:
+
+```bash
+cargo test -p boopmark-server
+```
+
+Expected:
+- The existing bookmark and scraper unit tests still pass.
+- The new settings service tests pass.
+
+**Step 2: Run the targeted Playwright regression suite**
+
+Run:
+
+```bash
 npx playwright test tests/e2e/profile-menu.spec.js tests/e2e/settings.spec.js tests/e2e/suggest.spec.js
 ```
 
 Expected:
-- PASS.
-- The server still builds cleanly.
-- The new settings flow remains green.
-- The existing suggest flow still passes after the header and settings changes.
+- `profile-menu.spec.js` passes with the renamed Settings destination.
+- `settings.spec.js` passes with local `.env`-backed test input and persisted settings.
+- `suggest.spec.js` still passes, proving the shared authenticated shell still works.
 
-**Step 2: Commit only if the regression run required a follow-up fix**
+**Step 3: If a regression requires a code change, make the smallest fix and re-run the affected tests**
+
+Run only the smallest commands needed after each follow-up fix, for example:
+
+```bash
+cargo test -p boopmark-server
+npx playwright test tests/e2e/profile-menu.spec.js tests/e2e/settings.spec.js tests/e2e/suggest.spec.js
+```
+
+Expected:
+- Every failing regression is fixed before the branch is finalized.
+- No speculative cleanup lands here.
+
+**Step 4: Commit only if the regression pass forced a real code change**
 
 ```bash
 git add -A
-git commit -m "test: verify settings regressions"
+git commit -m "test: verify settings llm integration regressions"
 ```
