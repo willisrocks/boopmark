@@ -83,12 +83,6 @@ struct GridPage {
 }
 
 #[derive(Template)]
-#[template(path = "bookmarks/list.html")]
-struct BookmarkList {
-    bookmarks: Vec<BookmarkView>,
-}
-
-#[derive(Template)]
 #[template(path = "bookmarks/list_with_filters.html")]
 struct BookmarkListWithFilters {
     bookmarks: Vec<BookmarkView>,
