@@ -11,9 +11,9 @@ async function signIn(page) {
 async function resetSettings(page) {
   await page.goto("/settings");
 
-  const clearSavedKey = page.getByLabel("Clear saved key");
-  if (await clearSavedKey.count()) {
-    await clearSavedKey.check();
+  const deleteKey = page.getByTestId("delete-anthropic-api-key");
+  if (await deleteKey.count()) {
+    await deleteKey.check();
   }
 
   const enableLlm = page.getByLabel("Enable LLM integration");
@@ -75,40 +75,38 @@ test("settings page renders in the app shell with the official default model", a
   await expect(page.locator("#anthropic_model option")).toHaveCount(3);
 });
 
-test("settings page uses explicit keep replace and clear flows for saved Anthropic keys", async ({
-  page,
-}) => {
+test("settings page supports add and delete key flows", async ({ page }) => {
   const anthropicApiKey = readAnthropicApiKeyFromDotEnv();
 
   await signIn(page);
   await resetSettings(page);
   await page.goto("/settings");
 
+  // Add a key: fill the input and save
   await page.getByLabel("Enable LLM integration").check();
   await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
   await page.getByLabel("Anthropic model").selectOption("claude-sonnet-4-6");
   await page.getByRole("button", { name: "Save settings" }).click();
 
+  // Verify key-saved state
   await expect(page).toHaveURL(/\/settings\?saved=1$/);
   await expect(page.getByText("Settings saved")).toBeVisible();
   await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
   await expect(page.getByText("Anthropic API key saved securely")).toBeVisible();
   await expect(page.getByLabel("Anthropic API key")).toHaveCount(0);
-  await expect(page.getByLabel("Keep current saved key")).toBeChecked();
+  await expect(page.getByTestId("delete-anthropic-api-key")).toBeVisible();
   await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-sonnet-4-6");
 
-  await page.getByLabel("Replace saved key").check();
-  await expect(page.getByTestId("anthropic-api-key-replacement")).toBeVisible();
-  await page.getByLabel("Replacement Anthropic API key").fill(anthropicApiKey);
-  await page.getByLabel("Clear saved key").check();
-  await expect(page.getByTestId("anthropic-api-key-replacement")).toHaveCount(0);
-  await expect(
-    page.getByText("Saving will remove the stored Anthropic API key."),
-  ).toBeVisible();
+  // Delete the key
+  await page.getByTestId("delete-anthropic-api-key").check();
   await page.getByRole("button", { name: "Save settings" }).click();
 
+  // Verify back to add-key state
+  await expect(page).toHaveURL(/\/settings\?saved=1$/);
   await expect(page.getByText("No Anthropic API key saved yet.")).toBeVisible();
   await expect(page.getByLabel("Anthropic API key")).toBeEditable();
+  await expect(page.getByTestId("anthropic-api-key-status")).toHaveCount(0);
+  await expect(page.getByTestId("delete-anthropic-api-key")).toHaveCount(0);
 });
 
 test("legacy api keys route redirects to settings", async ({ page }) => {
@@ -165,90 +163,4 @@ test("settings rejects forged unsupported anthropic model submissions with 400",
   });
 
   expect(status).toBe(400);
-});
-
-test("settings rejects replace-key submissions without a replacement value", async ({
-  page,
-}) => {
-  const anthropicApiKey = readAnthropicApiKeyFromDotEnv();
-
-  await signIn(page);
-  await resetSettings(page);
-  await page.goto("/settings");
-
-  await page.getByLabel("Enable LLM integration").check();
-  await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
-
-  const status = await page.evaluate(async () => {
-    const response = await fetch("/settings", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        llm_enabled: "on",
-        anthropic_api_key_action: "replace",
-        anthropic_api_key: "   ",
-        anthropic_model: "claude-haiku-4-5-20251001",
-      }),
-    });
-    return response.status;
-  });
-
-  expect(status).toBe(400);
-
-  await page.goto("/settings");
-  await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
-});
-
-test("settings rejects forged key-action combinations", async ({ page }) => {
-  const anthropicApiKey = readAnthropicApiKeyFromDotEnv();
-
-  await signIn(page);
-  await resetSettings(page);
-  await page.goto("/settings");
-
-  await page.getByLabel("Enable LLM integration").check();
-  await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
-  await page.getByRole("button", { name: "Save settings" }).click();
-  await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
-
-  const keepStatus = await page.evaluate(async () => {
-    const response = await fetch("/settings", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        llm_enabled: "on",
-        anthropic_api_key_action: "keep",
-        anthropic_api_key: "sk-ant-forged",
-        anthropic_model: "claude-haiku-4-5-20251001",
-      }),
-    });
-    return response.status;
-  });
-
-  const invalidActionStatus = await page.evaluate(async () => {
-    const response = await fetch("/settings", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        llm_enabled: "on",
-        anthropic_api_key_action: "surprise",
-        anthropic_model: "claude-haiku-4-5-20251001",
-      }),
-    });
-    return response.status;
-  });
-
-  expect(keepStatus).toBe(400);
-  expect(invalidActionStatus).toBe(400);
-
-  await page.goto("/settings");
-  await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
 });
