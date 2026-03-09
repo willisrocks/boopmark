@@ -109,20 +109,24 @@ async fn save_settings(
     Form(form): Form<SettingsForm>,
 ) -> axum::response::Response {
     let enabled = form.llm_enabled.is_some();
-    let api_key_action = form.anthropic_api_key_action.as_deref().unwrap_or("keep");
+    let api_key_action = form.anthropic_api_key_action.as_deref();
     let submitted_api_key = form
         .anthropic_api_key
         .filter(|value| !value.trim().is_empty());
 
-    if api_key_action == "replace" && submitted_api_key.is_none() {
-        return axum::http::StatusCode::BAD_REQUEST.into_response();
-    }
-
     let (anthropic_api_key, clear_anthropic_api_key) = match api_key_action {
-        "replace" => (submitted_api_key.clone(), false),
-        "clear" => (None, true),
-        _ if submitted_api_key.is_some() => (submitted_api_key, false),
-        _ => (None, false),
+        Some("replace") if submitted_api_key.is_none() => {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+        Some("replace") => (submitted_api_key.clone(), false),
+        Some("clear") => (None, true),
+        Some("keep") if submitted_api_key.is_some() => {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+        Some("keep") => (None, false),
+        None if submitted_api_key.is_some() => (submitted_api_key, false),
+        None => (None, false),
+        Some(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
     };
 
     match state
