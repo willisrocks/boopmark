@@ -4,7 +4,7 @@
 
 **Goal:** Make `/settings` clearly reflect saved Anthropic configuration, offer the current official Anthropic model IDs for new selections, and render the page inside BoopMark's normal app shell without breaking encrypted settings persistence.
 
-**Architecture:** Keep the existing encrypted `user_llm_settings` storage and route structure, but move the official Anthropic choices to a server-owned allow-list so the service, template, and tests all use the same labels and full API values. Do not silently migrate or overwrite previously saved non-official model strings: if a user already has one stored, render it as the current selected value alongside the three current official options and preserve it on unrelated saves until the user explicitly chooses a different model. Enforce that distinction on save: new submissions may only choose one of the official allow-listed values, except that the currently stored legacy/custom value may be re-submitted unchanged so unrelated saves do not destroy it. Reuse the existing header component on Settings by passing the same user view data plus a simple page-context flag so BoopMark branding and navigation stay visible while header controls remain safe off the bookmarks grid. Preserve the current keep/replace/clear key semantics: the UI never rehydrates the secret, it only shows truthful saved-state messaging, replace state, or cleared state.
+**Architecture:** Keep the existing encrypted `user_llm_settings` storage and route structure, but move the official Anthropic choices to a server-owned allow-list so the service, template, and tests all use the same labels and full API values. Do not silently migrate or overwrite previously saved non-official model strings: if a user already has one stored, render it as the current selected value alongside the three current official options and preserve it on unrelated saves until the user explicitly chooses a different model. Enforce that distinction on save: new submissions may only choose one of the official allow-listed values, except that the currently stored legacy/custom value may be re-submitted unchanged so unrelated saves do not destroy it, and omitted or blank `anthropic_model` input must preserve the existing stored value instead of defaulting it away. Only fall back to `claude-haiku-4-5-20251001` when creating a brand-new settings record with no saved model yet. Reuse the existing header component on Settings by passing the same user view data plus a simple page-context flag so BoopMark branding and navigation stay visible while header controls remain safe off the bookmarks grid. Preserve the current keep/replace/clear key semantics: the UI never rehydrates the secret, it only shows truthful saved-state messaging, replace state, or cleared state.
 
 **Tech Stack:** Rust, Axum, Askama templates, Tailwind CSS, Playwright
 
@@ -207,6 +207,53 @@ let view = service
 assert_eq!(view.anthropic_model, "claude-3-7-sonnet-latest");
 ```
 
+Add one omitted-field save-path test proving an unrelated save preserves the existing model instead of defaulting it:
+
+```rust
+repo.stored.lock().expect("stored lock").replace(LlmSettings {
+    user_id,
+    enabled: true,
+    anthropic_api_key_encrypted: Some(vec![1, 2, 3]),
+    anthropic_model: "claude-3-7-sonnet-latest".into(),
+    created_at: Utc::now(),
+    updated_at: Utc::now(),
+});
+
+let view = service
+    .save(
+        user_id,
+        SaveLlmSettingsInput {
+            enabled: false,
+            anthropic_api_key: None,
+            clear_anthropic_api_key: true,
+            anthropic_model: None,
+        },
+    )
+    .await
+    .expect("save");
+
+assert_eq!(view.anthropic_model, "claude-3-7-sonnet-latest");
+```
+
+Add one blank-field save-path test proving a blank submitted model also preserves the existing value:
+
+```rust
+let view = service
+    .save(
+        user_id,
+        SaveLlmSettingsInput {
+            enabled: true,
+            anthropic_api_key: None,
+            clear_anthropic_api_key: false,
+            anthropic_model: Some("   ".into()),
+        },
+    )
+    .await
+    .expect("save");
+
+assert_eq!(view.anthropic_model, "claude-3-7-sonnet-latest");
+```
+
 Add one save-path test proving a newly submitted unsupported model is rejected instead of being written through:
 
 ```rust
@@ -238,6 +285,7 @@ Expected:
 - FAIL because the default model constant is still `claude-haiku-4-5`.
 - FAIL because there is no shared allow-list for the three official model IDs.
 - FAIL because there is no explicit test coverage protecting existing custom model values from being overwritten on load or unrelated saves.
+- FAIL because omitted or blank `anthropic_model` still overwrites an existing saved model with the default instead of preserving it.
 - FAIL because a newly submitted unsupported model still saves successfully instead of being rejected.
 
 **Step 3: Implement the shared model metadata and normalization**
@@ -279,7 +327,7 @@ fn normalize_model(model: Option<String>) -> String {
 }
 ```
 
-Keep normalization intentionally narrow: blank submissions still resolve to the new default `claude-haiku-4-5-20251001`, but any non-empty current value is preserved so an unrelated settings save cannot destroy an existing model choice.
+Use that helper only for display and for brand-new records. Do not reuse it directly for save-path validation, because omitted or blank form values on an existing record must preserve the stored model instead of silently switching to the default.
 
 Add a dedicated save-path validator in `server/src/app/settings.rs` that enforces the allow-list while still permitting the already-stored legacy value to round-trip unchanged:
 
@@ -288,28 +336,35 @@ fn resolve_model_for_save(
     existing: Option<&LlmSettings>,
     submitted: Option<String>,
 ) -> Result<String, DomainError> {
-    let normalized = normalize_model(submitted);
-    if ANTHROPIC_MODEL_OPTIONS
-        .iter()
-        .any(|option| option.value == normalized)
-    {
-        return Ok(normalized);
+    match submitted.as_deref().map(str::trim) {
+        None | Some("") => {
+            if let Some(settings) = existing {
+                return Ok(settings.anthropic_model.trim().to_string());
+            }
+            Ok(DEFAULT_ANTHROPIC_MODEL.to_string())
+        }
+        Some(value)
+            if ANTHROPIC_MODEL_OPTIONS
+                .iter()
+                .any(|option| option.value == value) =>
+        {
+            Ok(value.to_string())
+        }
+        Some(value)
+            if existing
+                .map(|settings| settings.anthropic_model.trim() == value)
+                .unwrap_or(false) =>
+        {
+            Ok(value.to_string())
+        }
+        Some(_) => Err(DomainError::InvalidInput(
+            "Unsupported Anthropic model selection".into(),
+        )),
     }
-
-    if existing
-        .map(|settings| settings.anthropic_model.trim() == normalized)
-        .unwrap_or(false)
-    {
-        return Ok(normalized);
-    }
-
-    Err(DomainError::InvalidInput(
-        "Unsupported Anthropic model selection".into(),
-    ))
 }
 ```
 
-Update `SettingsService::save` to load the existing settings before validation, call `resolve_model_for_save(existing.as_ref(), input.anthropic_model)`, and return `DomainError::InvalidInput` for any forged unsupported submission that is not the already-stored current value.
+Update `SettingsService::save` to load the existing settings before validation, call `resolve_model_for_save(existing.as_ref(), input.anthropic_model)`, and preserve the stored model whenever the request omits or blanks `anthropic_model`. Only a new record should default to `claude-haiku-4-5-20251001`, and only an explicit submitted official option should replace the current value. Return `DomainError::InvalidInput` for any forged unsupported submission that is not the already-stored current value.
 
 **Step 4: Run the unit tests and verify they pass**
 
