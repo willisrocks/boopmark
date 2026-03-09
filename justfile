@@ -1,30 +1,33 @@
-# Boopmark development commands
+# Local development commands
 
-# List available commands
-default:
-    @just --list
-
-# Bootstrap the project (install deps, generate types)
-setup:
-    bun install
-    bunx react-router typegen
-
-# Start the dev server
 dev:
-    bun run dev
+    docker compose up -d db minio
+    cargo run -p boopmark-server
 
-# Run typechecking
-typecheck:
-    bun run typecheck
+build:
+    cargo build --release
 
-# Run all tests
 test:
-    bunx vitest run
+    cargo test
 
-# Run tests in watch mode
-test-watch:
-    bunx vitest
+css:
+    npx tailwindcss -i static/css/input.css -o static/css/output.css --watch
 
-# Run a specific test file
-test-file file:
-    bunx vitest run {{file}}
+css-build:
+    npx tailwindcss -i static/css/input.css -o static/css/output.css --minify
+
+typecheck:
+    cargo check
+
+docker-up:
+    docker compose up -d
+
+docker-down:
+    docker compose down
+
+migrate:
+    sqlx migrate run --source migrations
+
+deploy:
+    just css-build
+    fly deploy

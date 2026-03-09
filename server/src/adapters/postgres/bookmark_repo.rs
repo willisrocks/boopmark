@@ -1,0 +1,125 @@
+use crate::domain::bookmark::*;
+use crate::domain::error::DomainError;
+use crate::domain::ports::bookmark_repo::BookmarkRepository;
+use super::PostgresPool;
+use uuid::Uuid;
+
+impl BookmarkRepository for PostgresPool {
+    async fn create(&self, user_id: Uuid, input: CreateBookmark) -> Result<Bookmark, DomainError> {
+        let tags = input.tags.unwrap_or_default();
+        sqlx::query_as::<_, Bookmark>(
+            "INSERT INTO bookmarks (user_id, url, title, description, image_url, domain, tags)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
+        )
+        .bind(user_id)
+        .bind(&input.url)
+        .bind(&input.title)
+        .bind(&input.description)
+        .bind(&input.image_url)
+        .bind(&input.domain)
+        .bind(&tags)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))
+    }
+
+    async fn get(&self, id: Uuid, user_id: Uuid) -> Result<Bookmark, DomainError> {
+        sqlx::query_as::<_, Bookmark>(
+            "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at
+             FROM bookmarks WHERE id = $1 AND user_id = $2",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?
+        .ok_or(DomainError::NotFound)
+    }
+
+    async fn list(&self, user_id: Uuid, filter: BookmarkFilter) -> Result<Vec<Bookmark>, DomainError> {
+        let limit = filter.limit.unwrap_or(50);
+        let offset = filter.offset.unwrap_or(0);
+
+        let order_clause = match filter.sort.unwrap_or_default() {
+            BookmarkSort::Newest => "created_at DESC",
+            BookmarkSort::Oldest => "created_at ASC",
+            BookmarkSort::Title => "title ASC NULLS LAST",
+            BookmarkSort::Domain => "domain ASC NULLS LAST",
+        };
+
+        // Build dynamic query since ORDER BY can't be parameterized
+        let mut sql = String::from(
+            "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at FROM bookmarks WHERE user_id = $1",
+        );
+        let mut param_idx = 2;
+
+        if filter.search.is_some() {
+            sql.push_str(&format!(
+                " AND to_tsvector('english', coalesce(title, '') || ' ' || coalesce(description, '') || ' ' || url) @@ plainto_tsquery('english', ${param_idx})"
+            ));
+            param_idx += 1;
+        }
+
+        if filter.tags.is_some() {
+            sql.push_str(&format!(" AND tags && ${param_idx}"));
+            param_idx += 1;
+        }
+
+        sql.push_str(&format!(
+            " ORDER BY {order_clause} LIMIT ${param_idx} OFFSET ${}",
+            param_idx + 1
+        ));
+
+        let mut query = sqlx::query_as::<_, Bookmark>(&sql).bind(user_id);
+
+        if let Some(ref search) = filter.search {
+            query = query.bind(search);
+        }
+        if let Some(ref tags) = filter.tags {
+            query = query.bind(tags);
+        }
+
+        query = query.bind(limit).bind(offset);
+
+        query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))
+    }
+
+    async fn update(&self, id: Uuid, user_id: Uuid, input: UpdateBookmark) -> Result<Bookmark, DomainError> {
+        sqlx::query_as::<_, Bookmark>(
+            "UPDATE bookmarks SET
+                title = COALESCE($3, title),
+                description = COALESCE($4, description),
+                tags = COALESCE($5, tags),
+                updated_at = now()
+             WHERE id = $1 AND user_id = $2
+             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(&input.title)
+        .bind(&input.description)
+        .bind(input.tags.as_deref())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?
+        .ok_or(DomainError::NotFound)
+    }
+
+    async fn delete(&self, id: Uuid, user_id: Uuid) -> Result<(), DomainError> {
+        let result = sqlx::query("DELETE FROM bookmarks WHERE id = $1 AND user_id = $2")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(DomainError::NotFound);
+        }
+        Ok(())
+    }
+}

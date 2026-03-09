@@ -1,0 +1,8 @@
+{% for bookmark in bookmarks %}
+{% include "bookmarks/card.html" %}
+{% endfor %}
+{% if bookmarks.is_empty() %}
+<div class="col-span-full text-center py-12 text-gray-500">
+    No bookmarks found.
+</div>
+{% endif %}

@@ -1,0 +1,35 @@
+<div id="bookmark-{{ bookmark.id }}" class="bg-[#1e2235] rounded-xl border border-gray-800 overflow-hidden hover:border-gray-600 transition-colors">
+    {% if let Some(img) = bookmark.image_url %}
+    <div class="h-40 bg-[#151827] flex items-center justify-center overflow-hidden">
+        <img src="{{ img }}" alt="" class="w-full h-full object-cover" loading="lazy">
+    </div>
+    {% else %}
+    <div class="h-40 bg-[#151827] flex items-center justify-center">
+        <span class="text-4xl text-gray-600">&#128278;</span>
+    </div>
+    {% endif %}
+    <div class="p-4">
+        <a href="{{ bookmark.url }}" target="_blank" rel="noopener"
+           class="text-sm font-medium text-gray-200 hover:text-white line-clamp-2">
+            {% if let Some(title) = bookmark.title %}{{ title }}{% else %}{{ bookmark.url }}{% endif %}
+        </a>
+        {% if let Some(desc) = bookmark.description %}
+        <p class="text-xs text-gray-500 mt-1 line-clamp-2">{{ desc }}</p>
+        {% endif %}
+        <div class="flex flex-wrap gap-1 mt-3">
+            {% for tag in bookmark.tags %}
+            <span class="px-2 py-0.5 text-xs rounded-full bg-[#2a2d45] text-gray-400">{{ tag }}</span>
+            {% endfor %}
+        </div>
+        <div class="flex items-center justify-between mt-3">
+            <span class="text-xs text-gray-600">{{ bookmark.created_at_display }}</span>
+            <button class="text-xs text-gray-600 hover:text-red-400"
+                    hx-delete="/bookmarks/{{ bookmark.id }}"
+                    hx-target="#bookmark-{{ bookmark.id }}"
+                    hx-swap="outerHTML swap:200ms"
+                    hx-confirm="Delete this bookmark?">
+                Delete
+            </button>
+        </div>
+    </div>
+</div>

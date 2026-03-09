@@ -1,0 +1,84 @@
+mod adapters;
+mod app;
+mod config;
+mod domain;
+mod web;
+
+use adapters::postgres::PostgresPool;
+use adapters::scraper::HtmlMetadataExtractor;
+use adapters::storage::local::LocalStorage;
+use adapters::storage::s3::S3Storage;
+use app::auth::AuthService;
+use app::bookmarks::BookmarkService;
+use config::{Config, StorageBackend};
+use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
+use web::state::{AppState, Bookmarks};
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let config = Config::from_env();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&config.database_url)
+        .await
+        .expect("Failed to connect to database");
+
+    sqlx::migrate!("../migrations")
+        .run(&pool)
+        .await
+        .expect("Failed to run migrations");
+
+    let db = Arc::new(PostgresPool::new(pool));
+
+    let metadata = Arc::new(HtmlMetadataExtractor::new());
+
+    let bookmarks = match config.storage_backend {
+        StorageBackend::Local => {
+            let storage = Arc::new(LocalStorage::new(
+                "./uploads".into(),
+                format!("{}/static/uploads", config.app_url),
+            ));
+            Bookmarks::Local(Arc::new(BookmarkService::new(
+                db.clone(),
+                metadata,
+                storage,
+            )))
+        }
+        StorageBackend::S3 => {
+            let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+            let s3_client = aws_sdk_s3::Client::new(&s3_config);
+            let storage = Arc::new(S3Storage::new(
+                s3_client,
+                config.s3_bucket.clone(),
+                config
+                    .s3_public_url
+                    .clone()
+                    .unwrap_or_else(|| format!("https://{}.s3.amazonaws.com", config.s3_bucket)),
+            ));
+            Bookmarks::S3(Arc::new(BookmarkService::new(db.clone(), metadata, storage)))
+        }
+    };
+
+    let auth_service = Arc::new(AuthService::new(db.clone(), db.clone(), db.clone()));
+
+    let state = AppState {
+        bookmarks,
+        auth: auth_service,
+        config: Arc::new(config.clone()),
+    };
+
+    let app = web::router::create_router(state);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.port))
+        .await
+        .unwrap();
+
+    tracing::info!("listening on {}", config.port);
+    axum::serve(listener, app).await.unwrap();
+}
