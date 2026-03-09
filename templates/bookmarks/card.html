@@ -1,13 +1,15 @@
 <div id="bookmark-{{ bookmark.id }}" data-testid="bookmark-card" class="bg-[#1e2235] rounded-xl border border-gray-800 overflow-hidden hover:border-gray-600 transition-colors">
-    {% if let Some(img) = bookmark.image_url %}
-    <div class="h-40 bg-[#151827] flex items-center justify-center overflow-hidden">
-        <img src="{{ img }}" alt="" class="w-full h-full object-cover" loading="lazy" data-testid="bookmark-card-image">
-    </div>
-    {% else %}
-    <div class="h-40 bg-[#151827] flex items-center justify-center">
-        <span class="text-4xl text-gray-600">&#128278;</span>
-    </div>
-    {% endif %}
+    <a href="{{ bookmark.url }}" target="_blank" rel="noopener" class="block" data-testid="bookmark-card-image-link">
+        {% if let Some(img) = bookmark.image_url %}
+        <div class="h-40 bg-[#151827] flex items-center justify-center overflow-hidden">
+            <img src="{{ img }}" alt="" class="w-full h-full object-cover" loading="lazy" data-testid="bookmark-card-image">
+        </div>
+        {% else %}
+        <div class="h-40 bg-[#151827] flex items-center justify-center">
+            <span class="text-4xl text-gray-600">&#128278;</span>
+        </div>
+        {% endif %}
+    </a>
     <div class="p-4">
         <a href="{{ bookmark.url }}" target="_blank" rel="noopener"
            class="text-sm font-medium text-gray-200 hover:text-white line-clamp-2">

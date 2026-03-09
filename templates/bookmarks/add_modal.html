@@ -8,7 +8,7 @@
         <form hx-post="/bookmarks"
               hx-target="#bookmark-grid"
               hx-swap="afterbegin"
-              hx-on::after-request="if(event.detail.successful && event.detail.elt === this) document.getElementById('add-modal').classList.add('hidden')"
+              hx-on::after-request="if(event.detail.successful && event.detail.elt === this) { document.getElementById('bookmark-url-input').value = ''; document.getElementById('bookmark-title-input').value = ''; document.getElementById('bookmark-description-input').value = ''; var ti = document.querySelector('[name=tags_input]'); if(ti) ti.value = ''; document.getElementById('add-modal').classList.add('hidden'); }"
               class="space-y-4">
             <div>
                 <label class="block text-sm text-gray-400 mb-1">URL</label>
@@ -23,6 +23,7 @@
                        hx-target="#bookmark-suggest-target"
                        hx-swap="outerHTML"
                        hx-include="closest form"
+                       hx-indicator="#suggest-spinner"
                        class="w-full px-3 py-2 rounded-lg bg-[#0f1117] border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500">
             </div>
             {% include "bookmarks/add_modal_suggest_fields.html" %}
