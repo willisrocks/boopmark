@@ -14,7 +14,7 @@ Anthropic model source already confirmed from the official live docs on March 9,
 
 ### Task 1: Refresh the worktree `.env` and capture failing browser expectations
 
-Start with the browser contract so the implementation is driven by the user-visible behavior: truthful saved-key status, explicit replace/clear flow, current model select options, and the restored app shell on `/settings`.
+Start with the browser contract so the implementation is driven by the user-visible behavior: truthful saved-key status, a single explicit keep/replace/clear key flow, current model select options, and the restored app shell on `/settings`.
 
 **Files:**
 - Modify: `tests/e2e/settings.spec.js`
@@ -60,19 +60,19 @@ await page.getByRole("button", { name: "Save settings" }).click();
 await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
 await expect(page.getByText("Anthropic API key saved securely")).toBeVisible();
 await expect(page.getByLabel("Anthropic API key")).toHaveCount(0);
-await page.getByText("Replace saved key").click();
+await expect(page.getByLabel("Keep current saved key")).toBeChecked();
+await page.getByLabel("Replace saved key").check();
 await expect(page.getByTestId("anthropic-api-key-replacement")).toBeVisible();
 await page.getByLabel("Replacement Anthropic API key").fill(anthropicApiKey);
+await page.getByLabel("Clear saved key").check();
+await expect(page.getByTestId("anthropic-api-key-replacement")).toHaveCount(0);
+await expect(page.getByText("Saving will remove the stored Anthropic API key.")).toBeVisible();
 await page.getByRole("button", { name: "Save settings" }).click();
 ```
 
 Finish that test by asserting the clear flow is explicit:
 
 ```js
-await expect(page.getByLabel("Clear saved Anthropic API key on save")).toBeVisible();
-await page.getByLabel("Clear saved Anthropic API key on save").check();
-await page.getByRole("button", { name: "Save settings" }).click();
-
 await expect(page.getByText("No Anthropic API key saved yet.")).toBeVisible();
 await expect(page.getByLabel("Anthropic API key")).toBeEditable();
 ```
@@ -91,6 +91,27 @@ await expect(page.locator("#anthropic_model option")).toHaveValues([
 
 Document in the test name or comments that this exact-three-options assertion is for the normal official-only path. The preserved-legacy path is covered separately in unit tests because the E2E reset helper intentionally leaves the account on an official model before the main assertions run.
 
+Add one authenticated request-level browser test for the invalid-model HTTP contract:
+
+```js
+await signIn(page);
+const status = await page.evaluate(async () => {
+  const response = await fetch("/settings", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      llm_enabled: "on",
+      anthropic_model: "claude-3-7-sonnet-latest",
+    }),
+  });
+  return response.status;
+});
+
+expect(status).toBe(400);
+```
+
 **Step 3: Run the browser spec and verify it fails on current code**
 
 Run:
@@ -103,6 +124,8 @@ Expected:
 - FAIL because the current page does not include the shared header.
 - FAIL because the current page still uses a free-text model input instead of a `select`.
 - FAIL because the current page still shows an empty editable password input even when a key is saved.
+- FAIL because the current page still exposes contradictory replace-and-clear API key actions.
+- FAIL because the invalid-model POST still returns the wrong status code.
 
 **Step 4: Commit the failing browser coverage**
 
@@ -476,6 +499,33 @@ struct SettingsPage {
 }
 ```
 
+Update the form parsing in `server/src/web/pages/settings.rs` so API key intent is one explicit state instead of two conflicting controls:
+
+```rust
+#[derive(Deserialize)]
+struct SettingsForm {
+    llm_enabled: Option<String>,
+    anthropic_api_key_action: Option<String>, // keep | replace | clear
+    anthropic_api_key: Option<String>,
+    anthropic_model: Option<String>,
+}
+```
+
+Map that single form field in the POST handler:
+
+```rust
+let api_key_action = form
+    .anthropic_api_key_action
+    .as_deref()
+    .unwrap_or("keep");
+
+let (anthropic_api_key, clear_anthropic_api_key) = match api_key_action {
+    "replace" => (form.anthropic_api_key, false),
+    "clear" => (None, true),
+    _ => (None, false),
+};
+```
+
 Populate `user: Some(user.clone().into())`, `header_shows_bookmark_actions: false`, and build `anthropic_model_options` from a small helper in `server/src/web/pages/settings.rs`, prepending one selected preservation option only when the current saved value is not one of the three official values:
 
 ```rust
@@ -543,19 +593,28 @@ Render the saved-key branch like this:
     class="rounded-lg border border-gray-700 bg-[#1a1d2e] px-4 py-3"
 >
     <p class="text-sm font-medium text-gray-200">Anthropic API key saved securely.</p>
-    <p class="text-xs text-gray-400 mt-1">Use Replace to enter a new key, or clear it on save to remove the stored key and make the field editable again.</p>
+    <p class="text-xs text-gray-400 mt-1">Choose one action below: keep using it, replace it, or remove it.</p>
 </div>
-<details class="space-y-2">
-    <summary class="cursor-pointer text-sm text-blue-300">Replace saved key</summary>
+<fieldset class="space-y-3">
+    <legend class="text-sm font-medium text-gray-200">Saved key action</legend>
+    <label class="flex items-start gap-2 text-sm text-gray-300">
+        <input type="radio" name="anthropic_api_key_action" value="keep" aria-label="Keep current saved key" checked>
+        <span>Keep current saved key</span>
+    </label>
+    <label class="flex items-start gap-2 text-sm text-gray-300">
+        <input type="radio" name="anthropic_api_key_action" value="replace" aria-label="Replace saved key">
+        <span>Replace saved key</span>
+    </label>
     <div data-testid="anthropic-api-key-replacement" class="space-y-2">
         <label for="anthropic_api_key_replacement" class="block text-sm font-medium text-gray-200">Replacement Anthropic API key</label>
         <input id="anthropic_api_key_replacement" name="anthropic_api_key" type="password" autocomplete="off" class="w-full ..." />
     </div>
-</details>
-<label class="flex items-start gap-2 text-xs text-gray-300">
-    <input type="checkbox" name="clear_anthropic_api_key" aria-label="Clear saved Anthropic API key on save">
-    <span>Clear saved key on save. After saving, the API key field will be editable again.</span>
-</label>
+    <label class="flex items-start gap-2 text-sm text-gray-300">
+        <input type="radio" name="anthropic_api_key_action" value="clear" aria-label="Clear saved key">
+        <span>Clear saved key</span>
+    </label>
+    <p class="text-xs text-gray-400">Saving will remove the stored Anthropic API key.</p>
+</fieldset>
 {% else %}
 <input id="anthropic_api_key" name="anthropic_api_key" type="password" autocomplete="off" class="w-full ..." />
 <p class="text-xs text-gray-400">No Anthropic API key saved yet.</p>
@@ -573,7 +632,9 @@ Replace the free-text model input with a select rendered from `anthropic_model_o
 <p class="text-xs text-gray-400">Default: Claude Haiku 4.5 (`claude-haiku-4-5-20251001`).</p>
 ```
 
-This keeps the page truthful: saved key state is visible without inventing a pseudo-secret, direct editing is opt-in, and official model choices use friendly labels with full saved IDs.
+Use a small progressive-enhancement script or CSS toggle pattern tied to the selected radio so only the active branch is visible: replacement input only when `replace` is selected, clear confirmation only when `clear` is selected, and neither when `keep` is selected. That removes the contradictory replace-plus-clear state instead of relying on backend precedence to decide it.
+
+This keeps the page truthful: saved key state is visible without inventing a pseudo-secret, the API key action is mutually exclusive and explicit, and official model choices use friendly labels with full saved IDs.
 
 **Step 4: Run the targeted browser and backend tests**
 
