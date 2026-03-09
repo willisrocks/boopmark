@@ -52,10 +52,7 @@ impl MetadataExtractor for HtmlMetadataExtractor {
         let description = select_meta(&document, "og:description")
             .or_else(|| select_meta_name(&document, "description"));
 
-        let image_url = select_meta(&document, "og:image")
-            .or_else(|| select_meta_name(&document, "og:image"))
-            .or_else(|| select_meta(&document, "twitter:image"))
-            .or_else(|| select_meta_name(&document, "twitter:image"))
+        let image_url = extract_image_url(&document)
             .map(|img| resolve_url(url_str, &img));
 
         Ok(UrlMetadata {
@@ -87,10 +84,19 @@ fn select_meta_name(document: &Html, name: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn extract_image_url(document: &Html) -> Option<String> {
+    select_meta(document, "og:image")
+        .or_else(|| select_meta_name(document, "og:image"))
+        .or_else(|| select_meta(document, "twitter:image"))
+        .or_else(|| select_meta_name(document, "twitter:image"))
+}
+
 fn resolve_url(base: &str, relative: &str) -> String {
-    if relative.starts_with("http") {
+    // Absolute URLs (http, https, data, etc.) are returned as-is
+    if Url::parse(relative).is_ok() {
         return relative.to_string();
     }
+    // Relative URLs are resolved against the base
     Url::parse(base)
         .and_then(|b| b.join(relative))
         .map(|u| u.to_string())
@@ -135,11 +141,7 @@ mod tests {
                 <meta name="twitter:image" content="https://example.com/tw.png">
             </head><body></body></html>"#,
         );
-        let img = select_meta(&html, "og:image")
-            .or_else(|| select_meta_name(&html, "og:image"))
-            .or_else(|| select_meta(&html, "twitter:image"))
-            .or_else(|| select_meta_name(&html, "twitter:image"));
-        assert_eq!(img, Some("https://example.com/tw.png".to_string()));
+        assert_eq!(extract_image_url(&html), Some("https://example.com/tw.png".to_string()));
     }
 
     #[test]
@@ -147,11 +149,7 @@ mod tests {
         let html = Html::parse_document(
             r#"<html><head><title>No images</title></head><body></body></html>"#,
         );
-        let img = select_meta(&html, "og:image")
-            .or_else(|| select_meta_name(&html, "og:image"))
-            .or_else(|| select_meta(&html, "twitter:image"))
-            .or_else(|| select_meta_name(&html, "twitter:image"));
-        assert_eq!(img, None);
+        assert_eq!(extract_image_url(&html), None);
     }
 
     #[test]
@@ -178,10 +176,15 @@ mod tests {
                 <meta name="twitter:image" content="https://example.com/tw.png">
             </head><body></body></html>"#,
         );
-        let img = select_meta(&html, "og:image")
-            .or_else(|| select_meta_name(&html, "og:image"))
-            .or_else(|| select_meta(&html, "twitter:image"))
-            .or_else(|| select_meta_name(&html, "twitter:image"));
-        assert_eq!(img, Some("https://example.com/og.png".to_string()));
+        assert_eq!(extract_image_url(&html), Some("https://example.com/og.png".to_string()));
+    }
+
+    #[test]
+    fn resolve_url_handles_data_uri() {
+        let data_uri = "data:image/png;base64,iVBORw0KGgo=";
+        assert_eq!(
+            resolve_url("https://example.com/page", data_uri),
+            data_uri
+        );
     }
 }

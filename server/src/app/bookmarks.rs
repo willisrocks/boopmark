@@ -10,6 +10,7 @@ pub struct BookmarkService<R, M, S> {
     repo: Arc<R>,
     metadata: Arc<M>,
     storage: Arc<S>,
+    http_client: reqwest::Client,
 }
 
 impl<R, M, S> BookmarkService<R, M, S>
@@ -19,7 +20,12 @@ where
     S: ObjectStorage + Send + Sync,
 {
     pub fn new(repo: Arc<R>, metadata: Arc<M>, storage: Arc<S>) -> Self {
-        Self { repo, metadata, storage }
+        let http_client = reqwest::Client::builder()
+            .user_agent("Boopmark/1.0 (+https://boopmark.app)")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client");
+        Self { repo, metadata, storage, http_client }
     }
 
     pub async fn create(&self, user_id: Uuid, mut input: CreateBookmark) -> Result<Bookmark, DomainError> {
@@ -70,13 +76,15 @@ where
     }
 
     async fn download_and_store_image(&self, image_url: &str) -> Result<String, DomainError> {
-        let client = reqwest::Client::builder()
-            .user_agent("Boopmark/1.0 (+https://boopmark.app)")
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| DomainError::Internal(format!("client build error: {e}")))?;
-        let resp = client.get(image_url).send().await
+        let resp = self.http_client.get(image_url).send().await
             .map_err(|e| DomainError::Internal(format!("image fetch error: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(DomainError::Internal(format!(
+                "image fetch returned HTTP {}",
+                resp.status()
+            )));
+        }
 
         let content_type = resp.headers()
             .get("content-type")
@@ -93,7 +101,8 @@ where
 }
 
 fn extension_from_content_type(ct: &str) -> &str {
-    match ct {
+    let mime = ct.split(';').next().unwrap_or(ct).trim();
+    match mime {
         "image/png" => "png",
         "image/gif" => "gif",
         "image/webp" => "webp",
