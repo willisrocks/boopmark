@@ -104,6 +104,11 @@ test("unauthenticated requests cannot read or save settings", async ({ page, req
   const getResponse = await request.get("/settings");
   expect(getResponse.status()).toBe(401);
 
+  const legacyResponse = await request.get("/settings/api-keys", {
+    maxRedirects: 0,
+  });
+  expect(legacyResponse.status()).toBe(401);
+
   const postResponse = await request.post("/settings", {
     form: {
       llm_enabled: "on",
@@ -115,4 +120,6 @@ test("unauthenticated requests cannot read or save settings", async ({ page, req
 
   await page.goto("/settings");
   await expect(page.getByRole("heading", { name: "Settings" })).toHaveCount(0);
+  await page.goto("/settings/api-keys");
+  await expect(page).not.toHaveURL(/\/settings$/);
 });

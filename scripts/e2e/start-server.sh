@@ -25,4 +25,13 @@ if [ -f .env ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   export ANTHROPIC_API_KEY="$(awk -F= '/^ANTHROPIC_API_KEY=/{print substr($0, index($0,$2))}' .env)"
 fi
 
+if [ -f .env ] && [ -z "${LLM_SETTINGS_ENCRYPTION_KEY:-}" ]; then
+  export LLM_SETTINGS_ENCRYPTION_KEY="$(awk -F= '/^LLM_SETTINGS_ENCRYPTION_KEY=/{print substr($0, index($0,$2))}' .env)"
+fi
+
+if [ -z "${LLM_SETTINGS_ENCRYPTION_KEY:-}" ]; then
+  echo "LLM_SETTINGS_ENCRYPTION_KEY must exist in the copied worktree .env or environment" >&2
+  exit 1
+fi
+
 exec cargo run -p boopmark-server

@@ -84,7 +84,7 @@ async fn save_settings(
     }
 }
 
-async fn legacy_api_keys_redirect() -> Redirect {
+async fn legacy_api_keys_redirect(AuthUser(_user): AuthUser) -> Redirect {
     Redirect::to("/settings")
 }
 

@@ -42,10 +42,8 @@ where
         input: SaveLlmSettingsInput,
     ) -> Result<SettingsView, DomainError> {
         let normalized_model = normalize_model(input.anthropic_model);
-        let key_change = resolve_api_key_change(
-            input.anthropic_api_key,
-            input.clear_anthropic_api_key,
-        );
+        let key_change =
+            resolve_api_key_change(input.anthropic_api_key, input.clear_anthropic_api_key);
 
         let (replace_key, clear_key) = match key_change {
             ApiKeyChange::KeepExisting => (None, false),
@@ -262,7 +260,10 @@ mod tests {
         assert!(!last_upsert.clear_anthropic_api_key);
         assert_eq!(last_upsert.anthropic_model, "claude-haiku-4-5-20251001");
         assert_ne!(encrypted, b"sk-ant-test");
-        assert_eq!(secret_box.decrypt(&encrypted).expect("decrypt"), "sk-ant-test");
+        assert_eq!(
+            secret_box.decrypt(&encrypted).expect("decrypt"),
+            "sk-ant-test"
+        );
         assert!(view.enabled);
         assert!(view.has_anthropic_api_key);
         assert_eq!(view.anthropic_model, "claude-haiku-4-5-20251001");
