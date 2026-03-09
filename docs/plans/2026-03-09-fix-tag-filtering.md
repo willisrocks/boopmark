@@ -4,7 +4,7 @@
 
 **Goal:** Fix tag filtering so clicking a tag filter button correctly shows only bookmarks with that tag, and ensure the tag filter bar retains all tags on full-page loads so users can switch between tags.
 
-**Architecture:** Two bugs combine to break tag filtering. First, HTMX `hx-include` on tag buttons sends the empty search input as `search=`, and the handler passes `Some("")` into `BookmarkFilter.search`, adding a `plainto_tsquery('english', '')` clause that matches zero rows. Second, `collect_all_tags` derives the tag filter bar from the already-filtered results, so on full-page loads (browser refresh, back-navigation) with an active tag filter, tags not present in the filtered set disappear from the filter bar. Both fixes are in `server/src/web/pages/bookmarks.rs`. The HTMX partial path renders only `BookmarkList` (no filter bar), so the tag bar fix only matters on full-page loads where we issue an additional unfiltered query to get the complete tag set.
+**Architecture:** Two bugs combine to break tag filtering. First, HTMX `hx-include` on tag buttons sends the empty search input as `search=`, and the handler passes `Some("")` into `BookmarkFilter.search`, adding a `plainto_tsquery('english', '')` clause that matches zero rows. Second, `collect_all_tags` derives the tag filter bar from the already-filtered results, so on full-page loads (browser refresh, back-navigation) with an active tag filter, tags not present in the filtered set disappear from the filter bar. The first fix normalizes empty search strings to `None` in the handler. The second adds a dedicated `all_tags` query (`SELECT DISTINCT unnest(tags)`) to the `BookmarkRepository` trait — this is more efficient than fetching full bookmark rows, correctly returns all tags regardless of count, and only runs on full-page loads (the HTMX partial path renders only `BookmarkList` with no filter bar).
 
 **Tech Stack:** Rust, Axum, SQLx, Askama, HTMX, Postgres
 
@@ -62,22 +62,71 @@ git add server/src/web/pages/bookmarks.rs
 git commit -m "fix: normalize empty search strings to None so tag filtering works"
 ```
 
-### Task 2: Populate tag filter bar from unfiltered results on full-page loads
+### Task 2: Add `all_tags` query to the repository layer
 
-The HTMX partial path returns only `BookmarkList` (no filter bar), so `filter_tags` only matters on the `GridPage` full-page path. When there are active filters, we need an additional unfiltered query to populate the complete tag bar. This uses the existing `list` method with `BookmarkFilter::default()` — no new trait methods needed.
+Add a dedicated `all_tags` method that returns all distinct tags for a user via `SELECT DISTINCT unnest(tags)`. This is more efficient than fetching full bookmark rows and correctly returns all tags regardless of bookmark count (no LIMIT).
 
 **Files:**
-- Modify: `server/src/web/pages/bookmarks.rs:145-175` (tag bar + render logic)
+- Modify: `server/src/domain/ports/bookmark_repo.rs` (add `all_tags` to trait)
+- Modify: `server/src/adapters/postgres/bookmark_repo.rs` (implement `all_tags`)
+- Modify: `server/src/app/bookmarks.rs` (expose `all_tags` through service)
 
-**Step 1: Capture `has_active_filter` before filter is consumed**
+**Step 1: Add `all_tags` to the `BookmarkRepository` trait**
 
-Add this line immediately before `let bookmarks = with_bookmarks!(...)` (before line 145):
+In `server/src/domain/ports/bookmark_repo.rs`, add after the `delete` method:
 
 ```rust
-    let has_active_filter = filter.search.is_some() || filter.tags.is_some();
+    async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError>;
 ```
 
-**Step 2: Replace the tag collection and render block**
+**Step 2: Implement `all_tags` in the Postgres adapter**
+
+In `server/src/adapters/postgres/bookmark_repo.rs`, add inside the `impl BookmarkRepository for PostgresPool` block, after the `delete` method:
+
+```rust
+    async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT unnest(tags) AS tag FROM bookmarks WHERE user_id = $1 ORDER BY tag",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|(t,)| t).collect())
+    }
+```
+
+**Step 3: Expose `all_tags` through `BookmarkService`**
+
+In `server/src/app/bookmarks.rs`, add after the `extract_metadata` method:
+
+```rust
+    pub async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError> {
+        self.repo.all_tags(user_id).await
+    }
+```
+
+**Step 4: Build to verify it compiles**
+
+Run: `cargo build -p boopmark-server`
+Expected: Compiles without errors.
+
+**Step 5: Commit**
+
+```bash
+git add server/src/domain/ports/bookmark_repo.rs server/src/adapters/postgres/bookmark_repo.rs server/src/app/bookmarks.rs
+git commit -m "feat: add all_tags query to BookmarkRepository for efficient tag listing"
+```
+
+### Task 3: Use `all_tags` for the tag filter bar on full-page loads
+
+Replace `collect_all_tags(&bookmarks)` with the new `all_tags` query on full-page loads. On the HTMX partial path, the filter bar is not rendered, so no tag query is needed.
+
+**Files:**
+- Modify: `server/src/web/pages/bookmarks.rs:148-175` (tag bar + render logic)
+
+**Step 1: Replace the tag collection and render block**
 
 Replace lines 148-175 (from `let all_tags = collect_all_tags` through the end of the `else` render block):
 
@@ -122,18 +171,14 @@ With:
             bookmarks: bookmark_views,
         })
     } else {
-        // On full-page loads with active filters, fetch unfiltered bookmarks
-        // to populate the complete tag bar so users can switch between tags.
-        let tag_names = if has_active_filter {
-            let all_bookmarks = with_bookmarks!(&state.bookmarks, svc =>
-                svc.list(user.id, BookmarkFilter::default()).await
-            )
-            .unwrap_or_default();
-            collect_all_tags(&all_bookmarks)
-        } else {
-            collect_all_tag_names(&bookmark_views)
-        };
-        let filter_tags: Vec<TagView> = tag_names
+        // Full-page load: query all distinct tags for the filter bar.
+        // This is a lightweight query (SELECT DISTINCT unnest(tags)) that
+        // returns the complete tag set regardless of active filters.
+        let all_tag_names = with_bookmarks!(&state.bookmarks, svc =>
+            svc.all_tags(user.id).await
+        )
+        .unwrap_or_default();
+        let filter_tags: Vec<TagView> = all_tag_names
             .into_iter()
             .map(|name| {
                 let active = active_tags.contains(&name);
@@ -155,12 +200,12 @@ With:
     }
 ```
 
-**Step 3: Add `collect_all_tag_names` helper for `BookmarkView`**
+**Step 2: Remove the now-unused `collect_all_tags` function**
 
-Add this function alongside the existing `collect_all_tags` (near line 305):
+Delete the `collect_all_tags` function (lines 305-314 of `server/src/web/pages/bookmarks.rs`):
 
 ```rust
-fn collect_all_tag_names(bookmarks: &[BookmarkView]) -> Vec<String> {
+fn collect_all_tags(bookmarks: &[Bookmark]) -> Vec<String> {
     let mut tags: Vec<String> = bookmarks
         .iter()
         .flat_map(|b| b.tags.iter().cloned())
@@ -172,21 +217,19 @@ fn collect_all_tag_names(bookmarks: &[BookmarkView]) -> Vec<String> {
 }
 ```
 
-This is needed because `bookmarks` (the `Vec<Bookmark>`) has been moved into `bookmark_views` (the `Vec<BookmarkView>`) by the time we need to collect tags on the unfiltered path.
-
-**Step 4: Build to verify it compiles**
+**Step 3: Build to verify it compiles**
 
 Run: `cargo build -p boopmark-server`
-Expected: Compiles without errors.
+Expected: Compiles without errors and no warnings about unused functions.
 
-**Step 5: Commit**
+**Step 4: Commit**
 
 ```bash
 git add server/src/web/pages/bookmarks.rs
-git commit -m "fix: populate tag filter bar from unfiltered results on full-page loads"
+git commit -m "fix: use all_tags query for filter bar on full-page loads"
 ```
 
-### Task 3: Verify with agent-browser
+### Task 4: Verify with agent-browser
 
 **Step 1: Start the dev server if not running**
 
