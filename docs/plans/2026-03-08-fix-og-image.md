@@ -4,40 +4,67 @@
 
 **Goal:** Fix bookmark cards so they fetch, store, and display the og:image from bookmarked pages instead of showing a placeholder.
 
-**Architecture:** Two bugs prevent og:image display: (1) the local storage file path (`./uploads`) does not match the static file serving path (`./static`), so stored images are unreachable via HTTP; (2) the scraper sends requests without a User-Agent header, causing many sites (including GitHub) to return stripped HTML or block the request entirely. The fix aligns storage paths with the static file server and adds a proper User-Agent to the scraper's HTTP client.
+**Architecture:** Three issues prevent og:image display: (1) the local storage file path (`./uploads`) does not match the static file serving path (`./static`), so stored images are unreachable via HTTP; (2) the scraper sends requests without a User-Agent header, causing many sites (including GitHub) to return stripped HTML or block the request entirely; (3) there is no fallback to `twitter:image` meta tags. The fix adds a dedicated `/uploads` route to serve user-generated content separately from the git-tracked `./static` directory, adds a proper User-Agent to the scraper's HTTP client, and adds meta tag fallbacks.
 
 **Tech Stack:** Rust, Axum, reqwest, scraper crate, tower-http ServeDir
 
 ---
 
-### Task 1: Fix local storage path to align with static file serving
+### Task 1: Serve uploads directory on a dedicated route
 
-The `LocalStorage` is initialized with base dir `./uploads` and public URL prefix `{APP_URL}/static/uploads`, but `ServeDir` serves `./static` at `/static`. Files saved to `./uploads/images/xxx.jpg` are expected at URL `/static/uploads/images/xxx.jpg`, which maps to filesystem `./static/uploads/images/xxx.jpg` -- but the file is actually at `./uploads/images/xxx.jpg`.
+The `LocalStorage` saves files to `./uploads` with public URL prefix `{APP_URL}/static/uploads`, but `ServeDir` only serves `./static` at `/static`. Instead of moving uploads into the git-tracked `static/` directory (which would pollute the repo with binary files), add a second `ServeDir` at `/uploads` that serves from `./uploads`, and update the `LocalStorage` public URL prefix to match.
 
 **Files:**
+- Modify: `server/src/web/router.rs:6-17`
 - Modify: `server/src/main.rs:43-46`
 
-**Step 1: Fix the LocalStorage initialization**
+**Step 1: Add the `/uploads` route to the router**
 
-Change the base directory from `"./uploads"` to `"./static/uploads"` so that files saved by LocalStorage land inside the `./static` tree where `ServeDir` can find them.
+In `server/src/web/router.rs`, add a second `nest_service` call for uploads:
+
+```rust
+use axum::Router;
+use tower_http::services::ServeDir;
+
+use crate::web::state::AppState;
+
+pub fn create_router(state: AppState) -> Router {
+    Router::new()
+        // API routes
+        .nest("/api/v1", super::api::routes())
+        // Page routes
+        .merge(super::pages::routes())
+        // Static files (checked-in assets: CSS, JS, etc.)
+        .nest_service("/static", ServeDir::new("static"))
+        // User-generated uploads (images, etc.)
+        .nest_service("/uploads", ServeDir::new("uploads"))
+        // Health check
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .with_state(state)
+}
+```
+
+**Step 2: Update the LocalStorage public URL prefix**
+
+In `server/src/main.rs`, change the `LocalStorage` initialization so the public URL prefix uses `/uploads` instead of `/static/uploads`:
 
 ```rust
 let storage = Arc::new(LocalStorage::new(
-    "./static/uploads".into(),
-    format!("{}/static/uploads", config.app_url),
+    "./uploads".into(),
+    format!("{}/uploads", config.app_url),
 ));
 ```
 
-**Step 2: Verify the change compiles**
+**Step 3: Verify the change compiles**
 
 Run: `cargo build -p boopmark-server`
 Expected: Compiles successfully.
 
-**Step 3: Commit**
+**Step 4: Commit**
 
 ```bash
-git add server/src/main.rs
-git commit -m "fix: align local storage path with static file server"
+git add server/src/web/router.rs server/src/main.rs
+git commit -m "fix: serve uploads on dedicated route instead of under static"
 ```
 
 ---
@@ -155,12 +182,12 @@ git commit -m "fix: add User-Agent and timeout to image download client"
 
 ---
 
-### Task 5: Add unit test for scraper og:image extraction
+### Task 5: Add unit tests for scraper og:image extraction
 
 **Files:**
 - Modify: `server/src/adapters/scraper.rs` (add `#[cfg(test)]` module at bottom)
 
-**Step 1: Write the test**
+**Step 1: Write the tests**
 
 Add at the bottom of `server/src/adapters/scraper.rs`:
 
@@ -237,3 +264,37 @@ Expected: All 5 tests pass.
 git add server/src/adapters/scraper.rs
 git commit -m "test: add unit tests for og:image scraper extraction"
 ```
+
+---
+
+### Task 6: E2E browser verification with Playwright
+
+After all code changes are complete, verify end-to-end that bookmarking https://github.com/danshapiro/trycycle displays the og:image in the bookmark card. This requires the app to be running locally with `docker compose up` and access to a browser via Playwright MCP tools.
+
+**Preconditions:** Tasks 1-5 must be complete. The app must be running locally (`cargo run -p boopmark-server` or `docker compose up`). A test user must be logged in.
+
+**Step 1: Start the app locally**
+
+Run: `docker compose up -d && cargo run -p boopmark-server`
+Expected: Server starts on port 4000.
+
+**Step 2: Navigate to the app and log in**
+
+Use Playwright MCP `browser_navigate` to open `http://localhost:4000`. Log in with a test account (Google OAuth -- if no test account is available, this step requires manual intervention).
+
+**Step 3: Add a bookmark for the test URL**
+
+Use Playwright MCP tools to:
+1. Click the "Add Bookmark" button to open the modal.
+2. Fill the URL field with `https://github.com/danshapiro/trycycle`.
+3. Submit the form.
+
+**Step 4: Verify the bookmark card displays an image**
+
+Use Playwright MCP `browser_snapshot` or `browser_take_screenshot` to capture the page. Verify that the newly created bookmark card contains an `<img>` element with a `src` attribute pointing to `/uploads/images/...` (not the placeholder emoji). The image should be the GitHub social preview for the trycycle repo.
+
+**Step 5: Document results**
+
+If the image displays correctly, the fix is verified. If not, inspect the network requests (`browser_network_requests`) and console (`browser_console_messages`) for errors and report findings.
+
+**Note:** If Google OAuth is not available in the test environment, this task can be verified manually by the developer. The key verification is: (a) the scraper successfully fetched the og:image URL from the GitHub page, (b) the image was downloaded and stored to `./uploads/images/`, and (c) the bookmark card renders the stored image via the `/uploads/` route.
