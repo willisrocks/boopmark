@@ -4,105 +4,25 @@
 
 **Goal:** Make tag filter chips visually indicate the active/selected tag and support toggle-off (clicking an active tag clears the filter).
 
-**Architecture:** Two changes are needed: (1) the filter bar template needs toggle-aware URLs so clicking an active tag clears the filter, and (2) HTMX partial responses need to include an out-of-band filter bar update so the active state renders after HTMX navigation. Uses HTMX's `hx-swap-oob` to update the filter bar alongside the bookmark list in a single response.
+**Architecture:** Three changes: (1) toggle-aware URLs on tag chips so clicking an active tag clears the filter, (2) HTMX partial responses include an out-of-band filter bar update so the active state renders after HTMX navigation, and (3) a hidden input carries the active tag value so the sort dropdown preserves the tag filter. The filter bar markup is extracted into a shared inner template (`filters_inner.html`) to avoid duplication between the full-page and OOB templates.
 
 **Tech Stack:** Rust/Axum, Askama templates, HTMX 2, Tailwind CSS 4
 
 ---
 
-### Task 1: Add toggle-off URL logic to the filter bar template
+### Task 1: Extract filter bar inner content into a shared template
 
 **Files:**
+- Create: `templates/components/filters_inner.html`
 - Modify: `templates/components/filters.html`
 
-The template already has the conditional styling for active tags (line 9-10). The issue is that `hx-get` always sets `tags={{ tag.name }}` regardless of active state. Fix: if the tag is active, the URL should omit the `tags` param to clear the filter.
+Extract everything inside the outer `<div>` of `filters.html` into `filters_inner.html`, then have `filters.html` include it. This sets up a single source of truth for filter bar content that both the full-page and OOB templates can share.
 
-**Step 1: Update the `hx-get` attribute to support toggle**
+**Step 1: Create `templates/components/filters_inner.html`**
 
-In `templates/components/filters.html`, change the tag button's `hx-get` attribute to conditionally send an empty `tags` value when the tag is already active:
-
-```html
-{% for tag in filter_tags %}
-<button class="px-3 py-1 text-xs rounded-full border
-                {% if tag.active %}bg-blue-600 border-blue-500 text-white{% else %}bg-[#1a1d2e] border-gray-700 text-gray-400 hover:border-gray-500{% endif %}"
-        hx-get="/bookmarks?tags={% if tag.active %}{% else %}{{ tag.name }}{% endif %}"
-        hx-target="#bookmark-grid"
-        hx-push-url="true"
-        hx-include="[name='search'],[name='sort']">
-    {{ tag.name }}
-</button>
-{% endfor %}
-```
-
-This way, clicking an active tag sends `tags=` (empty), which the handler already treats as "no filter".
-
-**Step 2: Verify the change compiles**
-
-Run: `cargo build`
-Expected: Build succeeds (template changes are checked at compile time with Askama)
-
-**Step 3: Commit**
-
-```bash
-git add templates/components/filters.html
-git commit -m "feat: toggle tag filter off when clicking active tag chip"
-```
-
----
-
-### Task 2: Add an ID to the filter bar for OOB swapping
-
-**Files:**
-- Modify: `templates/components/filters.html`
-
-Wrap the filter bar's outer `<div>` with an `id` attribute so HTMX can target it for out-of-band swaps.
-
-**Step 1: Add `id="filter-bar"` to the filter bar container**
-
-Change the opening div in `templates/components/filters.html` from:
-```html
-<div class="flex items-center gap-2 px-6 py-3 flex-wrap">
-```
-to:
-```html
-<div id="filter-bar" class="flex items-center gap-2 px-6 py-3 flex-wrap">
-```
-
-**Step 2: Verify it compiles**
-
-Run: `cargo build`
-Expected: Build succeeds
-
-**Step 3: Commit**
-
-```bash
-git add templates/components/filters.html
-git commit -m "feat: add id to filter bar div for HTMX OOB targeting"
-```
-
----
-
-### Task 3: Create a new partial template for HTMX responses with OOB filter bar
-
-**Files:**
-- Create: `templates/bookmarks/list_with_filters.html`
-
-This template returns the bookmark list (the primary swap content for `#bookmark-grid`) plus an out-of-band swap of the filter bar. This is how HTMX updates multiple page sections from one response.
-
-**Step 1: Create the template file**
-
-Create `templates/bookmarks/list_with_filters.html` with this content:
+Create the file with the inner content of the current `filters.html` (everything between the outer `<div>` tags). Also apply the toggle-off logic and hidden tags input in this step to avoid touching the file multiple times:
 
 ```html
-{% for bookmark in bookmarks %}
-{% include "bookmarks/card.html" %}
-{% endfor %}
-{% if bookmarks.is_empty() %}
-<div class="col-span-full text-center py-12 text-gray-500">
-    No bookmarks found.
-</div>
-{% endif %}
-<div id="filter-bar" hx-swap-oob="true" class="flex items-center gap-2 px-6 py-3 flex-wrap">
     <button class="text-sm text-gray-400 flex items-center gap-1">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/>
@@ -119,6 +39,7 @@ Create `templates/bookmarks/list_with_filters.html` with this content:
         {{ tag.name }}
     </button>
     {% endfor %}
+    <input type="hidden" name="tags" value="{% for tag in filter_tags %}{% if tag.active %}{{ tag.name }}{% endif %}{% endfor %}">
     <div class="ml-auto">
         <select name="sort"
                 class="bg-[#1a1d2e] border border-gray-700 rounded-lg px-3 py-1 text-sm text-gray-300"
@@ -132,21 +53,87 @@ Create `templates/bookmarks/list_with_filters.html` with this content:
             <option value="domain" {% if sort == "domain" %}selected{% endif %}>Domain</option>
         </select>
     </div>
+```
+
+Key changes from the original `filters.html` content:
+- **Toggle-off:** `hx-get` URL conditionally sends empty `tags=` when `tag.active` is true, so clicking an active tag clears the filter.
+- **Hidden tags input:** A `<input type="hidden" name="tags">` carries the active tag name. This fixes the sort dropdown's `hx-include="[name='tags']"` which previously could not find any element with `name="tags"` in the DOM, causing the sort dropdown to silently drop the active tag filter when changing sort order.
+
+**Step 2: Replace `filters.html` content with an include wrapper**
+
+Replace the entire content of `templates/components/filters.html` with:
+
+```html
+<div id="filter-bar" class="flex items-center gap-2 px-6 py-3 flex-wrap">
+    {% include "components/filters_inner.html" %}
 </div>
 ```
 
-Note: This duplicates the filter bar markup. This is intentional -- the OOB swap replaces the full `#filter-bar` element including its attributes. Keeping it in a separate template avoids adding OOB attributes to the shared `filters.html` include (which would break the full-page render where OOB is not wanted).
+This adds the `id="filter-bar"` (needed for OOB targeting in Task 2) and delegates all content to the shared inner template.
 
-**Step 2: Verify it compiles**
+**Step 3: Verify it compiles**
 
 Run: `cargo build`
-Expected: Build will fail because no Rust struct references this template yet (that's Task 4)
+Expected: Build succeeds. Askama includes share the parent template's variable scope, so `filter_tags` and `sort` resolve correctly.
 
-**Step 3: Commit**
+**Step 4: Commit**
+
+```bash
+git add templates/components/filters_inner.html templates/components/filters.html
+git commit -m "refactor: extract filter bar inner content into shared template with toggle and hidden tags input"
+```
+
+---
+
+### Task 2: Create an OOB filter bar template for HTMX responses
+
+**Files:**
+- Create: `templates/components/filters_oob.html`
+
+This template renders the same filter bar content but with `hx-swap-oob="true"` on the outer div. HTMX will use this to replace the `#filter-bar` element out-of-band when it appears alongside the primary swap content in a response.
+
+**Step 1: Create `templates/components/filters_oob.html`**
+
+```html
+<div id="filter-bar" hx-swap-oob="true" class="flex items-center gap-2 px-6 py-3 flex-wrap">
+    {% include "components/filters_inner.html" %}
+</div>
+```
+
+The only difference from `filters.html` is the `hx-swap-oob="true"` attribute. Both files include `filters_inner.html`, so there is a single source of truth for the filter bar content.
+
+**Step 2: Commit**
+
+```bash
+git add templates/components/filters_oob.html
+git commit -m "feat: add OOB filter bar template for HTMX partial responses"
+```
+
+---
+
+### Task 3: Create the HTMX partial response template
+
+**Files:**
+- Create: `templates/bookmarks/list_with_filters.html`
+
+This template is used for HTMX responses. It returns the bookmark list as the primary swap content (targeting `#bookmark-grid`) plus the OOB filter bar.
+
+**Step 1: Create `templates/bookmarks/list_with_filters.html`**
+
+```html
+{% include "bookmarks/list.html" %}
+{% include "components/filters_oob.html" %}
+```
+
+This reuses both existing templates:
+- `bookmarks/list.html` renders the bookmark cards (the primary content swapped into `#bookmark-grid`)
+- `components/filters_oob.html` renders the filter bar with `hx-swap-oob="true"` (replaces `#filter-bar` out-of-band)
+
+**Step 2: Commit**
 
 ```bash
 git add templates/bookmarks/list_with_filters.html
-git commit -m "feat: add HTMX partial template with OOB filter bar update"
+git commit -m "feat: add HTMX partial template combining bookmark list with OOB filter bar"
 ```
 
 ---
@@ -156,11 +143,11 @@ git commit -m "feat: add HTMX partial template with OOB filter bar update"
 **Files:**
 - Modify: `server/src/web/pages/bookmarks.rs`
 
-Currently the `list` handler returns `BookmarkList` (just cards) for HTMX requests. Change it to return a new `BookmarkListWithFilters` struct that includes filter tags, so the OOB filter bar renders with correct active state.
+Currently the `list` handler returns `BookmarkList` (just cards) for HTMX requests, and only queries tags for full-page loads. Change it to always query tags and return a new `BookmarkListWithFilters` struct for HTMX responses.
 
 **Step 1: Add the new Askama template struct**
 
-In `server/src/web/pages/bookmarks.rs`, add a new struct after the existing `BookmarkList`:
+In `server/src/web/pages/bookmarks.rs`, add a new struct after the existing `BookmarkList` (after line 89):
 
 ```rust
 #[derive(Template)]
@@ -172,43 +159,9 @@ struct BookmarkListWithFilters {
 }
 ```
 
-**Step 2: Update the HTMX branch to query tags and return the new template**
+**Step 2: Refactor the `list` function to share the tag query**
 
-In the `list` function, change the HTMX branch (the `if is_htmx(&headers)` block) from:
-
-```rust
-if is_htmx(&headers) {
-    render(&BookmarkList {
-        bookmarks: bookmark_views,
-    })
-}
-```
-
-to:
-
-```rust
-if is_htmx(&headers) {
-    let all_tag_names = with_bookmarks!(&state.bookmarks, svc =>
-        svc.all_tags(user.id).await
-    )
-    .unwrap_or_default();
-    let filter_tags: Vec<TagView> = all_tag_names
-        .into_iter()
-        .map(|name| {
-            let active = active_tags.contains(&name);
-            TagView { name, active }
-        })
-        .collect();
-
-    render(&BookmarkListWithFilters {
-        bookmarks: bookmark_views,
-        filter_tags,
-        sort: sort_str,
-    })
-}
-```
-
-Note: This duplicates the `all_tags` / `filter_tags` logic from the full-page branch. To DRY it up, extract the tag query before the `if is_htmx` branch so both paths share it. Here is the refactored `list` function body from `let bookmark_views` onward:
+Replace the code from `let bookmark_views` (line 151) through the end of the function (line 184) with:
 
 ```rust
     let bookmark_views: Vec<BookmarkView> = bookmarks.into_iter().map(Into::into).collect();
@@ -247,12 +200,19 @@ Note: This duplicates the `all_tags` / `filter_tags` logic from the full-page br
     }
 ```
 
+This moves the `all_tags` query and `filter_tags` construction before the `if is_htmx` branch so both paths share it. The full-page branch previously had this code inline (lines 161-171); it is now shared.
+
 **Step 3: Verify it compiles**
 
 Run: `cargo build`
 Expected: Build succeeds
 
-**Step 4: Commit**
+**Step 4: Run tests**
+
+Run: `cargo test`
+Expected: All tests pass
+
+**Step 5: Commit**
 
 ```bash
 git add server/src/web/pages/bookmarks.rs
@@ -266,7 +226,7 @@ git commit -m "feat: return filter bar with active state in HTMX responses via O
 **Files:**
 - Modify: `static/css/tailwind-output.css` (generated)
 
-The new template uses Tailwind classes that may already be in the output. Rebuild to be safe.
+The new templates reuse existing Tailwind classes, but rebuild to ensure the scanner picks up classes from the new template files.
 
 **Step 1: Rebuild Tailwind**
 
@@ -308,9 +268,15 @@ Expected: The "ai" chip has the active (blue) styling. Only bookmarks with the "
 Click the "ai" chip again (now active) and take a screenshot.
 Expected: The filter is cleared. All chips return to inactive styling. All bookmarks are shown.
 
-**Step 4: Save screenshots with descriptive names**
+**Step 4: Verify sort preserves tag filter**
+
+With a tag active, change the sort dropdown and take a screenshot.
+Expected: The tag filter remains active after changing sort order (the hidden `tags` input preserves it).
+
+**Step 5: Save screenshots with descriptive names**
 
 Save screenshots as:
 - `screenshot-tag-filter-no-active.png`
 - `screenshot-tag-filter-active.png`
 - `screenshot-tag-filter-toggled-off.png`
+- `screenshot-tag-filter-sort-preserves-tag.png`
