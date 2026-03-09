@@ -166,3 +166,39 @@ test("settings rejects forged unsupported anthropic model submissions with 400",
 
   expect(status).toBe(400);
 });
+
+test("settings rejects replace-key submissions without a replacement value", async ({
+  page,
+}) => {
+  const anthropicApiKey = readAnthropicApiKeyFromDotEnv();
+
+  await signIn(page);
+  await resetSettings(page);
+  await page.goto("/settings");
+
+  await page.getByLabel("Enable LLM integration").check();
+  await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
+  await page.getByRole("button", { name: "Save settings" }).click();
+  await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
+
+  const status = await page.evaluate(async () => {
+    const response = await fetch("/settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        llm_enabled: "on",
+        anthropic_api_key_action: "replace",
+        anthropic_api_key: "   ",
+        anthropic_model: "claude-haiku-4-5-20251001",
+      }),
+    });
+    return response.status;
+  });
+
+  expect(status).toBe(400);
+
+  await page.goto("/settings");
+  await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
+});

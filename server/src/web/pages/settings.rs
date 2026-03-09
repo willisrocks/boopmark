@@ -114,6 +114,10 @@ async fn save_settings(
         .anthropic_api_key
         .filter(|value| !value.trim().is_empty());
 
+    if api_key_action == "replace" && submitted_api_key.is_none() {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    }
+
     let (anthropic_api_key, clear_anthropic_api_key) = match api_key_action {
         "replace" => (submitted_api_key.clone(), false),
         "clear" => (None, true),
