@@ -2,23 +2,23 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
-**Goal:** Make the profile/settings menu stay available long enough to click its items, and prove it with Playwright end-to-end tests.
+**Goal:** Make the profile/settings menu stay open while the pointer moves from the avatar into the menu, and prove that both menu items are clickable with Playwright end-to-end tests.
 
-**Architecture:** The current menu is controlled entirely by Tailwind `group-hover`, so the panel only exists while the pointer remains over the avatar group. That is brittle and currently broken by the gap between the avatar and the absolutely positioned menu. Replace the hover-only behavior with an explicit disclosure menu driven by a small DOM controller, keep the existing visual layout, and add a real `GET /settings/api-keys` page so the existing menu link can be exercised by E2E instead of navigating to a 404.
+**Architecture:** The current menu is controlled entirely by Tailwind `group-hover`, and the panel is rendered with a vertical gap below the 32px avatar (`top-10`), which creates a dead zone while the pointer moves toward the menu. Fix the actual hover path first: anchor the menu flush to the trigger, keep it open for focus navigation with `group-focus-within`, and only add JavaScript if the markup alone cannot satisfy the failing gap-crossing test. Add a real `GET /settings/api-keys` page after the hover regression is covered so the existing menu link can be exercised end-to-end instead of navigating to a 404.
 
 **Tech Stack:** Rust, Axum, Askama templates, HTMX, Tailwind CSS, Playwright
 
 ---
 
-### Task 1: Add failing Playwright coverage for the profile menu
+### Task 1: Add failing Playwright coverage that reproduces the real hover dead zone
 
-Write the browser tests first so the implementation is driven by the exact user-visible behavior: the menu must remain visible while moving to a menu item, and both `API Keys` and `Sign Out` must be clickable.
+Write the browser test first so it reproduces the current bug on today's code: the menu opens on avatar hover, disappears while the pointer crosses the gap, and prevents clicking a real menu item.
 
 **Files:**
 - Create: `tests/e2e/profile-menu.spec.js`
 - Modify: `templates/components/header.html`
 
-**Step 1: Write the failing E2E test for the settings link**
+**Step 1: Write a mouse-movement helper that crosses the trigger-to-menu gap**
 
 Create `tests/e2e/profile-menu.spec.js`:
 
@@ -31,37 +31,46 @@ async function signIn(page) {
   await expect(page).toHaveURL(/\/bookmarks$/);
 }
 
-test("profile menu stays open while moving to API Keys and the link is clickable", async ({ page }) => {
-  await signIn(page);
+function center(box) {
+  return {
+    x: box.x + box.width / 2,
+    y: box.y + box.height / 2,
+  };
+}
 
-  await page.getByTestId("profile-menu-trigger").click();
-  const menu = page.getByTestId("profile-menu");
-  const apiKeysLink = page.getByTestId("profile-menu-api-keys");
-
-  await expect(menu).toBeVisible();
-  await apiKeysLink.hover();
-  await expect(menu).toBeVisible();
-
-  await apiKeysLink.click();
-  await expect(page).toHaveURL(/\/settings\/api-keys$/);
-  await expect(page.getByRole("heading", { name: "API Keys" })).toBeVisible();
-});
+async function moveMouseInSteps(page, from, to, steps = 16) {
+  for (let i = 0; i <= steps; i += 1) {
+    const progress = i / steps;
+    await page.mouse.move(
+      from.x + (to.x - from.x) * progress,
+      from.y + (to.y - from.y) * progress,
+    );
+  }
+}
 ```
 
-**Step 2: Write the failing E2E test for sign out**
+**Step 2: Write the failing E2E test against the existing `Sign Out` item**
 
-Append a second test in `tests/e2e/profile-menu.spec.js`:
+Append the first test in `tests/e2e/profile-menu.spec.js`:
 
 ```js
-test("profile menu stays open while moving to Sign Out and the button is clickable", async ({ page }) => {
+test("profile menu stays visible while the pointer crosses into Sign Out", async ({ page }) => {
   await signIn(page);
 
-  await page.getByTestId("profile-menu-trigger").click();
+  const trigger = page.getByTestId("profile-menu-trigger");
   const menu = page.getByTestId("profile-menu");
   const signOutButton = page.getByTestId("profile-menu-sign-out");
 
+  await trigger.hover();
   await expect(menu).toBeVisible();
-  await signOutButton.hover();
+
+  const triggerBox = await trigger.boundingBox();
+  const signOutBox = await signOutButton.boundingBox();
+  if (!triggerBox || !signOutBox) {
+    throw new Error("expected trigger and sign-out button to have bounding boxes");
+  }
+
+  await moveMouseInSteps(page, center(triggerBox), center(signOutBox));
   await expect(menu).toBeVisible();
 
   await signOutButton.click();
@@ -70,7 +79,7 @@ test("profile menu stays open while moving to Sign Out and the button is clickab
 });
 ```
 
-**Step 3: Add stable test hooks to the header markup**
+**Step 3: Add stable test hooks to the current header markup**
 
 Update `templates/components/header.html:23-40` so the avatar trigger, menu panel, `API Keys` link, and `Sign Out` button expose deterministic `data-testid` attributes. Do not change behavior yet; only add the selectors the tests need.
 
@@ -93,23 +102,120 @@ npx playwright test tests/e2e/profile-menu.spec.js
 
 Expected:
 - The tests fail against the current implementation.
-- The first failure should show that the menu does not stay available while moving to the item, or that `/settings/api-keys` is missing.
+- The failure should happen before sign out completes, because the menu disappears during the stepped pointer movement across the current gap.
 
-**Step 5: Commit the failing tests and selectors scaffold**
+**Step 5: Commit the failing hover-regression test and selectors scaffold**
 
 ```bash
 git add tests/e2e/profile-menu.spec.js templates/components/header.html
 git commit -m "test: capture profile menu interaction regressions"
 ```
 
-### Task 2: Add the missing settings page target for the existing API Keys link
+### Task 2: Remove the dead zone from the profile menu without changing the user interaction model
 
-The header already advertises `API Keys`, but there is no page route behind it. Land a minimal authenticated page so the menu link can be validated end-to-end and does not send the user to a 404 once the menu bug is fixed.
+Do not switch the feature to click-only. Keep the menu discoverable on hover, make the pointer path continuous, and keep the panel visible while focus moves into its contents.
+
+**Files:**
+- Modify: `templates/components/header.html`
+- Modify: `static/css/output.css`
+
+**Step 1: Convert the avatar into a focusable trigger**
+
+Update `templates/components/header.html:23-40` so the trigger is a `button`, not a bare `img` or `div`, and so the menu can stay visible while focus moves into the panel:
+
+```html
+<div class="relative group">
+    <button
+        type="button"
+        data-testid="profile-menu-trigger"
+        aria-haspopup="menu"
+        class="block cursor-pointer"
+    >
+        {% if let Some(img) = user.image %}
+        <img src="{{ img }}" class="w-8 h-8 rounded-full" alt="{{ user.display_name }}">
+        {% else %}
+        <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-sm">
+            {{ user.email_initial }}
+        </div>
+        {% endif %}
+    </button>
+```
+
+**Step 2: Anchor the panel directly below the trigger and expose it on focus**
+
+Replace the current `top-10` hover panel with one that sits flush under the trigger and stays visible on both hover and focus:
+
+```html
+    <div
+        data-testid="profile-menu"
+        role="menu"
+        style="top: 100%;"
+        class="hidden group-hover:block group-focus-within:block absolute right-0 bg-[#1e2235] border border-gray-700 rounded-lg p-3 min-w-[200px] z-50"
+    >
+        <p class="text-sm text-gray-400">{{ user.display_name }}</p>
+        <p class="text-xs text-gray-500 mb-2">{{ user.email }}</p>
+        <a
+            href="/settings/api-keys"
+            data-testid="profile-menu-api-keys"
+            class="block text-sm text-gray-300 hover:text-white py-1"
+        >
+            API Keys
+        </a>
+        <form method="post" action="/auth/logout">
+            <button
+                type="submit"
+                data-testid="profile-menu-sign-out"
+                class="text-sm text-gray-300 hover:text-white py-1"
+            >
+                Sign Out
+            </button>
+        </form>
+    </div>
+</div>
+```
+
+`style="top: 100%;"` is deliberate here: the panel must start exactly at the trigger edge so the stepped mouse path in Task 1 has no dead zone to cross after the fix.
+
+**Step 3: Rebuild Tailwind so `group-focus-within:block` exists in the checked-in CSS**
+
+Run:
+
+```bash
+just css-build
+```
+
+Expected:
+- `static/css/output.css` contains the `group-focus-within:block` utility.
+- No unrelated CSS changes are introduced.
+
+**Step 4: Re-run the hover regression test**
+
+Run:
+
+```bash
+npx playwright test tests/e2e/profile-menu.spec.js --grep "Sign Out"
+```
+
+Expected:
+- The stepped mouse movement no longer collapses the menu.
+- The `Sign Out` flow completes successfully.
+
+**Step 5: Commit the hover fix**
+
+```bash
+git add templates/components/header.html static/css/output.css
+git commit -m "fix: remove profile menu hover dead zone"
+```
+
+### Task 3: Add the missing settings page target and extend the E2E coverage to API Keys
+
+Once the real hover bug is covered and fixed, add the missing destination page for the existing `API Keys` item and reuse the same stepped pointer movement to prove that link is clickable too.
 
 **Files:**
 - Create: `server/src/web/pages/settings.rs`
 - Create: `templates/settings/api_keys.html`
 - Modify: `server/src/web/pages/mod.rs`
+- Modify: `tests/e2e/profile-menu.spec.js`
 
 **Step 1: Create the settings page handler**
 
@@ -191,162 +297,55 @@ Create `templates/settings/api_keys.html`:
 {% endblock %}
 ```
 
-**Step 4: Build the server to verify the new page compiles**
+**Step 4: Extend the Playwright file with the API Keys navigation test**
+
+Append a second test to `tests/e2e/profile-menu.spec.js` that uses the same stepped mouse movement helper:
+
+```js
+test("profile menu stays visible while the pointer crosses into API Keys", async ({ page }) => {
+  await signIn(page);
+
+  const trigger = page.getByTestId("profile-menu-trigger");
+  const menu = page.getByTestId("profile-menu");
+  const apiKeysLink = page.getByTestId("profile-menu-api-keys");
+
+  await trigger.hover();
+  await expect(menu).toBeVisible();
+
+  const triggerBox = await trigger.boundingBox();
+  const apiKeysBox = await apiKeysLink.boundingBox();
+  if (!triggerBox || !apiKeysBox) {
+    throw new Error("expected trigger and api keys link to have bounding boxes");
+  }
+
+  await moveMouseInSteps(page, center(triggerBox), center(apiKeysBox));
+  await expect(menu).toBeVisible();
+
+  await apiKeysLink.click();
+  await expect(page).toHaveURL(/\/settings\/api-keys$/);
+  await expect(page.getByRole("heading", { name: "API Keys" })).toBeVisible();
+});
+```
+
+**Step 5: Build the server and run the full profile menu E2E file**
 
 Run:
 
 ```bash
 cargo build -p boopmark-server
-```
-
-Expected:
-- The server builds successfully.
-- `GET /settings/api-keys` renders for authenticated users.
-
-**Step 5: Commit the route and template**
-
-```bash
-git add server/src/web/pages/mod.rs server/src/web/pages/settings.rs templates/settings/api_keys.html
-git commit -m "feat: add api keys settings page"
-```
-
-### Task 3: Replace the hover-only profile menu with an explicit disclosure menu
-
-Do not try to patch `group-hover`. The menu should remain open because it has explicit open/close state, not because the pointer never crosses a dead zone.
-
-**Files:**
-- Modify: `templates/components/header.html`
-- Modify: `templates/base.html`
-
-**Step 1: Convert the avatar into a semantic menu trigger**
-
-Update `templates/components/header.html:23-40` so the profile control becomes a `button` with menu semantics:
-
-```html
-<div class="relative" data-profile-menu>
-    <button
-        type="button"
-        data-profile-menu-trigger
-        data-testid="profile-menu-trigger"
-        aria-haspopup="menu"
-        aria-expanded="false"
-        aria-controls="profile-menu-panel"
-        class="cursor-pointer"
-    >
-        {% if let Some(img) = user.image %}
-        <img src="{{ img }}" class="w-8 h-8 rounded-full" alt="{{ user.display_name }}">
-        {% else %}
-        <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-sm">
-            {{ user.email_initial }}
-        </div>
-        {% endif %}
-    </button>
-```
-
-**Step 2: Make the menu panel stateful instead of hover-driven**
-
-Replace the `group-hover:block` panel with a hidden panel controlled by script:
-
-```html
-    <div
-        id="profile-menu-panel"
-        data-profile-menu-panel
-        data-testid="profile-menu"
-        role="menu"
-        class="hidden absolute right-0 top-10 bg-[#1e2235] border border-gray-700 rounded-lg p-3 min-w-[200px] z-50"
-    >
-        <p class="text-sm text-gray-400">{{ user.display_name }}</p>
-        <p class="text-xs text-gray-500 mb-2">{{ user.email }}</p>
-        <a
-            href="/settings/api-keys"
-            data-testid="profile-menu-api-keys"
-            class="block text-sm text-gray-300 hover:text-white py-1"
-        >
-            API Keys
-        </a>
-        <form method="post" action="/auth/logout">
-            <button
-                type="submit"
-                data-testid="profile-menu-sign-out"
-                class="text-sm text-gray-300 hover:text-white py-1"
-            >
-                Sign Out
-            </button>
-        </form>
-    </div>
-</div>
-```
-
-**Step 3: Add the menu controller script**
-
-Append a small script in `templates/base.html` just before `</body>` so the menu toggles on click, closes on outside click, and closes on `Escape`:
-
-```html
-<script>
-document.addEventListener("DOMContentLoaded", () => {
-    const root = document.querySelector("[data-profile-menu]");
-    if (!root) return;
-
-    const trigger = root.querySelector("[data-profile-menu-trigger]");
-    const panel = root.querySelector("[data-profile-menu-panel]");
-
-    const setOpen = (open) => {
-        panel.classList.toggle("hidden", !open);
-        trigger.setAttribute("aria-expanded", open ? "true" : "false");
-    };
-
-    trigger.addEventListener("click", (event) => {
-        event.stopPropagation();
-        setOpen(panel.classList.contains("hidden"));
-    });
-
-    panel.addEventListener("click", (event) => {
-        event.stopPropagation();
-    });
-
-    document.addEventListener("click", () => {
-        setOpen(false);
-    });
-
-    document.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") {
-            setOpen(false);
-        }
-    });
-});
-</script>
-```
-
-**Step 4: Re-run the profile menu E2E tests**
-
-Run:
-
-```bash
 npx playwright test tests/e2e/profile-menu.spec.js
 ```
 
 Expected:
-- Both tests pass.
-- Hovering the item after opening the menu no longer hides the panel.
-- Clicking `API Keys` navigates to `/settings/api-keys`.
-- Clicking `Sign Out` returns to `/auth/login`.
+- The server builds successfully.
+- Both menu-item tests pass against real pointer movement.
+- `GET /settings/api-keys` renders for authenticated users.
 
-**Step 5: Rebuild checked-in Tailwind output if any new classes were introduced**
-
-Run only if the implementation added any utility class not already present in `static/css/output.css`:
+**Step 6: Commit the settings route and API Keys regression**
 
 ```bash
-just css-build
-```
-
-Expected:
-- `static/css/output.css` reflects any newly introduced utility usage.
-
-**Step 6: Commit the menu fix**
-
-```bash
-git add templates/components/header.html templates/base.html static/css/output.css
-git commit -m "fix: make profile menu clickable and persistent"
+git add server/src/web/pages/mod.rs server/src/web/pages/settings.rs templates/settings/api_keys.html tests/e2e/profile-menu.spec.js
+git commit -m "feat: add api keys settings page"
 ```
 
 ### Task 4: Run the regression suite for the changed user flows
@@ -381,4 +380,3 @@ Expected:
 git add -A
 git commit -m "test: verify profile menu regression coverage"
 ```
-
