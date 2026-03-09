@@ -12,28 +12,34 @@
 
 ### Task 1: Verify local `.env` propagation and capture failing browser expectations
 
-Start with the E2E harness so the current `API Keys` stub fails for the right reasons: wrong route, wrong copy, missing form, missing clear-key flow, and no save/reload behavior. The test harness must prove the copied worktree `.env` is present and actually contains `ANTHROPIC_API_KEY`.
+Start with the E2E harness so the current `API Keys` stub fails for the right reasons: wrong route, wrong copy, missing form, missing clear-key flow, and no save/reload behavior. The test harness must prove the copied worktree `.env` is present and contains both `ANTHROPIC_API_KEY` and `LLM_SETTINGS_ENCRYPTION_KEY` before any build or browser step depends on them.
 
 **Files:**
 - Modify: `scripts/e2e/start-server.sh`
 - Modify: `tests/e2e/profile-menu.spec.js`
 - Create: `tests/e2e/settings.spec.js`
 
-**Step 1: Verify the copied worktree `.env` before changing any code**
+**Step 1: Refresh the copied worktree `.env` and ensure both required keys exist**
 
 Run:
 
 ```bash
+cp /Users/chrisfenton/Code/personal/boopmark/.env /Users/chrisfenton/Code/personal/boopmark/.worktrees/settings-llm-integration/.env
+if ! rg -q '^LLM_SETTINGS_ENCRYPTION_KEY=' .env; then
+  printf '\nLLM_SETTINGS_ENCRYPTION_KEY=%s\n' "$(openssl rand -base64 32)" >> .env
+fi
 test -f .env
 rg '^ANTHROPIC_API_KEY=' .env
+rg '^LLM_SETTINGS_ENCRYPTION_KEY=' .env
 ```
 
 Expected:
 - PASS.
-- The worktree already contains the copied main-checkout `.env`.
+- The worktree `.env` has been refreshed from the main checkout.
 - `ANTHROPIC_API_KEY` is present for local agent-browser and Playwright testing.
+- `LLM_SETTINGS_ENCRYPTION_KEY` is present before any server startup path depends on it.
 
-If either command fails, stop and copy the main repo `.env` into the worktree before continuing.
+This remains a local prerequisite only. `.env` stays untracked, but the worktree copy must be current before the rest of the plan runs.
 
 **Step 2: Forward `ANTHROPIC_API_KEY` only through the E2E bootstrap**
 
@@ -45,7 +51,7 @@ if [ -f .env ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
 fi
 ```
 
-Leave the server behavior unchanged when the variable is absent. This is test harness wiring only.
+Leave the server behavior unchanged when the variable is absent. This is test harness wiring only. `LLM_SETTINGS_ENCRYPTION_KEY` is read by normal app config loading from the refreshed worktree `.env`; it does not need a separate bootstrap export.
 
 **Step 3: Replace the profile-menu expectations with `Settings`**
 
