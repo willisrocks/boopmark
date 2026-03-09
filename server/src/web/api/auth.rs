@@ -30,6 +30,5 @@ async fn create_api_key(
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/keys", post(create_api_key))
+    Router::new().route("/keys", post(create_api_key))
 }

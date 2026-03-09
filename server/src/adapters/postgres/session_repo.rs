@@ -1,11 +1,16 @@
+use super::PostgresPool;
 use crate::domain::error::DomainError;
 use crate::domain::ports::session_repo::{Session, SessionRepository};
-use super::PostgresPool;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 impl SessionRepository for PostgresPool {
-    async fn create(&self, user_id: Uuid, token: &str, expires_at: DateTime<Utc>) -> Result<Session, DomainError> {
+    async fn create(
+        &self,
+        user_id: Uuid,
+        token: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Session, DomainError> {
         sqlx::query_as::<_, Session>(
             "INSERT INTO sessions (user_id, token, expires_at) VALUES ($1, $2, $3)
              RETURNING id, user_id, token, expires_at",

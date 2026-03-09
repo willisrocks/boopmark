@@ -6,7 +6,16 @@ use uuid::Uuid;
 pub trait BookmarkRepository: Send + Sync {
     async fn create(&self, user_id: Uuid, input: CreateBookmark) -> Result<Bookmark, DomainError>;
     async fn get(&self, id: Uuid, user_id: Uuid) -> Result<Bookmark, DomainError>;
-    async fn list(&self, user_id: Uuid, filter: BookmarkFilter) -> Result<Vec<Bookmark>, DomainError>;
-    async fn update(&self, id: Uuid, user_id: Uuid, input: UpdateBookmark) -> Result<Bookmark, DomainError>;
+    async fn list(
+        &self,
+        user_id: Uuid,
+        filter: BookmarkFilter,
+    ) -> Result<Vec<Bookmark>, DomainError>;
+    async fn update(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        input: UpdateBookmark,
+    ) -> Result<Bookmark, DomainError>;
     async fn delete(&self, id: Uuid, user_id: Uuid) -> Result<(), DomainError>;
 }

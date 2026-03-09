@@ -1,7 +1,7 @@
+use super::PostgresPool;
 use crate::domain::bookmark::*;
 use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::BookmarkRepository;
-use super::PostgresPool;
 use uuid::Uuid;
 
 impl BookmarkRepository for PostgresPool {
@@ -37,7 +37,11 @@ impl BookmarkRepository for PostgresPool {
         .ok_or(DomainError::NotFound)
     }
 
-    async fn list(&self, user_id: Uuid, filter: BookmarkFilter) -> Result<Vec<Bookmark>, DomainError> {
+    async fn list(
+        &self,
+        user_id: Uuid,
+        filter: BookmarkFilter,
+    ) -> Result<Vec<Bookmark>, DomainError> {
         let limit = filter.limit.unwrap_or(50);
         let offset = filter.offset.unwrap_or(0);
 
@@ -88,7 +92,12 @@ impl BookmarkRepository for PostgresPool {
             .map_err(|e| DomainError::Internal(e.to_string()))
     }
 
-    async fn update(&self, id: Uuid, user_id: Uuid, input: UpdateBookmark) -> Result<Bookmark, DomainError> {
+    async fn update(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        input: UpdateBookmark,
+    ) -> Result<Bookmark, DomainError> {
         sqlx::query_as::<_, Bookmark>(
             "UPDATE bookmarks SET
                 title = COALESCE($3, title),

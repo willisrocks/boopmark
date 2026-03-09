@@ -20,7 +20,12 @@ fn error_response(err: DomainError) -> impl IntoResponse {
         DomainError::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid input"),
         DomainError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     };
-    (status, Json(ErrorBody { error: message.to_string() }))
+    (
+        status,
+        Json(ErrorBody {
+            error: message.to_string(),
+        }),
+    )
 }
 
 #[derive(Serialize)]
@@ -54,7 +59,12 @@ impl From<ListParams> for BookmarkFilter {
     fn from(p: ListParams) -> Self {
         BookmarkFilter {
             search: p.search,
-            tags: p.tags.map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
+            tags: p.tags.map(|t| {
+                t.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            }),
             sort: p.sort,
             limit: p.limit,
             offset: p.offset,
@@ -148,6 +158,11 @@ async fn extract_metadata(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_bookmarks).post(create_bookmark))
-        .route("/{id}", get(get_bookmark).put(update_bookmark).delete(delete_bookmark))
+        .route(
+            "/{id}",
+            get(get_bookmark)
+                .put(update_bookmark)
+                .delete(delete_bookmark),
+        )
         .route("/metadata", post(extract_metadata))
 }

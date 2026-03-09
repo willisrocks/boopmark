@@ -4,3 +4,5 @@ node_modules
 .workgraph
 .worktrees
 uploads/
+playwright-report/
+test-results/

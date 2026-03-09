@@ -15,7 +15,8 @@
                hx-include="[name='tags'],[name='sort']">
     </div>
     <div class="flex items-center gap-4">
-        <button onclick="document.getElementById('add-modal').classList.remove('hidden')"
+        <button data-testid="open-add-bookmark-modal"
+                onclick="document.getElementById('add-modal').classList.remove('hidden')"
                 class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
             + Add Bookmark
         </button>
