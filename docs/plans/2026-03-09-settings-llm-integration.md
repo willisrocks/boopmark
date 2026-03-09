@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
-**Goal:** Replace the placeholder `API Keys` page with a real `Settings` page that lets each signed-in user enable or disable LLM integration, save an Anthropic API key, clear a saved Anthropic API key, and use `claude-haiku-4-5` as the default Anthropic model.
+**Goal:** Replace the placeholder `API Keys` page with a real `Settings` page that lets each signed-in user enable or disable LLM integration, save an Anthropic API key, clear a saved Anthropic API key, and use `claude-3-5-haiku-latest` as the default Anthropic model.
 
 **Architecture:** Add a dedicated per-user `user_llm_settings` record instead of reusing inbound `api_keys`, but do not store the Anthropic secret in plaintext. Persist only encrypted-at-rest key material using an application encryption key supplied by config, keep the settings page itself limited to save/replace/clear behavior, and leave actual Anthropic usage out of scope for this feature. Keep `.env` strictly in the local test harness: the worktree `.env` must be present and contain `ANTHROPIC_API_KEY`, `scripts/e2e/start-server.sh` must forward it for local agent-browser and Playwright runs, and the Playwright settings test must fail if that propagation is missing instead of silently falling back to a fake key.
 
@@ -102,7 +102,7 @@ test("settings page shows the default Anthropic model and saves llm integration"
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "LLM Integration" })).toBeVisible();
   await expect(page.getByLabel("Enable LLM integration")).not.toBeChecked();
-  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-haiku-4-5");
+  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-3-5-haiku-latest");
 
   await page.getByLabel("Enable LLM integration").check();
   await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
@@ -115,7 +115,7 @@ test("settings page shows the default Anthropic model and saves llm integration"
 
   await page.reload();
   await expect(page.getByLabel("Enable LLM integration")).toBeChecked();
-  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-haiku-4-5");
+  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-3-5-haiku-latest");
   await expect(page.getByText("Anthropic API key saved")).toBeVisible();
 });
 
@@ -241,7 +241,7 @@ CREATE TABLE user_llm_settings (
     user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     enabled BOOLEAN NOT NULL DEFAULT FALSE,
     anthropic_api_key_encrypted BYTEA,
-    anthropic_model TEXT NOT NULL DEFAULT 'claude-haiku-4-5',
+    anthropic_model TEXT NOT NULL DEFAULT 'claude-3-5-haiku-latest',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -253,7 +253,7 @@ Create `server/src/domain/llm_settings.rs`:
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
+pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-3-5-haiku-latest";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct LlmSettings {
@@ -460,8 +460,8 @@ mod tests {
 
     #[test]
     fn normalize_model_defaults_to_latest_haiku_alias() {
-        assert_eq!(normalize_model(None), "claude-haiku-4-5");
-        assert_eq!(normalize_model(Some("   ".into())), "claude-haiku-4-5");
+        assert_eq!(normalize_model(None), "claude-3-5-haiku-latest");
+        assert_eq!(normalize_model(Some("   ".into())), "claude-3-5-haiku-latest");
     }
 
     #[test]
@@ -690,7 +690,7 @@ Create `templates/settings/index.html`:
                         value="{{ anthropic_model }}"
                         class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
                     >
-                    <p class="text-xs text-gray-400">Default: claude-haiku-4-5.</p>
+                    <p class="text-xs text-gray-400">Default: claude-3-5-haiku-latest.</p>
                 </div>
 
                 <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
