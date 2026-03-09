@@ -14,8 +14,10 @@ setup:
     echo "==> Running migrations"
     source .env
     sqlx migrate run --source migrations
+    echo "==> Installing npm dependencies"
+    npm install
     echo "==> Building Tailwind CSS"
-    ./tailwindcss-macos-arm64 -i static/css/input.css -o static/css/output.css --minify
+    npx tailwindcss -i static/css/input.css -o static/css/output.css --minify
     echo "==> Building project"
     cargo build
     echo "==> Setup complete! Run 'just dev' to start the server."
@@ -31,10 +33,10 @@ test:
     cargo test
 
 css:
-    ./tailwindcss-macos-arm64 -i static/css/input.css -o static/css/output.css --watch
+    npx tailwindcss -i static/css/input.css -o static/css/output.css --watch
 
 css-build:
-    ./tailwindcss-macos-arm64 -i static/css/input.css -o static/css/output.css --minify
+    npx tailwindcss -i static/css/input.css -o static/css/output.css --minify
 
 typecheck:
     cargo check
