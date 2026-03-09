@@ -1,3 +1,4 @@
+use base64::Engine;
 use std::env;
 
 #[derive(Debug, Clone)]
@@ -5,6 +6,7 @@ pub struct Config {
     pub database_url: String,
     pub app_url: String,
     pub port: u16,
+    pub llm_settings_encryption_key: String,
     pub session_secret: String,
     pub google_client_id: String,
     pub google_client_secret: String,
@@ -34,6 +36,7 @@ impl Config {
                 .unwrap_or_else(|_| "4000".into())
                 .parse()
                 .unwrap(),
+            llm_settings_encryption_key: llm_settings_encryption_key(),
             session_secret: env::var("SESSION_SECRET").expect("SESSION_SECRET required"),
             google_client_id: env::var("GOOGLE_CLIENT_ID").expect("GOOGLE_CLIENT_ID required"),
             google_client_secret: env::var("GOOGLE_CLIENT_SECRET")
@@ -55,5 +58,55 @@ impl Config {
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "auto".into()),
             s3_public_url: env::var("S3_PUBLIC_URL").ok(),
         }
+    }
+}
+
+fn llm_settings_encryption_key() -> String {
+    let raw_key =
+        env::var("LLM_SETTINGS_ENCRYPTION_KEY").expect("LLM_SETTINGS_ENCRYPTION_KEY required");
+    let trimmed_key = raw_key.trim();
+    if trimmed_key.is_empty() {
+        panic!("LLM_SETTINGS_ENCRYPTION_KEY must be non-empty base64 that decodes to 32 bytes");
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(trimmed_key)
+        .expect("LLM_SETTINGS_ENCRYPTION_KEY must be valid base64");
+    if decoded.len() != 32 {
+        panic!("LLM_SETTINGS_ENCRYPTION_KEY must decode to 32 bytes");
+    }
+
+    trimmed_key.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::llm_settings_encryption_key;
+
+    #[test]
+    fn accepts_valid_llm_settings_encryption_key() {
+        unsafe {
+            std::env::set_var(
+                "LLM_SETTINGS_ENCRYPTION_KEY",
+                "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            );
+        }
+
+        assert_eq!(
+            llm_settings_encryption_key(),
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "LLM_SETTINGS_ENCRYPTION_KEY must be non-empty base64 that decodes to 32 bytes"
+    )]
+    fn rejects_blank_llm_settings_encryption_key() {
+        unsafe {
+            std::env::set_var("LLM_SETTINGS_ENCRYPTION_KEY", "   ");
+        }
+
+        llm_settings_encryption_key();
     }
 }

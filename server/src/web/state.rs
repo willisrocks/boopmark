@@ -4,6 +4,7 @@ use crate::adapters::storage::local::LocalStorage;
 use crate::adapters::storage::s3::S3Storage;
 use crate::app::auth::AuthService;
 use crate::app::bookmarks::BookmarkService;
+use crate::app::settings::SettingsService;
 use crate::config::Config;
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use std::sync::Arc;
 pub struct AppState {
     pub bookmarks: Bookmarks,
     pub auth: Arc<AuthService<PostgresPool, PostgresPool, PostgresPool>>,
+    pub settings: Arc<SettingsService<PostgresPool>>,
     pub config: Arc<Config>,
 }
 
