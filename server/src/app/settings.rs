@@ -507,6 +507,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_decrypted_api_key_returns_key_and_model_when_enabled() {
+        let repo = Arc::new(FakeLlmSettingsRepository::new());
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
+        let service = SettingsService::new(repo.clone(), secret_box.clone());
+        let user_id = Uuid::new_v4();
+
+        service
+            .save(
+                user_id,
+                SaveLlmSettingsInput {
+                    enabled: true,
+                    anthropic_api_key: Some("sk-ant-test-key".into()),
+                    clear_anthropic_api_key: false,
+                    anthropic_model: Some("claude-haiku-4-5-20251001".into()),
+                },
+            )
+            .await
+            .expect("save");
+
+        let result = service
+            .get_decrypted_api_key(user_id)
+            .await
+            .expect("get key");
+        let (key, model) = result.expect("should have key");
+        assert_eq!(key, "sk-ant-test-key");
+        assert_eq!(model, "claude-haiku-4-5-20251001");
+    }
+
+    #[tokio::test]
+    async fn get_decrypted_api_key_returns_none_when_disabled() {
+        let repo = Arc::new(FakeLlmSettingsRepository::new());
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
+        let service = SettingsService::new(repo.clone(), secret_box.clone());
+        let user_id = Uuid::new_v4();
+
+        service
+            .save(
+                user_id,
+                SaveLlmSettingsInput {
+                    enabled: false,
+                    anthropic_api_key: Some("sk-ant-test-key".into()),
+                    clear_anthropic_api_key: false,
+                    anthropic_model: Some("claude-haiku-4-5-20251001".into()),
+                },
+            )
+            .await
+            .expect("save");
+
+        let result = service
+            .get_decrypted_api_key(user_id)
+            .await
+            .expect("get key");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_decrypted_api_key_returns_none_when_no_settings() {
+        let repo = Arc::new(FakeLlmSettingsRepository::new());
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
+        let service = SettingsService::new(repo.clone(), secret_box.clone());
+        let user_id = Uuid::new_v4();
+
+        let result = service
+            .get_decrypted_api_key(user_id)
+            .await
+            .expect("get key");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
     async fn save_rejects_new_unsupported_model_values() {
         let repo = Arc::new(FakeLlmSettingsRepository::new());
         let secret_box = Arc::new(SecretBox::new(
