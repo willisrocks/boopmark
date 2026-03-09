@@ -137,7 +137,34 @@ The `SuggestFields` struct and `GridPage` struct both have `suggest_preview_imag
 
 ---
 
-### Task 5: Update E2E tests
+### Task 5: Rebuild Tailwind CSS
+
+**Goal:** Recompile `static/css/output.css` so that newly-introduced utility classes (`animate-spin`, `text-blue-500`, `py-8`, `ml-2`) are included in the production stylesheet. Tailwind uses JIT/purge and only emits classes found in template source files at build time. Without this step the spinner will have no animation, no color, no padding, and no margin on its label.
+
+**Files:**
+- Regenerated: `static/css/output.css`
+
+**Step 1: Run the Tailwind build**
+
+From the worktree root, run:
+
+```bash
+npx tailwindcss -i static/css/input.css -o static/css/output.css --minify
+```
+
+(Equivalent to `just css-build`.)
+
+**Step 2: Verify the new classes exist**
+
+Spot-check that `output.css` now contains `animate-spin` and `text-blue-500`. A quick grep is sufficient.
+
+**Step 3: Commit the regenerated CSS**
+
+Stage and commit `static/css/output.css` alongside the template changes (or in the same final commit).
+
+---
+
+### Task 6: Update E2E tests
 
 **Goal:** Update the existing `suggest.spec.js` test and add assertions for the new behaviors.
 
@@ -176,7 +203,7 @@ The existing assertion `firstCard.getByTestId("bookmark-card-image").toHaveAttri
 
 ---
 
-### Task 6: Run `cargo test` and verify build
+### Task 7: Run `cargo test` and verify build
 
 **Goal:** Ensure no Rust compilation errors or test failures.
 
@@ -187,7 +214,7 @@ The existing assertion `firstCard.getByTestId("bookmark-card-image").toHaveAttri
 
 ---
 
-### Task 7: Agent-browser E2E verification with screenshots
+### Task 8: Agent-browser E2E verification with screenshots
 
 **Goal:** Use Playwright MCP to take screenshots proving all 4 changes work.
 
