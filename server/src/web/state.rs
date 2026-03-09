@@ -1,3 +1,4 @@
+use crate::adapters::anthropic::AnthropicEnricher;
 use crate::adapters::postgres::PostgresPool;
 use crate::adapters::scraper::HtmlMetadataExtractor;
 use crate::adapters::storage::local::LocalStorage;
@@ -18,6 +19,7 @@ pub struct AppState {
     pub auth: Arc<AuthService<PostgresPool, PostgresPool, PostgresPool>>,
     pub settings: Arc<SettingsService<PostgresPool>>,
     pub config: Arc<Config>,
+    pub enricher: Arc<AnthropicEnricher>,
 }
 
 #[derive(Clone)]

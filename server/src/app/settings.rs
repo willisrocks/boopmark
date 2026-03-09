@@ -36,6 +36,27 @@ where
         Ok(to_view(settings.as_ref()))
     }
 
+    pub async fn get_decrypted_api_key(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<(String, String)>, DomainError> {
+        let settings = self.repo.get(user_id).await?;
+        match settings {
+            Some(s) if s.enabled => {
+                if let Some(encrypted) = &s.anthropic_api_key_encrypted {
+                    let decrypted = self
+                        .secret_box
+                        .decrypt(encrypted)
+                        .map_err(DomainError::Internal)?;
+                    Ok(Some((decrypted, s.anthropic_model)))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub async fn save(
         &self,
         user_id: Uuid,

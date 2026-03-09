@@ -4,6 +4,7 @@ mod config;
 mod domain;
 mod web;
 
+use adapters::anthropic::AnthropicEnricher;
 use adapters::postgres::PostgresPool;
 use adapters::scraper::HtmlMetadataExtractor;
 use adapters::storage::local::LocalStorage;
@@ -76,12 +77,14 @@ async fn main() {
     let auth_service = Arc::new(AuthService::new(db.clone(), db.clone(), db.clone()));
     let secret_box = Arc::new(SecretBox::new(&config.llm_settings_encryption_key));
     let settings_service = Arc::new(SettingsService::new(db.clone(), secret_box));
+    let enricher = Arc::new(AnthropicEnricher::new());
 
     let state = AppState {
         bookmarks,
         auth: auth_service,
         settings: settings_service,
         config: Arc::new(config.clone()),
+        enricher,
     };
 
     let app = web::router::create_router(state);

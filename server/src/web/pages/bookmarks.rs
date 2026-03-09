@@ -6,7 +6,8 @@ use axum::response::{Html, IntoResponse};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark};
+use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UrlMetadata};
+use crate::domain::ports::llm_enricher::{EnrichmentInput, EnrichmentOutput, LlmEnricher};
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
 use crate::web::pages::shared::UserView;
@@ -210,7 +211,7 @@ pub async fn create(
 
 pub async fn suggest(
     State(state): State<AppState>,
-    AuthUser(_user): AuthUser,
+    AuthUser(user): AuthUser,
     Form(form): Form<SuggestForm>,
 ) -> axum::response::Response {
     let metadata = if form.url.trim().is_empty() {
@@ -219,18 +220,57 @@ pub async fn suggest(
         with_bookmarks!(&state.bookmarks, svc => svc.extract_metadata(&form.url).await).ok()
     };
 
+    // Attempt LLM enrichment if user has it configured
+    let enrichment = try_llm_enrich(&state, user.id, &form.url, &metadata).await;
+
+    let suggest_tags = enrichment
+        .as_ref()
+        .map(|e| e.tags.join(", "))
+        .unwrap_or_default();
+
     render(&SuggestFields {
         suggest_title: fill_if_blank(
             form.title,
-            metadata.as_ref().and_then(|meta| meta.title.clone()),
+            enrichment
+                .as_ref()
+                .and_then(|e| e.title.clone())
+                .or_else(|| metadata.as_ref().and_then(|m| m.title.clone())),
         ),
         suggest_description: fill_if_blank(
             form.description,
-            metadata.as_ref().and_then(|meta| meta.description.clone()),
+            enrichment
+                .as_ref()
+                .and_then(|e| e.description.clone())
+                .or_else(|| metadata.as_ref().and_then(|m| m.description.clone())),
         ),
         suggest_preview_image_url: metadata.and_then(|meta| meta.image_url),
-        suggest_tags: String::new(),
+        suggest_tags,
     })
+}
+
+async fn try_llm_enrich(
+    state: &AppState,
+    user_id: Uuid,
+    url: &str,
+    metadata: &Option<UrlMetadata>,
+) -> Option<EnrichmentOutput> {
+    let (api_key, model) = state
+        .settings
+        .get_decrypted_api_key(user_id)
+        .await
+        .ok()??;
+
+    let input = EnrichmentInput {
+        url: url.to_string(),
+        scraped_title: metadata.as_ref().and_then(|m| m.title.clone()),
+        scraped_description: metadata.as_ref().and_then(|m| m.description.clone()),
+    };
+
+    state
+        .enricher
+        .enrich(&api_key, &model, input)
+        .await
+        .ok()
 }
 
 pub async fn delete(
