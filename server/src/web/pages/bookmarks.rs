@@ -89,6 +89,14 @@ struct BookmarkList {
 }
 
 #[derive(Template)]
+#[template(path = "bookmarks/list_with_filters.html")]
+struct BookmarkListWithFilters {
+    bookmarks: Vec<BookmarkView>,
+    filter_tags: Vec<TagView>,
+    sort: String,
+}
+
+#[derive(Template)]
 #[template(path = "bookmarks/card.html")]
 struct BookmarkCard {
     bookmark: BookmarkView,
@@ -150,26 +158,26 @@ pub async fn list(
 
     let bookmark_views: Vec<BookmarkView> = bookmarks.into_iter().map(Into::into).collect();
 
+    // Query all distinct tags for the filter bar (used by both HTMX and full-page paths).
+    let all_tag_names = with_bookmarks!(&state.bookmarks, svc =>
+        svc.all_tags(user.id).await
+    )
+    .unwrap_or_default();
+    let filter_tags: Vec<TagView> = all_tag_names
+        .into_iter()
+        .map(|name| {
+            let active = active_tags.contains(&name);
+            TagView { name, active }
+        })
+        .collect();
+
     if is_htmx(&headers) {
-        render(&BookmarkList {
+        render(&BookmarkListWithFilters {
             bookmarks: bookmark_views,
+            filter_tags,
+            sort: sort_str,
         })
     } else {
-        // Full-page load: query all distinct tags for the filter bar.
-        // This is a lightweight query (SELECT DISTINCT unnest(tags)) that
-        // returns the complete tag set regardless of active filters.
-        let all_tag_names = with_bookmarks!(&state.bookmarks, svc =>
-            svc.all_tags(user.id).await
-        )
-        .unwrap_or_default();
-        let filter_tags: Vec<TagView> = all_tag_names
-            .into_iter()
-            .map(|name| {
-                let active = active_tags.contains(&name);
-                TagView { name, active }
-            })
-            .collect();
-
         render(&GridPage {
             user: Some(user.into()),
             header_shows_bookmark_actions: true,
