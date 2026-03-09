@@ -70,6 +70,7 @@ struct GridPage {
     suggest_title: String,
     suggest_description: String,
     suggest_preview_image_url: Option<String>,
+    suggest_tags: String,
 }
 
 #[derive(Template)]
@@ -90,6 +91,7 @@ struct SuggestFields {
     suggest_title: String,
     suggest_description: String,
     suggest_preview_image_url: Option<String>,
+    suggest_tags: String,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +161,7 @@ pub async fn list(
             suggest_title: String::new(),
             suggest_description: String::new(),
             suggest_preview_image_url: None,
+            suggest_tags: String::new(),
         })
     }
 }
@@ -226,6 +229,7 @@ pub async fn suggest(
             metadata.as_ref().and_then(|meta| meta.description.clone()),
         ),
         suggest_preview_image_url: metadata.and_then(|meta| meta.image_url),
+        suggest_tags: String::new(),
     })
 }
 

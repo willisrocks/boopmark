@@ -59,6 +59,7 @@ impl MetadataExtractor for HtmlMetadataExtractor {
             description,
             image_url,
             domain,
+            tags: None,
         })
     }
 }
