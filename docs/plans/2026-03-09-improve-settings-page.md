@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use trycycle-executing to implement this plan task-by-task.
 
-**Goal:** Make `/settings` clearly reflect saved Anthropic configuration, restrict model selection to the current official Anthropic model IDs, and render the page inside BoopMark's normal app shell without breaking encrypted settings persistence.
+**Goal:** Make `/settings` clearly reflect saved Anthropic configuration, offer the current official Anthropic model IDs for new selections, and render the page inside BoopMark's normal app shell without breaking encrypted settings persistence.
 
-**Architecture:** Keep the existing encrypted `user_llm_settings` storage and route structure, but move Anthropic model handling to a server-owned allow-list so the service, template, and tests all use the same labels and full API values. Normalize the legacy `claude-haiku-4-5` alias to the new full Haiku identifier and coerce every other unsupported saved or submitted value back to the supported default, so the finished page truly exposes only the official options. Reuse the existing header component on Settings by passing the same user view data plus a simple page-context flag so BoopMark branding and navigation stay visible while header controls remain safe off the bookmarks grid. Preserve the current keep/replace/clear key semantics: the UI never rehydrates the secret, it only shows truthful saved-state messaging, replace state, or cleared state.
+**Architecture:** Keep the existing encrypted `user_llm_settings` storage and route structure, but move the official Anthropic choices to a server-owned allow-list so the service, template, and tests all use the same labels and full API values. Do not silently migrate or overwrite previously saved non-official model strings: if a user already has one stored, render it as the current selected value alongside the three current official options and preserve it on unrelated saves until the user explicitly chooses a different model. Reuse the existing header component on Settings by passing the same user view data plus a simple page-context flag so BoopMark branding and navigation stay visible while header controls remain safe off the bookmarks grid. Preserve the current keep/replace/clear key semantics: the UI never rehydrates the secret, it only shows truthful saved-state messaging, replace state, or cleared state.
 
 **Tech Stack:** Rust, Axum, Askama templates, Tailwind CSS, Playwright
 
@@ -139,18 +139,10 @@ fn normalize_model_accepts_the_current_official_model_ids() {
 }
 
 #[test]
-fn normalize_model_maps_the_previous_haiku_alias_to_the_current_full_id() {
-    assert_eq!(
-        normalize_model(Some("claude-haiku-4-5".into())),
-        "claude-haiku-4-5-20251001"
-    );
-}
-
-#[test]
-fn normalize_model_rejects_unsupported_values_back_to_the_default() {
+fn normalize_model_preserves_a_preexisting_custom_value() {
     assert_eq!(
         normalize_model(Some("claude-3-7-sonnet-latest".into())),
-        "claude-haiku-4-5-20251001"
+        "claude-3-7-sonnet-latest"
     );
 }
 ```
@@ -169,7 +161,7 @@ assert_eq!(DEFAULT_ANTHROPIC_MODEL, "claude-haiku-4-5-20251001");
 assert_eq!(ANTHROPIC_MODEL_OPTIONS.len(), 3);
 ```
 
-Add one load-path test proving an unsupported stored value is normalized before rendering:
+Add one load-path test proving an unsupported stored value is preserved before rendering:
 
 ```rust
 repo.stored.lock().expect("stored lock").replace(LlmSettings {
@@ -182,7 +174,35 @@ repo.stored.lock().expect("stored lock").replace(LlmSettings {
 });
 
 let view = service.load(user_id).await.expect("load");
-assert_eq!(view.anthropic_model, "claude-haiku-4-5-20251001");
+assert_eq!(view.anthropic_model, "claude-3-7-sonnet-latest");
+```
+
+Add one save-path test proving unrelated saves keep a preserved current model value intact:
+
+```rust
+repo.stored.lock().expect("stored lock").replace(LlmSettings {
+    user_id,
+    enabled: true,
+    anthropic_api_key_encrypted: Some(vec![1, 2, 3]),
+    anthropic_model: "claude-3-7-sonnet-latest".into(),
+    created_at: Utc::now(),
+    updated_at: Utc::now(),
+});
+
+let view = service
+    .save(
+        user_id,
+        SaveLlmSettingsInput {
+            enabled: true,
+            anthropic_api_key: None,
+            clear_anthropic_api_key: false,
+            anthropic_model: Some("claude-3-7-sonnet-latest".into()),
+        },
+    )
+    .await
+    .expect("save");
+
+assert_eq!(view.anthropic_model, "claude-3-7-sonnet-latest");
 ```
 
 **Step 2: Run the unit tests and verify they fail**
@@ -196,7 +216,7 @@ cargo test -p boopmark-server app::settings -- --nocapture
 Expected:
 - FAIL because the default model constant is still `claude-haiku-4-5`.
 - FAIL because there is no shared allow-list for the three official model IDs.
-- FAIL because unsupported saved and submitted model values are not yet coerced back to the supported default.
+- FAIL because there is no explicit test coverage protecting existing custom model values from being overwritten on load or unrelated saves.
 
 **Step 3: Implement the shared model metadata and normalization**
 
@@ -230,17 +250,14 @@ Update `normalize_model` in `server/src/app/settings.rs`:
 
 ```rust
 fn normalize_model(model: Option<String>) -> String {
-    match model.as_deref().map(str::trim) {
-        Some("claude-haiku-4-5") => DEFAULT_ANTHROPIC_MODEL.to_string(),
-        Some(value) if ANTHROPIC_MODEL_OPTIONS.iter().any(|option| option.value == value) => {
-            value.to_string()
-        }
+    match model {
+        Some(value) if !value.trim().is_empty() => value.trim().to_string(),
         _ => DEFAULT_ANTHROPIC_MODEL.to_string(),
     }
 }
 ```
 
-This is the deliberate migration policy: old supported alias values move to the current official full ID, and every other unsupported value collapses to the supported default so the finished `select` never exposes arbitrary models.
+Keep normalization intentionally narrow: blank submissions still resolve to the new default `claude-haiku-4-5-20251001`, but any non-empty current value is preserved so an unrelated settings save cannot destroy an existing model choice.
 
 **Step 4: Run the unit tests and verify they pass**
 
@@ -333,8 +350,8 @@ Update `SettingsPage` in `server/src/web/pages/settings.rs` to include the same 
 
 ```rust
 struct ModelOptionView {
-    label: &'static str,
-    value: &'static str,
+    label: String,
+    value: String,
     selected: bool,
 }
 
@@ -352,7 +369,17 @@ struct SettingsPage {
 }
 ```
 
-Populate `user: Some(user.clone().into())`, `header_shows_bookmark_actions: false`, and build `anthropic_model_options` only from `ANTHROPIC_MODEL_OPTIONS`. Do not prepend a synthetic custom option. By this point `SettingsService::load` must already have normalized any unsupported stored value back to `DEFAULT_ANTHROPIC_MODEL`, so the select always contains exactly the three official choices.
+Populate `user: Some(user.clone().into())`, `header_shows_bookmark_actions: false`, and build `anthropic_model_options` from `ANTHROPIC_MODEL_OPTIONS`, prepending one selected preservation option only when the current saved value is not one of the three official values:
+
+```rust
+ModelOptionView {
+    label: format!("Keep current saved model ({current_model})"),
+    value: current_model.clone(),
+    selected: true,
+}
+```
+
+That preservation option is not a new recommendation and should appear only when the database already contains a non-official model value. Its job is to keep existing persistence intact until the user explicitly chooses one of the official options.
 
 **Step 2: Make the shared header safe on `/settings`**
 
