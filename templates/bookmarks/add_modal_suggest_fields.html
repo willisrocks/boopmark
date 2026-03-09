@@ -1,15 +1,12 @@
 <div id="bookmark-suggest-target">
+    <div id="suggest-spinner" class="htmx-indicator flex items-center justify-center py-8">
+        <svg class="animate-spin h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <span class="ml-2 text-gray-400 text-sm">Fetching metadata...</span>
+    </div>
     <div class="space-y-4">
-        <div class="rounded-lg border border-gray-700 bg-[#151827] p-3" data-testid="bookmark-preview-panel">
-            {% if let Some(img) = suggest_preview_image_url %}
-            <img src="{{ img }}"
-                 alt=""
-                 class="w-full h-40 object-cover rounded-lg"
-                 data-testid="bookmark-preview-image">
-            {% else %}
-            <div class="h-40 flex items-center justify-center text-4xl text-gray-600">&#128278;</div>
-            {% endif %}
-        </div>
         <div>
             <label class="block text-sm text-gray-400 mb-1">Title</label>
             <input id="bookmark-title-input"
