@@ -47,28 +47,29 @@ test("profile menu stays visible while the pointer crosses into Sign Out", async
   await expect(page.getByRole("button", { name: "Sign in for E2E" })).toBeVisible();
 });
 
-test("profile menu stays visible while the pointer crosses into API Keys", async ({ page }) => {
+test("profile menu stays visible while the pointer crosses into Settings", async ({ page }) => {
   await signIn(page);
 
   const trigger = page.getByTestId("profile-menu-trigger");
   const menu = page.getByTestId("profile-menu");
-  const apiKeysLink = page.getByTestId("profile-menu-api-keys");
+  const settingsLink = page.getByTestId("profile-menu-settings");
 
   await trigger.hover();
   await expect(menu).toBeVisible();
 
   const triggerBox = await trigger.boundingBox();
-  const apiKeysBox = await apiKeysLink.boundingBox();
-  if (!triggerBox || !apiKeysBox) {
-    throw new Error("expected trigger and api keys link to have bounding boxes");
+  const settingsBox = await settingsLink.boundingBox();
+  if (!triggerBox || !settingsBox) {
+    throw new Error("expected trigger and settings link to have bounding boxes");
   }
 
-  await moveMouseInSteps(page, center(triggerBox), center(apiKeysBox));
+  await moveMouseInSteps(page, center(triggerBox), center(settingsBox));
   await expect(menu).toBeVisible();
 
-  await apiKeysLink.click();
-  await expect(page).toHaveURL(/\/settings\/api-keys$/);
-  await expect(page.getByRole("heading", { name: "API Keys" })).toBeVisible();
+  await settingsLink.click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "LLM Integration" })).toBeVisible();
 });
 
 test("profile menu stays visible while keyboard focus moves into the menu", async ({ page }) => {
@@ -76,14 +77,14 @@ test("profile menu stays visible while keyboard focus moves into the menu", asyn
 
   const trigger = page.getByTestId("profile-menu-trigger");
   const menu = page.getByTestId("profile-menu");
-  const apiKeysLink = page.getByTestId("profile-menu-api-keys");
+  const settingsLink = page.getByTestId("profile-menu-settings");
   const signOutButton = page.getByTestId("profile-menu-sign-out");
 
   await trigger.focus();
   await expect(menu).toBeVisible();
 
   await page.keyboard.press("Tab");
-  await expect(apiKeysLink).toBeFocused();
+  await expect(settingsLink).toBeFocused();
   await expect(menu).toBeVisible();
 
   await page.keyboard.press("Tab");
@@ -91,10 +92,11 @@ test("profile menu stays visible while keyboard focus moves into the menu", asyn
   await expect(menu).toBeVisible();
 
   await page.keyboard.press("Shift+Tab");
-  await expect(apiKeysLink).toBeFocused();
+  await expect(settingsLink).toBeFocused();
   await expect(menu).toBeVisible();
 
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/\/settings\/api-keys$/);
-  await expect(page.getByRole("heading", { name: "API Keys" })).toBeVisible();
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "LLM Integration" })).toBeVisible();
 });

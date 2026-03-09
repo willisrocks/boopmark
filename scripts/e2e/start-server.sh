@@ -21,4 +21,8 @@ export S3_ACCESS_KEY=minioadmin
 export S3_SECRET_KEY=minioadmin
 export S3_REGION=us-east-1
 
+if [ -f .env ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  export ANTHROPIC_API_KEY="$(awk -F= '/^ANTHROPIC_API_KEY=/{print substr($0, index($0,$2))}' .env)"
+fi
+
 exec cargo run -p boopmark-server
