@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Settings - BoopMark{% endblock %}
+{% block content %}
+<main class="max-w-2xl mx-auto px-6 py-12">
+    <div class="bg-[#1e2235] rounded-xl border border-gray-700 p-8 space-y-8">
+        <div>
+            <h1 class="text-2xl font-bold">Settings</h1>
+            <p class="text-sm text-gray-400 mt-1">{{ email }}</p>
+        </div>
+
+        {% if let Some(message) = success_message %}
+        <div class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+            {{ message }}
+        </div>
+        {% endif %}
+
+        <section class="space-y-5">
+            <div>
+                <h2 class="text-lg font-semibold">LLM Integration</h2>
+                <p class="text-sm text-gray-400">Configure Anthropic access for this signed-in account.</p>
+            </div>
+
+            <form method="post" action="/settings" class="space-y-5">
+                <label class="flex items-center gap-3 text-sm font-medium text-gray-200">
+                    <input type="checkbox" name="llm_enabled" {% if llm_enabled %}checked{% endif %}>
+                    Enable LLM integration
+                </label>
+
+                <div class="space-y-2">
+                    <label for="anthropic_api_key" class="block text-sm font-medium text-gray-200">Anthropic API key</label>
+                    <input
+                        id="anthropic_api_key"
+                        name="anthropic_api_key"
+                        type="password"
+                        autocomplete="off"
+                        class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
+                    >
+                    {% if has_anthropic_api_key %}
+                    <p class="text-xs text-gray-400">Anthropic API key saved.</p>
+                    <label class="flex items-center gap-2 text-xs text-gray-300">
+                        <input type="checkbox" name="clear_anthropic_api_key" aria-label="Clear saved Anthropic API key">
+                        Clear saved key
+                    </label>
+                    {% else %}
+                    <p class="text-xs text-gray-400">No Anthropic API key saved yet.</p>
+                    {% endif %}
+                </div>
+
+                <div class="space-y-2">
+                    <label for="anthropic_model" class="block text-sm font-medium text-gray-200">Anthropic model</label>
+                    <input
+                        id="anthropic_model"
+                        name="anthropic_model"
+                        type="text"
+                        value="{{ anthropic_model }}"
+                        class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
+                    >
+                    <p class="text-xs text-gray-400">Default: claude-haiku-4-5.</p>
+                </div>
+
+                <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
+                    Save settings
+                </button>
+            </form>
+        </section>
+    </div>
+</main>
+{% endblock %}
