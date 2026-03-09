@@ -231,6 +231,8 @@ git commit -m "feat: add supported anthropic model metadata"
 Reuse the existing header instead of creating a second Settings-only shell, but make the header template safe on non-bookmarks pages. The page should show the saved-key state by default, hide direct editing until the user chooses replace, and render the official model options from the shared server metadata.
 
 **Files:**
+- Create: `server/src/web/pages/shared.rs`
+- Modify: `server/src/web/pages/mod.rs`
 - Modify: `templates/components/header.html`
 - Modify: `templates/settings/index.html`
 - Modify: `server/src/web/pages/bookmarks.rs`
@@ -238,18 +240,61 @@ Reuse the existing header instead of creating a second Settings-only shell, but 
 
 **Step 1: Introduce the page data the shared header and settings template need**
 
-Extract the reusable user view from `server/src/web/pages/bookmarks.rs` so both pages can use it, or make it `pub(crate)` in a shared page module. Add the smallest possible page-context flag:
+Create a real shared page module instead of trying to reuse the private `bookmarks.rs` struct in place. `templates/components/header.html` already renders `user.image`, `user.email_initial`, `user.display_name`, and `user.email`, so the shared view model must live in a module both page handlers can import and its fields must be visible to Askama code generated from both `bookmarks.rs` and `settings.rs`.
+
+Create `server/src/web/pages/shared.rs`:
 
 ```rust
 pub(crate) struct UserView {
-    email: String,
-    display_name: String,
-    email_initial: String,
-    image: Option<String>,
+    pub(crate) email: String,
+    pub(crate) display_name: String,
+    pub(crate) email_initial: String,
+    pub(crate) image: Option<String>,
+}
+
+impl From<crate::domain::user::User> for UserView {
+    fn from(u: crate::domain::user::User) -> Self {
+        let email_initial = u.email.chars().next().unwrap_or('?').to_string();
+        let display_name = u.name.clone().unwrap_or_default();
+        Self {
+            email: u.email,
+            display_name,
+            email_initial,
+            image: u.image,
+        }
+    }
 }
 ```
 
-Update `SettingsPage` in `server/src/web/pages/settings.rs` to include:
+Register that module from `server/src/web/pages/mod.rs`:
+
+```rust
+pub(crate) mod shared;
+```
+
+Then update both page templates that include the shared header so the new branch is fully specified before `templates/components/header.html` changes:
+
+```rust
+#[derive(Template)]
+#[template(path = "bookmarks/grid.html")]
+struct GridPage {
+    user: Option<UserView>,
+    header_shows_bookmark_actions: bool,
+    bookmarks: Vec<BookmarkView>,
+    ...
+}
+```
+
+```rust
+render(&GridPage {
+    user: Some(user.into()),
+    header_shows_bookmark_actions: true,
+    bookmarks: bookmark_views,
+    ...
+})
+```
+
+Update `SettingsPage` in `server/src/web/pages/settings.rs` to include the same header flag with the opposite value:
 
 ```rust
 struct ModelOptionView {
@@ -272,7 +317,7 @@ struct SettingsPage {
 }
 ```
 
-Populate `user: Some(user.clone().into())` and build `anthropic_model_options` from `ANTHROPIC_MODEL_OPTIONS`, prepending one extra selected option only when the saved value is a legacy custom value that is not in the official list:
+Populate `user: Some(user.clone().into())`, `header_shows_bookmark_actions: false`, and build `anthropic_model_options` from `ANTHROPIC_MODEL_OPTIONS`, prepending one extra selected option only when the saved value is a legacy custom value that is not in the official list:
 
 ```rust
 ModelOptionView {
@@ -305,7 +350,7 @@ Update `templates/components/header.html` so:
     {% endif %}
 ```
 
-The settings branch keeps the header visible and gives a deterministic path back to the rest of the app without targeting a missing `#bookmark-grid` or missing add-bookmark modal.
+Do this only after `GridPage` is already supplying `header_shows_bookmark_actions: true`; otherwise `/bookmarks` will stop rendering. The settings branch keeps the header visible and gives a deterministic path back to the rest of the app without targeting a missing `#bookmark-grid` or missing add-bookmark modal.
 
 **Step 3: Replace the isolated settings card behavior with the new form UX**
 
@@ -374,10 +419,11 @@ Expected:
 - PASS for the settings service unit tests.
 - PASS for the settings E2E flow, including saved-key masking, replace, clear, and the model select.
 - PASS for the profile-menu navigation smoke test, confirming the settings page still looks like BoopMark and remains reachable from the normal shell.
+- PASS for `/bookmarks` rendering with the unchanged live-search/add-bookmark header branch because `GridPage` now explicitly supplies `header_shows_bookmark_actions: true`.
 
 **Step 5: Commit the UI and shell change**
 
 ```bash
-git add templates/components/header.html templates/settings/index.html server/src/web/pages/bookmarks.rs server/src/web/pages/settings.rs
+git add server/src/web/pages/shared.rs server/src/web/pages/mod.rs templates/components/header.html templates/settings/index.html server/src/web/pages/bookmarks.rs server/src/web/pages/settings.rs
 git commit -m "feat: improve settings page shell and llm ux"
 ```
