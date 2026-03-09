@@ -42,7 +42,7 @@ async fn main() {
         StorageBackend::Local => {
             let storage = Arc::new(LocalStorage::new(
                 "./uploads".into(),
-                format!("{}/static/uploads", config.app_url),
+                format!("{}/uploads", config.app_url),
             ));
             Bookmarks::Local(Arc::new(BookmarkService::new(
                 db.clone(),
