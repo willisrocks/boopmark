@@ -11,7 +11,7 @@ async function signIn(page) {
 async function resetSettings(page) {
   await page.goto("/settings");
 
-  const clearSavedKey = page.getByLabel("Clear saved Anthropic API key");
+  const clearSavedKey = page.getByLabel("Clear saved key");
   if (await clearSavedKey.count()) {
     await clearSavedKey.check();
   }
@@ -21,7 +21,9 @@ async function resetSettings(page) {
     await enableLlm.uncheck();
   }
 
-  await page.getByLabel("Anthropic model").fill("claude-haiku-4-5");
+  await page
+    .getByLabel("Anthropic model")
+    .selectOption("claude-haiku-4-5-20251001");
   await page.getByRole("button", { name: "Save settings" }).click();
   await expect(page).toHaveURL(/\/settings\?saved=1$/);
 }
@@ -37,7 +39,43 @@ function readAnthropicApiKeyFromDotEnv() {
   return match[1].trim();
 }
 
-test("settings page shows the default Anthropic model and saves llm integration", async ({
+test("settings page renders in the app shell with the official default model", async ({
+  page,
+}) => {
+  await signIn(page);
+  await resetSettings(page);
+  await page.goto("/settings");
+
+  await expect(page.getByRole("banner")).toBeVisible();
+  await expect(page.getByRole("link", { name: "BoopMark" })).toHaveAttribute(
+    "href",
+    "/bookmarks",
+  );
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "LLM Integration" })).toBeVisible();
+  await expect(page.getByLabel("Enable LLM integration")).not.toBeChecked();
+  await expect(page.getByText("No Anthropic API key saved yet.")).toBeVisible();
+  await expect(page.getByLabel("Anthropic API key")).toBeEditable();
+  await expect(page.getByLabel("Anthropic model")).toHaveValue(
+    "claude-haiku-4-5-20251001",
+  );
+  await expect(page.locator("#anthropic_model option").nth(0)).toHaveAttribute(
+    "value",
+    "claude-opus-4-6",
+  );
+  await expect(page.locator("#anthropic_model option").nth(1)).toHaveAttribute(
+    "value",
+    "claude-sonnet-4-6",
+  );
+  await expect(page.locator("#anthropic_model option").nth(2)).toHaveAttribute(
+    "value",
+    "claude-haiku-4-5-20251001",
+  );
+  // Normal official-only path after resetSettings; preserved legacy values are covered in unit tests.
+  await expect(page.locator("#anthropic_model option")).toHaveCount(3);
+});
+
+test("settings page uses explicit keep replace and clear flows for saved Anthropic keys", async ({
   page,
 }) => {
   const anthropicApiKey = readAnthropicApiKeyFromDotEnv();
@@ -46,48 +84,31 @@ test("settings page shows the default Anthropic model and saves llm integration"
   await resetSettings(page);
   await page.goto("/settings");
 
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "LLM Integration" })).toBeVisible();
-  await expect(page.getByLabel("Enable LLM integration")).not.toBeChecked();
-  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-haiku-4-5");
-  await expect(page.getByText("No Anthropic API key saved yet.")).toBeVisible();
-
   await page.getByLabel("Enable LLM integration").check();
-  await page.getByRole("textbox", { name: "Anthropic API key" }).fill(anthropicApiKey);
-  await page.getByLabel("Anthropic model").fill("claude-haiku-4-5-20251001");
+  await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
+  await page.getByLabel("Anthropic model").selectOption("claude-sonnet-4-6");
   await page.getByRole("button", { name: "Save settings" }).click();
 
   await expect(page).toHaveURL(/\/settings\?saved=1$/);
   await expect(page.getByText("Settings saved")).toBeVisible();
-  await expect(page.getByText("Anthropic API key saved")).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Anthropic API key" })).toHaveValue("");
+  await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
+  await expect(page.getByText("Anthropic API key saved securely")).toBeVisible();
+  await expect(page.getByLabel("Anthropic API key")).toHaveCount(0);
+  await expect(page.getByLabel("Keep current saved key")).toBeChecked();
+  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-sonnet-4-6");
 
-  await page.reload();
-  await expect(page.getByLabel("Enable LLM integration")).toBeChecked();
-  await expect(page.getByLabel("Anthropic model")).toHaveValue(
-    "claude-haiku-4-5-20251001",
-  );
-  await expect(page.getByText("Anthropic API key saved")).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Anthropic API key" })).toHaveValue("");
-});
-
-test("settings page can clear a saved anthropic key", async ({ page }) => {
-  const anthropicApiKey = readAnthropicApiKeyFromDotEnv();
-
-  await signIn(page);
-  await resetSettings(page);
-  await page.goto("/settings");
-
-  await page.getByLabel("Enable LLM integration").check();
-  await page.getByRole("textbox", { name: "Anthropic API key" }).fill(anthropicApiKey);
+  await page.getByLabel("Replace saved key").check();
+  await expect(page.getByTestId("anthropic-api-key-replacement")).toBeVisible();
+  await page.getByLabel("Replacement Anthropic API key").fill(anthropicApiKey);
+  await page.getByLabel("Clear saved key").check();
+  await expect(page.getByTestId("anthropic-api-key-replacement")).toHaveCount(0);
+  await expect(
+    page.getByText("Saving will remove the stored Anthropic API key."),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Save settings" }).click();
 
-  await page.getByLabel("Clear saved Anthropic API key").check();
-  await page.getByRole("button", { name: "Save settings" }).click();
-
-  await expect(page).toHaveURL(/\/settings\?saved=1$/);
   await expect(page.getByText("No Anthropic API key saved yet.")).toBeVisible();
-  await expect(page.getByLabel("Clear saved Anthropic API key")).toHaveCount(0);
+  await expect(page.getByLabel("Anthropic API key")).toBeEditable();
 });
 
 test("legacy api keys route redirects to settings", async ({ page }) => {
@@ -113,7 +134,7 @@ test("unauthenticated requests cannot read or save settings", async ({ page, req
     form: {
       llm_enabled: "on",
       anthropic_api_key: "sk-ant-test",
-      anthropic_model: "claude-haiku-4-5",
+      anthropic_model: "claude-haiku-4-5-20251001",
     },
   });
   expect(postResponse.status()).toBe(401);
@@ -122,4 +143,26 @@ test("unauthenticated requests cannot read or save settings", async ({ page, req
   await expect(page.getByRole("heading", { name: "Settings" })).toHaveCount(0);
   await page.goto("/settings/api-keys");
   await expect(page).not.toHaveURL(/\/settings$/);
+});
+
+test("settings rejects forged unsupported anthropic model submissions with 400", async ({
+  page,
+}) => {
+  await signIn(page);
+
+  const status = await page.evaluate(async () => {
+    const response = await fetch("/settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        llm_enabled: "on",
+        anthropic_model: "claude-3-7-sonnet-latest",
+      }),
+    });
+    return response.status;
+  });
+
+  expect(status).toBe(400);
 });
