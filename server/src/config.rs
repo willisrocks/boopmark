@@ -5,6 +5,7 @@ pub struct Config {
     pub database_url: String,
     pub app_url: String,
     pub port: u16,
+    pub llm_settings_encryption_key: String,
     pub session_secret: String,
     pub google_client_id: String,
     pub google_client_secret: String,
@@ -34,6 +35,8 @@ impl Config {
                 .unwrap_or_else(|_| "4000".into())
                 .parse()
                 .unwrap(),
+            llm_settings_encryption_key: env::var("LLM_SETTINGS_ENCRYPTION_KEY")
+                .expect("LLM_SETTINGS_ENCRYPTION_KEY required"),
             session_secret: env::var("SESSION_SECRET").expect("SESSION_SECRET required"),
             google_client_id: env::var("GOOGLE_CLIENT_ID").expect("GOOGLE_CLIENT_ID required"),
             google_client_secret: env::var("GOOGLE_CLIENT_SECRET")

@@ -29,6 +29,8 @@ thiserror.workspace = true
 url.workspace = true
 sha2.workspace = true
 trait-variant.workspace = true
+base64 = "0.22"
+ring = "0.17"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
