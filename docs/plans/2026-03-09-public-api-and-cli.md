@@ -8,6 +8,11 @@
 
 **Tech Stack:** Rust, Axum 0.8, SQLx 0.8, Askama 0.12, HTMX 2, Tailwind CSS 4, clap 4, reqwest, Playwright (API E2E), shell-based CLI E2E harness.
 
+**Key design decisions:**
+- The E2E auth endpoint is `POST /auth/test-login` (not `/auth/e2e-login`). It returns a 302 redirect with a `Set-Cookie: session=...` header. Playwright's `request.post()` follows redirects and loses the `set-cookie` from the 302, so API E2E tests must use `maxRedirects: 0` to capture the cookie from the redirect response itself.
+- The `key_hash` stored in the DB is a SHA-256 hex digest, not the original key. The raw key (`boop_*`) is only returned once at creation time. The settings UI will show just the key name and creation date — no prefix — since we have no way to recover the original key prefix.
+- No new crate dependencies are needed for URL encoding. The codebase already has a `urlencoding()` helper in `server/src/web/pages/auth.rs` (line 298) that uses `url::form_urlencoded::byte_serialize`, which is already in `Cargo.toml` via the `url` workspace dependency.
+
 ---
 
 ### Task 1: Add API key management endpoints to the public API
@@ -19,7 +24,7 @@ The server has `POST /api/v1/auth/keys` but is missing `GET` (list) and `DELETE 
 
 **Step 1: Write the failing test**
 
-No Rust integration test for this yet — we will rely on the E2E tests in Task 8. Instead, verify the route compiles and the handler signatures are correct.
+No Rust integration test for this yet — we will rely on the E2E tests in Task 7. Instead, verify the route compiles and the handler signatures are correct.
 
 **Step 2: Implement list and delete endpoints**
 
@@ -117,10 +122,21 @@ async fn list_tags(
 }
 ```
 
-Add the route in the `routes()` function:
+Add the route in the `routes()` function. **Important:** The `/tags` route must be registered before the `/{id}` route to avoid `tags` being parsed as a UUID path parameter:
 
 ```rust
-.route("/tags", get(list_tags))
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_bookmarks).post(create_bookmark))
+        .route("/tags", get(list_tags))
+        .route("/metadata", post(extract_metadata))
+        .route(
+            "/{id}",
+            get(get_bookmark)
+                .put(update_bookmark)
+                .delete(delete_bookmark),
+        )
+}
 ```
 
 **Step 2: Verify it compiles**
@@ -150,19 +166,18 @@ Users need to create, view, and delete API keys from the settings page. Add an "
 In `server/src/web/pages/settings.rs`, add to the `SettingsPage` struct:
 
 ```rust
-use crate::domain::ports::api_key_repo::ApiKey;
-
 struct ApiKeyView {
     id: String,
     name: String,
     created_at: String,
-    prefix: String,
 }
 
 // In SettingsPage:
 api_keys: Vec<ApiKeyView>,
 created_key: Option<String>,
 ```
+
+Note: The `ApiKeyView` intentionally does NOT include a `prefix` field. The `key_hash` in the database is a SHA-256 hex digest of the original key, not the key itself. There is no way to recover a meaningful prefix from it. The UI will show only the key name and creation date.
 
 Add `created_key` query param support:
 
@@ -184,16 +199,19 @@ let api_keys: Vec<ApiKeyView> = api_keys_result
         id: k.id.to_string(),
         name: k.name.clone(),
         created_at: k.created_at.format("%Y-%m-%d").to_string(),
-        prefix: format!("boop_{}...", &k.key_hash[..8]),
     })
     .collect();
 ```
 
 **Step 2: Add create and delete API key handlers**
 
-Add new handlers in `server/src/web/pages/settings.rs`:
+Add new handlers in `server/src/web/pages/settings.rs`. Use the existing `urlencoding()` function from `server/src/web/pages/auth.rs` — do NOT add a new crate dependency. Either move the `urlencoding` function to a shared location (e.g., a helper in `server/src/web/mod.rs`) or inline the same `url::form_urlencoded::byte_serialize` call:
 
 ```rust
+fn url_encode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
 #[derive(Deserialize)]
 struct CreateApiKeyForm {
     key_name: String,
@@ -206,7 +224,7 @@ async fn create_settings_api_key(
 ) -> axum::response::Response {
     match state.auth.create_api_key(user.id, &form.key_name).await {
         Ok(key) => {
-            let encoded = urlencoding::encode(&key);
+            let encoded = url_encode(&key);
             Redirect::to(&format!("/settings?created_key={encoded}")).into_response()
         }
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -235,12 +253,6 @@ Add routes:
 ```rust
 .route("/settings/api-keys/create", axum::routing::post(create_settings_api_key))
 .route("/settings/api-keys/delete", axum::routing::post(delete_settings_api_key))
-```
-
-Note: Add `urlencoding` dependency to `server/Cargo.toml`:
-
-```toml
-urlencoding = "2"
 ```
 
 **Step 3: Update the settings template**
@@ -281,7 +293,6 @@ Add an "API Keys" section in `templates/settings/index.html` after the LLM Integ
         <div class="flex items-center justify-between px-4 py-3 rounded-lg border border-gray-700 bg-[#1a1d2e]" data-testid="api-key-row">
             <div>
                 <span class="text-sm font-medium text-gray-200">{{ key.name }}</span>
-                <span class="text-xs text-gray-500 ml-2">{{ key.prefix }}</span>
                 <span class="text-xs text-gray-500 ml-2">Created {{ key.created_at }}</span>
             </div>
             <form method="post" action="/settings/api-keys/delete" class="inline">
@@ -303,7 +314,7 @@ Expected: compiles without errors
 **Step 5: Commit**
 
 ```bash
-git add server/src/web/pages/settings.rs templates/settings/index.html server/Cargo.toml
+git add server/src/web/pages/settings.rs templates/settings/index.html
 git commit -m "feat(settings): add API key management UI"
 ```
 
@@ -348,32 +359,56 @@ git commit -m "feat(api): consistent JSON error responses for auth endpoints"
 
 ---
 
-### Task 5: Enhance the CLI with update, get, tags, and output format support
+### Task 5: Enhance the CLI with update, get, tags, global output format, and improved error handling
 
-The CLI has basic add/list/search/delete. Add: `get`, `update`, `tags`, JSON output mode, and improve error handling.
+The CLI has basic add/list/search/delete. Add: `get`, `update`, `tags`, a global `--output` flag (json/plain), and improve error handling. This task combines all CLI feature work into a single step to avoid wasteful intermediate states.
 
 **Files:**
 - Modify: `cli/src/main.rs`
 
-**Step 1: Add new commands to the CLI**
-
-Add these subcommands:
+**Step 1: Add global output format and new commands**
 
 ```rust
+#[derive(Parser)]
+#[command(name = "boop", about = "Boopmark CLI — manage your bookmarks")]
+struct Cli {
+    /// Output format: json or plain (default: plain)
+    #[arg(long, short, global = true, default_value = "plain")]
+    output: OutputFormat,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum OutputFormat {
+    Json,
+    Plain,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Add a bookmark
-    Add { ... }, // existing
-    /// List bookmarks
-    List { ... }, // existing, add --json flag
-    /// Search bookmarks
-    Search { ... }, // existing, add --json flag
-    /// Get a bookmark by ID
-    Get {
-        id: String,
+    Add {
+        url: String,
         #[arg(long)]
-        json: bool,
+        title: Option<String>,
+        #[arg(long)]
+        tags: Option<String>,
     },
+    /// List bookmarks
+    List {
+        #[arg(long)]
+        search: Option<String>,
+        #[arg(long)]
+        tags: Option<String>,
+        #[arg(long, default_value = "newest")]
+        sort: String,
+    },
+    /// Search bookmarks
+    Search { query: String },
+    /// Get a bookmark by ID
+    Get { id: String },
     /// Update a bookmark
     Update {
         id: String,
@@ -387,16 +422,16 @@ enum Commands {
     /// Delete a bookmark
     Delete { id: String },
     /// List all tags
-    Tags {
-        #[arg(long)]
-        json: bool,
-    },
+    Tags,
     /// Configure CLI
-    Config { ... }, // existing
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
 }
 ```
 
-**Step 2: Implement the new handlers**
+**Step 2: Implement new commands and output formatting**
 
 Add the `put` method to `ApiClient`:
 
@@ -416,7 +451,7 @@ async fn put_json(
 }
 ```
 
-Add `UpdateBookmarkRequest`:
+Add request/response types:
 
 ```rust
 #[derive(Serialize)]
@@ -425,11 +460,7 @@ struct UpdateBookmarkRequest {
     description: Option<String>,
     tags: Option<Vec<String>>,
 }
-```
 
-Add `Tag` response type:
-
-```rust
 #[derive(Deserialize, Serialize)]
 struct Tag {
     name: String,
@@ -437,13 +468,9 @@ struct Tag {
 }
 ```
 
-Implement handlers for `Get`, `Update`, `Tags` in the `run` function.
-
-Add `--json` flag to `List` and `Search` commands.
-
 **Step 3: Improve error messages**
 
-Make error handling return the HTTP response body when the status is not success:
+Add a response checker that extracts error bodies:
 
 ```rust
 async fn check_response(resp: reqwest::Response) -> Result<reqwest::Response, String> {
@@ -457,71 +484,29 @@ async fn check_response(resp: reqwest::Response) -> Result<reqwest::Response, St
 }
 ```
 
-**Step 4: Verify it compiles**
+**Step 4: Implement format-aware output**
+
+For JSON format, serialize the API response directly with `serde_json::to_string_pretty`. For plain format, use human-readable output. The `output` field from `Cli` is passed into the `run` function.
+
+**Step 5: Verify it compiles**
 
 Run: `cargo check -p boop`
 Expected: compiles without errors
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
 git add cli/src/main.rs
-git commit -m "feat(cli): add get, update, tags commands and --json output"
+git commit -m "feat(cli): add get, update, tags commands and global --output flag"
 ```
 
 ---
 
-### Task 6: Add `--json` output as the default format and improve DX
-
-Agents need structured output. Add `--json` as a global flag that applies to all commands. Add `--output` flag with `table`, `json`, `plain` options for human flexibility.
-
-**Files:**
-- Modify: `cli/src/main.rs`
-
-**Step 1: Add global output format option**
-
-```rust
-#[derive(Parser)]
-#[command(name = "boop", about = "Boopmark CLI — manage your bookmarks")]
-struct Cli {
-    /// Output format: json, table, or plain (default: plain)
-    #[arg(long, short, global = true, default_value = "plain")]
-    output: OutputFormat,
-
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Clone, clap::ValueEnum)]
-enum OutputFormat {
-    Json,
-    Plain,
-}
-```
-
-Remove per-command `--json` flags added in Task 5 and use the global flag.
-
-**Step 2: Implement format-aware output**
-
-For JSON format, serialize the API response directly. For plain format, use the current human-readable output.
-
-**Step 3: Verify it compiles**
-
-Run: `cargo check -p boop`
-Expected: compiles without errors
-
-**Step 4: Commit**
-
-```bash
-git add cli/src/main.rs
-git commit -m "feat(cli): add global --output flag for json/plain format"
-```
-
----
-
-### Task 7: Write API E2E tests with Playwright
+### Task 6: Write API E2E tests with Playwright
 
 Test the full API lifecycle: create a key, use it to CRUD bookmarks, manage tags, delete the key.
+
+**Important:** The E2E auth endpoint is `POST /auth/test-login` (NOT `/auth/e2e-login`). This endpoint returns a 302 redirect with a `Set-Cookie` header. Playwright's `request.post()` follows redirects by default, which means the `set-cookie` from the 302 is consumed by the redirect and may not be accessible on the final 200 response headers. Use `maxRedirects: 0` to stop at the 302 and extract the cookie directly.
 
 **Files:**
 - Create: `tests/e2e/api.spec.js`
@@ -534,14 +519,25 @@ const { test, expect } = require("@playwright/test");
 const BASE = "http://127.0.0.1:4010";
 const API = `${BASE}/api/v1`;
 
-// Helper: sign in via E2E auth and get a session cookie
+// Helper: sign in via E2E test-login and get a session cookie.
+// The /auth/test-login endpoint returns a 302 with Set-Cookie.
+// We use maxRedirects: 0 to capture the cookie from the redirect response.
 async function getSessionCookie(request) {
-  const resp = await request.post(`${BASE}/auth/e2e-login`, {
-    failOnStatusCode: true,
+  const resp = await request.post(`${BASE}/auth/test-login`, {
+    maxRedirects: 0,
   });
+  // The server returns 302; Playwright gives us the redirect response
+  expect([200, 302]).toContain(resp.status());
   const cookies = resp.headers()["set-cookie"];
-  const match = cookies?.match(/session=([^;]+)/);
-  if (!match) throw new Error("No session cookie returned");
+  if (!cookies) {
+    // Fallback: if Playwright followed the redirect and stored the cookie,
+    // try reading it from the storage state
+    throw new Error(
+      "No set-cookie header found. The /auth/test-login endpoint should return a 302 with Set-Cookie."
+    );
+  }
+  const match = cookies.match(/session=([^;]+)/);
+  if (!match) throw new Error("No session cookie in set-cookie header");
   return match[1];
 }
 
@@ -714,7 +710,7 @@ git commit -m "test(e2e): add API endpoint E2E tests"
 
 ---
 
-### Task 8: Write API key management E2E tests in settings
+### Task 7: Write API key management E2E tests in settings
 
 Test the settings UI flow: create a key, see it listed, copy the value, delete it.
 
@@ -765,9 +761,11 @@ git commit -m "test(e2e): add API key management settings UI tests"
 
 ---
 
-### Task 9: Build the CLI E2E test harness
+### Task 8: Build the CLI E2E test harness
 
-Create a shell-based E2E test harness that tests the CLI against a real server. The harness starts the E2E server (reuses `scripts/e2e/start-server.sh`), creates an API key, then runs the CLI through all operations.
+Create a shell-based E2E test harness that tests the CLI against a real server. The harness assumes the E2E server is already running (started by Playwright or manually via `scripts/e2e/start-server.sh`), creates an API key, then runs the pre-built CLI binary through all operations.
+
+**Important:** The E2E login endpoint is `POST /auth/test-login`. The script must build the CLI binary once upfront with `cargo build -p boop` and use the resulting `target/debug/boop` binary for all assertions, avoiding the overhead of `cargo run` on each invocation.
 
 **Files:**
 - Create: `scripts/e2e/test-cli.sh`
@@ -832,18 +830,31 @@ assert_json_field() {
 }
 
 SERVER_URL="http://127.0.0.1:4010"
-BOOP="cargo run -p boop --"
+
+# Build the CLI binary once upfront
+echo "Building CLI binary..."
+cargo build -p boop
+BOOP="./target/debug/boop"
+
+# Use an isolated config directory so we don't clobber the user's real config
 CONFIG_DIR=$(mktemp -d)
 export XDG_CONFIG_HOME="$CONFIG_DIR"
 
 echo "=== Boopmark CLI E2E Tests ==="
 echo ""
 
-# Step 1: Get an API key
-# Use the E2E server's session auth to create an API key
+# Step 1: Get an API key via the E2E test-login endpoint
+# /auth/test-login returns a 302 with Set-Cookie; curl -c captures cookies from redirects
 echo "Setting up: creating API key via E2E auth..."
-SESSION_COOKIE=$(curl -s -c - "${SERVER_URL}/auth/e2e-login" -X POST | grep session | awk '{print $NF}')
+COOKIE_JAR=$(mktemp)
+curl -s -L -c "$COOKIE_JAR" "${SERVER_URL}/auth/test-login" -X POST > /dev/null
+SESSION_COOKIE=$(grep session "$COOKIE_JAR" | awk '{print $NF}')
+if [ -z "$SESSION_COOKIE" ]; then
+  echo "ERROR: Failed to get session cookie from /auth/test-login"
+  exit 1
+fi
 API_KEY=$(curl -s -b "session=${SESSION_COOKIE}" "${SERVER_URL}/api/v1/auth/keys" -X POST -H "Content-Type: application/json" -d '{"name":"cli-e2e"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
+rm -f "$COOKIE_JAR"
 echo "Got API key: ${API_KEY:0:12}..."
 
 # Step 2: Configure the CLI
@@ -866,7 +877,7 @@ assert_exit_code 0 $BOOP add "https://example.com/cli-test" --title "CLI Test" -
 assert_output_contains "Added:"
 
 # Get the bookmark ID from JSON output
-$BOOP list --output json > /tmp/boop-test-stdout 2>/tmp/boop-test-stderr || true
+$BOOP --output json list > /tmp/boop-test-stdout 2>/tmp/boop-test-stderr || true
 BOOKMARK_ID=$(cat /tmp/boop-test-stdout | python3 -c "import sys,json; bms=json.load(sys.stdin); print([b['id'] for b in bms if b.get('title')=='CLI Test'][0])")
 
 # Step 4: Get a bookmark
@@ -875,7 +886,7 @@ echo "--- Get command ---"
 assert_exit_code 0 $BOOP get "$BOOKMARK_ID"
 assert_output_contains "CLI Test"
 
-assert_exit_code 0 $BOOP get "$BOOKMARK_ID" --output json
+assert_exit_code 0 $BOOP --output json get "$BOOKMARK_ID"
 assert_json_field "['title']" "CLI Test"
 
 # Step 5: Update a bookmark
@@ -885,7 +896,7 @@ assert_exit_code 0 $BOOP update "$BOOKMARK_ID" --title "Updated CLI Test" --tags
 assert_output_contains "Updated"
 
 # Verify update
-assert_exit_code 0 $BOOP get "$BOOKMARK_ID" --output json
+assert_exit_code 0 $BOOP --output json get "$BOOKMARK_ID"
 assert_json_field "['title']" "Updated CLI Test"
 
 # Step 6: List bookmarks
@@ -894,7 +905,7 @@ echo "--- List command ---"
 assert_exit_code 0 $BOOP list
 assert_output_contains "Updated CLI Test"
 
-assert_exit_code 0 $BOOP list --output json
+assert_exit_code 0 $BOOP --output json list
 
 # Step 7: Search
 echo ""
@@ -908,7 +919,7 @@ echo "--- Tags command ---"
 assert_exit_code 0 $BOOP tags
 assert_output_contains "cli"
 
-assert_exit_code 0 $BOOP tags --output json
+assert_exit_code 0 $BOOP --output json tags
 
 # Step 9: Delete
 echo ""
@@ -954,32 +965,7 @@ git commit -m "test(e2e): add CLI E2E test harness"
 
 ---
 
-### Task 10: Fix E2E auth login for API key creation
-
-The E2E test harness needs to log in via the E2E auth endpoint and get a session cookie. Verify the existing E2E auth flow (`/auth/e2e-login`) works for programmatic use (returns a `session` cookie on POST). If it doesn't exist as a POST endpoint (it may only be a form button), add a simple POST handler.
-
-**Files:**
-- Modify: `server/src/web/pages/auth.rs` (if needed)
-
-**Step 1: Check the existing E2E auth flow**
-
-Read `server/src/web/pages/auth.rs` to see how E2E login works.
-
-**Step 2: Ensure POST /auth/e2e-login returns a session cookie**
-
-If it already does, no changes needed. If it only works as a form submission with redirect, it should still set the cookie — `curl -c -` should capture it.
-
-**Step 3: Verify and commit if changes needed**
-
-```bash
-cargo check -p boopmark-server
-git add server/src/web/pages/auth.rs
-git commit -m "fix(auth): ensure E2E login endpoint works for programmatic access"
-```
-
----
-
-### Task 11: Integration testing — run all E2E tests and fix issues
+### Task 9: Integration testing — run all E2E tests and fix issues
 
 This is the integration task. Run all tests and fix any issues found.
 
@@ -1024,7 +1010,7 @@ git commit -m "fix: resolve E2E test failures for API and CLI"
 
 ---
 
-### Task 12: Clean up and final review
+### Task 10: Clean up and final review
 
 Review all changes for code quality, consistency, and completeness.
 
@@ -1057,12 +1043,13 @@ Checklist:
 - `boop config set-key <key>`
 - `boop config show`
 - `boop add <url> [--title] [--tags]`
-- `boop list [--search] [--tags] [--sort] [--output json|plain]`
+- `boop list [--search] [--tags] [--sort]`
 - `boop search <query>`
 - `boop get <id>`
 - `boop update <id> [--title] [--description] [--tags]`
 - `boop delete <id>`
 - `boop tags`
+- All commands support `--output json|plain` (global flag)
 
 **Step 4: Commit any final fixes**
 
