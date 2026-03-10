@@ -96,7 +96,7 @@ async fn google_callback(
 
     // Download and cache avatar image
     let stored_image = if let Some(ref picture_url) = userinfo.picture {
-        download_and_store_avatar(picture_url, &client, &state).await
+        download_and_store_avatar(picture_url, &state).await
     } else {
         None
     };
@@ -144,12 +144,16 @@ async fn google_callback(
         }
     };
 
-    // Clean up old avatar from storage if it was replaced
-    if let Some(ref old_url) = old_avatar_url {
-        if stored_image.as_ref() != Some(old_url) {
-            if let Some(old_key) = state.images_storage.key_from_url(old_url) {
-                if let Err(e) = state.images_storage.delete(&old_key).await {
-                    tracing::warn!("Failed to delete old avatar {old_key}: {e}");
+    // Clean up old avatar from storage only when a new one was successfully stored.
+    // When stored_image is None (download failed), the upsert preserves the old URL
+    // via COALESCE, so we must NOT delete the old file — the DB still references it.
+    if let Some(ref new_url) = stored_image {
+        if let Some(ref old_url) = old_avatar_url {
+            if new_url != old_url {
+                if let Some(old_key) = state.images_storage.key_from_url(old_url) {
+                    if let Err(e) = state.images_storage.delete(&old_key).await {
+                        tracing::warn!("Failed to delete old avatar {old_key}: {e}");
+                    }
                 }
             }
         }
@@ -287,11 +291,7 @@ const MAX_AVATAR_REDIRECTS: usize = 5;
 /// Uses a dedicated `reqwest::Client` with a strict redirect policy (max 5 redirects)
 /// and per-request timeout. Both the initial URL and the final URL after redirects are
 /// validated to be HTTPS on an allowed Google domain.
-async fn download_and_store_avatar(
-    picture_url: &str,
-    _oauth_client: &reqwest::Client,
-    state: &AppState,
-) -> Option<String> {
+async fn download_and_store_avatar(picture_url: &str, state: &AppState) -> Option<String> {
     // Only allow HTTPS URLs from known Google domains to prevent SSRF
     if !picture_url.starts_with("https://") {
         tracing::warn!("Rejecting non-HTTPS avatar URL: {picture_url}");
