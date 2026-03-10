@@ -2,14 +2,14 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Parser)]
-#[command(name = "boop", about = "Boopmark CLI — manage your bookmarks")]
+#[derive(Debug, Parser)]
+#[command(name = "boop", about = "Boopmark CLI — manage your bookmarks", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Add a bookmark
     Add {
@@ -32,6 +32,8 @@ enum Commands {
     Search { query: String },
     /// Delete a bookmark
     Delete { id: String },
+    /// Upgrade boop to the latest version
+    Upgrade,
     /// Configure CLI
     Config {
         #[command(subcommand)]
@@ -39,7 +41,7 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum ConfigAction {
     /// Set server URL
     SetServer { url: String },
@@ -265,5 +267,117 @@ async fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
+
+        Commands::Upgrade => upgrade().await,
+    }
+}
+
+fn detect_target() -> Result<String, String> {
+    let target = match (std::env::consts::ARCH, std::env::consts::OS) {
+        ("x86_64", "macos") => "x86_64-apple-darwin",
+        ("aarch64", "macos") => "aarch64-apple-darwin",
+        ("x86_64", "linux") => "x86_64-unknown-linux-gnu",
+        ("aarch64", "linux") => "aarch64-unknown-linux-gnu",
+        (arch, os) => return Err(format!("Unsupported platform: {arch}-{os}")),
+    };
+    Ok(target.to_string())
+}
+
+async fn upgrade() -> Result<(), String> {
+    let target = detect_target()?;
+    let url = format!(
+        "https://github.com/foundra-build/boopmark/releases/latest/download/boop-{target}"
+    );
+
+    println!("Downloading latest boop for {target}...");
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Download failed: HTTP {}", resp.status()));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read response: {e}"))?;
+
+    let exe_path = std::env::current_exe().map_err(|e| format!("Cannot find current exe: {e}"))?;
+    let staging_path = exe_path.with_extension(format!("tmp.{}", std::process::id()));
+
+    std::fs::write(&staging_path, &bytes)
+        .map_err(|e| format!("Failed to write staging file: {e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("Failed to set permissions: {e}"))?;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Command;
+            let _ = Command::new("xattr")
+                .args(["-cr", staging_path.to_str().unwrap_or("")])
+                .output();
+            let _ = Command::new("codesign")
+                .args(["--force", "--sign", "-", staging_path.to_str().unwrap_or("")])
+                .output();
+        }
+
+        std::fs::rename(&staging_path, &exe_path)
+            .map_err(|e| format!("Failed to replace binary: {e}"))?;
+
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&staging_path);
+        return Err(e);
+    }
+
+    println!("Successfully upgraded boop! Run `boop --version` to verify.");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn test_cli_version_flag() {
+        let result = Cli::try_parse_from(["boop", "--version"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn test_cli_short_version_flag() {
+        let result = Cli::try_parse_from(["boop", "-V"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn test_cli_upgrade_recognized() {
+        let cli = Cli::try_parse_from(["boop", "upgrade"]).unwrap();
+        assert!(matches!(cli.command, Commands::Upgrade));
+    }
+
+    #[test]
+    fn test_detect_target() {
+        let result = detect_target();
+        assert!(result.is_ok());
+        let target = result.unwrap();
+        assert!(target.contains(std::env::consts::ARCH));
     }
 }
