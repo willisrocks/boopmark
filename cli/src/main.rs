@@ -312,28 +312,37 @@ async fn upgrade() -> Result<(), String> {
     std::fs::write(&staging_path, &bytes)
         .map_err(|e| format!("Failed to write staging file: {e}"))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("Failed to set permissions: {e}"))?;
+    let result = (|| -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("Failed to set permissions: {e}"))?;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Command;
+            let _ = Command::new("xattr")
+                .args(["-cr", staging_path.to_str().unwrap_or("")])
+                .output();
+            let _ = Command::new("codesign")
+                .args(["--force", "--sign", "-", staging_path.to_str().unwrap_or("")])
+                .output();
+        }
+
+        std::fs::rename(&staging_path, &exe_path)
+            .map_err(|e| format!("Failed to replace binary: {e}"))?;
+
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&staging_path);
+        return Err(e);
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        let _ = Command::new("xattr")
-            .args(["-cr", staging_path.to_str().unwrap_or("")])
-            .output();
-        let _ = Command::new("codesign")
-            .args(["--force", "--sign", "-", staging_path.to_str().unwrap_or("")])
-            .output();
-    }
-
-    std::fs::rename(&staging_path, &exe_path)
-        .map_err(|e| format!("Failed to replace binary: {e}"))?;
-
-    println!("Successfully upgraded boop!");
+    println!("Successfully upgraded boop! Run `boop --version` to verify.");
     Ok(())
 }
 
