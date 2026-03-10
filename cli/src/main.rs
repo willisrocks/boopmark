@@ -6,6 +6,11 @@ fn url_encode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
+fn parse_uuid(s: &str) -> Result<uuid::Uuid, String> {
+    s.parse::<uuid::Uuid>()
+        .map_err(|_| format!("invalid bookmark ID: {s:?} (expected a UUID)"))
+}
+
 #[derive(Parser)]
 #[command(name = "boop", about = "Boopmark CLI — manage your bookmarks")]
 struct Cli {
@@ -17,7 +22,7 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(Clone, clap::ValueEnum)]
+#[derive(Clone, Copy, clap::ValueEnum)]
 enum OutputFormat {
     Json,
     Plain,
@@ -223,12 +228,15 @@ struct UpdateBookmarkRequest {
 #[derive(Deserialize, Serialize)]
 struct Bookmark {
     id: uuid::Uuid,
+    user_id: Option<uuid::Uuid>,
     url: String,
     title: Option<String>,
     description: Option<String>,
     domain: Option<String>,
+    image_url: Option<String>,
     tags: Vec<String>,
     created_at: String,
+    updated_at: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -256,7 +264,7 @@ fn print_bookmark_plain(bm: &Bookmark) {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
-    let output = cli.output.clone();
+    let output = cli.output;
 
     match cli.command {
         Commands::Config { action } => {
@@ -360,6 +368,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
 
         Commands::Get { id } => {
+            let id = parse_uuid(&id)?;
             let client = AppConfig::load().client()?;
             let resp = check_response(client.get(&format!("/bookmarks/{id}")).await?).await?;
             let bm: Bookmark = resp.json().await.map_err(|e| e.to_string())?;
@@ -380,6 +389,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             description,
             tags,
         } => {
+            let id = parse_uuid(&id)?;
             let client = AppConfig::load().client()?;
             let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
             let body = UpdateBookmarkRequest {
@@ -406,6 +416,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
 
         Commands::Delete { id } => {
+            let id = parse_uuid(&id)?;
             let client = AppConfig::load().client()?;
             check_response(client.delete(&format!("/bookmarks/{id}")).await?).await?;
             match output {

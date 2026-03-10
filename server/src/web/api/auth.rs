@@ -6,7 +6,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::error::DomainError;
+use super::error_response;
 use crate::web::extractors::AuthUser;
 use crate::web::state::AppState;
 
@@ -27,27 +27,6 @@ struct ApiKeyView {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Serialize)]
-struct ErrorBody {
-    error: String,
-}
-
-/// Map a DomainError to an appropriate HTTP status + JSON body for the auth API.
-fn auth_error_response(err: DomainError) -> (StatusCode, Json<ErrorBody>) {
-    let (status, message) = match &err {
-        DomainError::InvalidInput(detail) => {
-            (StatusCode::BAD_REQUEST, format!("invalid input: {detail}"))
-        }
-        DomainError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-        DomainError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal error".to_string(),
-        ),
-    };
-    (status, Json(ErrorBody { error: message }))
-}
-
 async fn create_api_key(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -55,7 +34,7 @@ async fn create_api_key(
 ) -> impl IntoResponse {
     match state.auth.create_api_key(user.id, &input.name).await {
         Ok(key) => Ok((StatusCode::CREATED, Json(CreateApiKeyResponse { key }))),
-        Err(e) => Err(auth_error_response(e)),
+        Err(e) => Err(error_response(e)),
     }
 }
 
@@ -73,7 +52,7 @@ async fn list_api_keys(
                 })
                 .collect::<Vec<_>>(),
         )),
-        Err(e) => Err(auth_error_response(e)),
+        Err(e) => Err(error_response(e)),
     }
 }
 
@@ -84,7 +63,7 @@ async fn delete_api_key(
 ) -> impl IntoResponse {
     match state.auth.delete_api_key(id, user.id).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => Err(auth_error_response(e)),
+        Err(e) => Err(error_response(e)),
     }
 }
 
