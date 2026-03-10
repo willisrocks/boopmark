@@ -40,24 +40,4 @@ impl UserRepository for PostgresPool {
         .map_err(|e| DomainError::Internal(e.to_string()))
     }
 
-    async fn upsert_with_password(
-        &self,
-        email: &str,
-        name: Option<&str>,
-        password_hash: &str,
-    ) -> Result<User, DomainError> {
-        sqlx::query_as::<_, User>(
-            "INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3)
-             ON CONFLICT (email) DO UPDATE SET
-               name = COALESCE($2, users.name),
-               password_hash = $3
-             RETURNING id, email, name, image, password_hash, created_at",
-        )
-        .bind(email)
-        .bind(name)
-        .bind(password_hash)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| DomainError::Internal(e.to_string()))
-    }
 }
