@@ -101,9 +101,20 @@ where
     }
 
     pub async fn create_api_key(&self, user_id: Uuid, name: &str) -> Result<String, DomainError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(DomainError::InvalidInput(
+                "API key name must not be empty".into(),
+            ));
+        }
+        if trimmed.len() > 128 {
+            return Err(DomainError::InvalidInput(
+                "API key name must be 128 characters or fewer".into(),
+            ));
+        }
         let raw_key = format!("boop_{}", generate_token());
         let hash = hash_api_key(&raw_key);
-        self.api_keys.create(user_id, &hash, name).await?;
+        self.api_keys.create(user_id, &hash, trimmed).await?;
         Ok(raw_key)
     }
 

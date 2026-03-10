@@ -14,3 +14,4 @@ toml.workspace = true
 dirs.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
+url.workspace = true

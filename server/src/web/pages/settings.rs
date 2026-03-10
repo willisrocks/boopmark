@@ -193,10 +193,14 @@ async fn delete_settings_api_key(
     AuthUser(user): AuthUser,
     Form(form): Form<DeleteApiKeyForm>,
 ) -> axum::response::Response {
-    if let Ok(id) = form.key_id.parse::<uuid::Uuid>() {
-        let _ = state.auth.delete_api_key(id, user.id).await;
+    let id = match form.key_id.parse::<uuid::Uuid>() {
+        Ok(id) => id,
+        Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+    };
+    match state.auth.delete_api_key(id, user.id).await {
+        Ok(()) => Redirect::to("/settings?saved=1").into_response(),
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-    Redirect::to("/settings?saved=1").into_response()
 }
 
 async fn legacy_api_keys_redirect(AuthUser(_user): AuthUser) -> Redirect {

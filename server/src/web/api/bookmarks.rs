@@ -14,18 +14,17 @@ use crate::web::state::{AppState, Bookmarks};
 /// Map DomainError to HTTP status + JSON body.
 fn error_response(err: DomainError) -> impl IntoResponse {
     let (status, message) = match &err {
-        DomainError::NotFound => (StatusCode::NOT_FOUND, "not found"),
-        DomainError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-        DomainError::AlreadyExists => (StatusCode::CONFLICT, "already exists"),
-        DomainError::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid input"),
-        DomainError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        DomainError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+        DomainError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+        DomainError::AlreadyExists => (StatusCode::CONFLICT, "already exists".to_string()),
+        DomainError::InvalidInput(detail) => {
+            (StatusCode::BAD_REQUEST, format!("invalid input: {detail}"))
+        }
+        DomainError::Internal(_) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+        }
     };
-    (
-        status,
-        Json(ErrorBody {
-            error: message.to_string(),
-        }),
-    )
+    (status, Json(ErrorBody { error: message }))
 }
 
 #[derive(Serialize)]

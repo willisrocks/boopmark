@@ -2,6 +2,10 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn url_encode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
 #[derive(Parser)]
 #[command(name = "boop", about = "Boopmark CLI — manage your bookmarks")]
 struct Cli {
@@ -99,9 +103,11 @@ impl AppConfig {
             .unwrap_or_default()
     }
 
-    fn save(&self) {
-        let content = toml::to_string_pretty(self).unwrap();
-        std::fs::write(Self::path(), content).ok();
+    fn save(&self) -> Result<(), String> {
+        let content =
+            toml::to_string_pretty(self).map_err(|e| format!("Failed to serialize config: {e}"))?;
+        std::fs::write(Self::path(), content)
+            .map_err(|e| format!("Failed to write config to {}: {e}", Self::path().display()))
     }
 
     fn client(&self) -> Result<ApiClient, String> {
@@ -248,12 +254,12 @@ async fn run(cli: Cli) -> Result<(), String> {
             match action {
                 ConfigAction::SetServer { url } => {
                     config.server_url = Some(url);
-                    config.save();
+                    config.save()?;
                     println!("Server URL saved.");
                 }
                 ConfigAction::SetKey { key } => {
                     config.api_key = Some(key);
-                    config.save();
+                    config.save()?;
                     println!("API key saved.");
                 }
                 ConfigAction::Show => {
@@ -293,12 +299,12 @@ async fn run(cli: Cli) -> Result<(), String> {
 
         Commands::List { search, tags, sort } => {
             let client = AppConfig::load().client()?;
-            let mut query = format!("?sort={sort}");
+            let mut query = format!("?sort={}", url_encode(&sort));
             if let Some(s) = &search {
-                query.push_str(&format!("&search={s}"));
+                query.push_str(&format!("&search={}", url_encode(s)));
             }
             if let Some(t) = &tags {
-                query.push_str(&format!("&tags={t}"));
+                query.push_str(&format!("&tags={}", url_encode(t)));
             }
             let resp = check_response(client.get(&format!("/bookmarks{query}")).await?).await?;
             let bookmarks: Vec<Bookmark> = resp.json().await.map_err(|e| e.to_string())?;
@@ -320,8 +326,12 @@ async fn run(cli: Cli) -> Result<(), String> {
 
         Commands::Search { query } => {
             let client = AppConfig::load().client()?;
-            let resp =
-                check_response(client.get(&format!("/bookmarks?search={query}")).await?).await?;
+            let resp = check_response(
+                client
+                    .get(&format!("/bookmarks?search={}", url_encode(&query)))
+                    .await?,
+            )
+            .await?;
             let bookmarks: Vec<Bookmark> = resp.json().await.map_err(|e| e.to_string())?;
             match output {
                 OutputFormat::Json => {
@@ -390,7 +400,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             check_response(client.delete(&format!("/bookmarks/{id}")).await?).await?;
             match output {
                 OutputFormat::Json => {
-                    println!(r#"{{"deleted": "{}"}}"#, id);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({"deleted": id})).unwrap()
+                    );
                 }
                 OutputFormat::Plain => {
                     println!("Deleted.");
