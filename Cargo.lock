@@ -823,6 +823,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "url",
  "uuid",
 ]
 
