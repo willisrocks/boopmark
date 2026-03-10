@@ -17,7 +17,7 @@ use config::{Config, StorageBackend};
 use domain::ports::llm_enricher::LlmEnricher;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
-use web::state::{AppState, Bookmarks};
+use web::state::{AppState, Bookmarks, ImageStorage};
 
 #[tokio::main]
 async fn main() {
@@ -42,17 +42,24 @@ async fn main() {
 
     let metadata = Arc::new(HtmlMetadataExtractor::new());
 
-    let bookmarks = match config.storage_backend {
+    let (bookmarks, images_storage) = match config.storage_backend {
         StorageBackend::Local => {
             let storage = Arc::new(LocalStorage::new(
                 "./uploads".into(),
                 format!("{}/uploads", config.app_url),
             ));
-            Bookmarks::Local(Arc::new(BookmarkService::new(
-                db.clone(),
-                metadata,
-                storage,
-            )))
+            let images = ImageStorage::Local(LocalStorage::new(
+                "./uploads/images".into(),
+                format!("{}/uploads/images", config.app_url),
+            ));
+            (
+                Bookmarks::Local(Arc::new(BookmarkService::new(
+                    db.clone(),
+                    metadata,
+                    storage,
+                ))),
+                images,
+            )
         }
         StorageBackend::S3 => {
             let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -60,18 +67,31 @@ async fn main() {
                 .await;
             let s3_client = aws_sdk_s3::Client::new(&s3_config);
             let storage = Arc::new(S3Storage::new(
-                s3_client,
+                s3_client.clone(),
                 config.s3_bucket.clone(),
                 config
                     .s3_public_url
                     .clone()
                     .unwrap_or_else(|| format!("https://{}.s3.amazonaws.com", config.s3_bucket)),
             ));
-            Bookmarks::S3(Arc::new(BookmarkService::new(
-                db.clone(),
-                metadata,
-                storage,
-            )))
+            let images = ImageStorage::S3(S3Storage::new(
+                s3_client,
+                config.s3_images_bucket.clone(),
+                config
+                    .s3_images_public_url
+                    .clone()
+                    .unwrap_or_else(|| {
+                        format!("https://{}.s3.amazonaws.com", config.s3_images_bucket)
+                    }),
+            ));
+            (
+                Bookmarks::S3(Arc::new(BookmarkService::new(
+                    db.clone(),
+                    metadata,
+                    storage,
+                ))),
+                images,
+            )
         }
     };
 
@@ -86,6 +106,7 @@ async fn main() {
         settings: settings_service,
         config: Arc::new(config.clone()),
         enricher,
+        images_storage,
     };
 
     let app = web::router::create_router(state);
