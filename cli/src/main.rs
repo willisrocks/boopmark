@@ -256,7 +256,8 @@ async fn main() {
 
 fn print_bookmark_plain(bm: &Bookmark) {
     println!(
-        "{} | {} | [{}]",
+        "{} | {} | {} | [{}]",
+        bm.id,
         bm.title.as_deref().unwrap_or("(no title)"),
         bm.url,
         bm.tags.join(", ")
@@ -389,6 +390,12 @@ async fn run(cli: Cli) -> Result<(), String> {
             description,
             tags,
         } => {
+            if title.is_none() && description.is_none() && tags.is_none() {
+                return Err(
+                    "at least one field must be specified (--title, --description, or --tags)"
+                        .to_string(),
+                );
+            }
             let id = parse_uuid(&id)?;
             let client = AppConfig::load().client()?;
             let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());

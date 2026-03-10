@@ -121,7 +121,9 @@ async fn settings_page(
                     .filter(|value| value == "1")
                     .map(|_| "Settings saved".to_string()),
                 api_keys,
-                created_key: query.created_key,
+                created_key: query
+                    .created_key
+                    .filter(|k| k.starts_with("boop_") && k.len() > 5),
             })
         }
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
