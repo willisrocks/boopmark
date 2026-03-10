@@ -9,7 +9,7 @@
 **Tech Stack:** Rust, Axum 0.8, SQLx 0.8, Askama 0.12, HTMX 2, Tailwind CSS 4, clap 4, reqwest, Playwright (API E2E), shell-based CLI E2E harness.
 
 **Key design decisions:**
-- The E2E auth endpoint is `POST /auth/test-login` (not `/auth/e2e-login`). It returns a 302 redirect with a `Set-Cookie: session=...` header. Playwright's `request.post()` follows redirects and loses the `set-cookie` from the 302, so API E2E tests must use `maxRedirects: 0` to capture the cookie from the redirect response itself.
+- The existing E2E auth endpoint `POST /auth/test-login` returns a 302 redirect with a `Set-Cookie` header. Playwright's `APIRequestContext` follows redirects and does NOT support `maxRedirects` as a per-request option, so the `set-cookie` header is not accessible on the final response. To support programmatic E2E auth (API and CLI tests), we add a new `POST /api/v1/auth/test-token` endpoint that returns a JSON body `{"session_token": "..."}` instead of a redirect. This endpoint is only available when `ENABLE_E2E_AUTH=1`.
 - The `key_hash` stored in the DB is a SHA-256 hex digest, not the original key. The raw key (`boop_*`) is only returned once at creation time. The settings UI will show just the key name and creation date — no prefix — since we have no way to recover the original key prefix.
 - No new crate dependencies are needed for URL encoding. The codebase already has a `urlencoding()` helper in `server/src/web/pages/auth.rs` (line 298) that uses `url::form_urlencoded::byte_serialize`, which is already in `Cargo.toml` via the `url` workspace dependency.
 
@@ -584,11 +584,77 @@ git commit -m "feat(cli): add get, update, tags commands and global --output fla
 
 ---
 
-### Task 6: Write API E2E tests with Playwright
+### Task 6: Add JSON E2E auth endpoint for programmatic test access
+
+The existing `POST /auth/test-login` returns a 302 redirect with `Set-Cookie`. Playwright's `APIRequestContext` follows redirects automatically and does NOT support `maxRedirects` as a per-request option, so the `set-cookie` header from the 302 is not accessible on the final response. This blocks all programmatic E2E auth.
+
+Add a new `POST /api/v1/auth/test-token` endpoint that returns the session token as a JSON body. This is only available when `ENABLE_E2E_AUTH=1`. The API E2E and CLI E2E tests will use this endpoint to get a session token, then pass it as a `Cookie` header.
+
+**Files:**
+- Modify: `server/src/web/api/auth.rs`
+
+**Step 1: Add the test-token endpoint**
+
+```rust
+use crate::web::state::AppState;
+
+async fn test_token(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if !state.config.enable_e2e_auth {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let user = state
+        .auth
+        .upsert_user(
+            "e2e@boopmark.local".to_string(),
+            Some("Boopmark E2E".to_string()),
+            None,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let token = state
+        .auth
+        .create_session(user.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({"session_token": token})))
+}
+```
+
+Add the route in the `routes()` function:
+
+```rust
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/keys", get(list_api_keys).post(create_api_key))
+        .route("/keys/{id}", delete(delete_api_key))
+        .route("/test-token", post(test_token))
+}
+```
+
+**Step 2: Verify it compiles**
+
+Run: `cargo check -p boopmark-server`
+Expected: compiles without errors
+
+**Step 3: Commit**
+
+```bash
+git add server/src/web/api/auth.rs
+git commit -m "feat(api): add /api/v1/auth/test-token for programmatic E2E auth"
+```
+
+---
+
+### Task 7: Write API E2E tests with Playwright
 
 Test the full API lifecycle: create a key, use it to CRUD bookmarks, manage tags, delete the key.
 
-**Important:** The E2E auth endpoint is `POST /auth/test-login` (NOT `/auth/e2e-login`). This endpoint returns a 302 redirect with a `Set-Cookie` header. Playwright's `request.post()` follows redirects by default, which means the `set-cookie` from the 302 is consumed by the redirect and may not be accessible on the final 200 response headers. Use `maxRedirects: 0` to stop at the 302 and extract the cookie directly.
+**Important:** Use the new `POST /api/v1/auth/test-token` endpoint to get a session token as JSON. Then pass it as a `Cookie: session=<token>` header to create API keys. This avoids the redirect/cookie issue with the old `/auth/test-login` endpoint.
 
 **Files:**
 - Create: `tests/e2e/api.spec.js`
@@ -601,32 +667,20 @@ const { test, expect } = require("@playwright/test");
 const BASE = "http://127.0.0.1:4010";
 const API = `${BASE}/api/v1`;
 
-// Helper: sign in via E2E test-login and get a session cookie.
-// The /auth/test-login endpoint returns a 302 with Set-Cookie.
-// We use maxRedirects: 0 to capture the cookie from the redirect response.
-async function getSessionCookie(request) {
-  const resp = await request.post(`${BASE}/auth/test-login`, {
-    maxRedirects: 0,
-  });
-  // The server returns 302; Playwright gives us the redirect response
-  expect([200, 302]).toContain(resp.status());
-  const cookies = resp.headers()["set-cookie"];
-  if (!cookies) {
-    // Fallback: if Playwright followed the redirect and stored the cookie,
-    // try reading it from the storage state
-    throw new Error(
-      "No set-cookie header found. The /auth/test-login endpoint should return a 302 with Set-Cookie."
-    );
-  }
-  const match = cookies.match(/session=([^;]+)/);
-  if (!match) throw new Error("No session cookie in set-cookie header");
-  return match[1];
+// Helper: get a session token via the JSON test-token endpoint.
+// This avoids the redirect/cookie issue with /auth/test-login.
+async function getSessionToken(request) {
+  const resp = await request.post(`${API}/auth/test-token`);
+  expect(resp.status()).toBe(200);
+  const body = await resp.json();
+  expect(body.session_token).toBeTruthy();
+  return body.session_token;
 }
 
 // Helper: create an API key using session auth
-async function createApiKey(request, sessionCookie, name) {
+async function createApiKey(request, sessionToken, name) {
   const resp = await request.post(`${API}/auth/keys`, {
-    headers: { Cookie: `session=${sessionCookie}` },
+    headers: { Cookie: `session=${sessionToken}` },
     data: { name },
   });
   expect(resp.status()).toBe(201);
@@ -638,11 +692,11 @@ async function createApiKey(request, sessionCookie, name) {
 
 test.describe("Public API", () => {
   let apiKey;
-  let sessionCookie;
+  let sessionToken;
 
   test.beforeAll(async ({ request }) => {
-    sessionCookie = await getSessionCookie(request);
-    apiKey = await createApiKey(request, sessionCookie, "e2e-test-key");
+    sessionToken = await getSessionToken(request);
+    apiKey = await createApiKey(request, sessionToken, "e2e-test-key");
   });
 
   function authHeaders() {
@@ -753,7 +807,7 @@ test.describe("Public API", () => {
 
   test("delete API key", async ({ request }) => {
     // Create a temporary key
-    const tempKey = await createApiKey(request, sessionCookie, "temp-key");
+    const tempKey = await createApiKey(request, sessionToken, "temp-key");
 
     // List to get ID
     const listResp = await request.get(`${API}/auth/keys`, {
@@ -792,7 +846,7 @@ git commit -m "test(e2e): add API endpoint E2E tests"
 
 ---
 
-### Task 7: Write API key management E2E tests in settings
+### Task 8: Write API key management E2E tests in settings
 
 Test the settings UI flow: create a key, see it listed, copy the value, delete it.
 
@@ -808,6 +862,10 @@ test("can create and delete API keys from settings", async ({ page }) => {
   await signIn(page);
   await page.goto("/settings");
 
+  // Count existing keys before we start (other specs may have created keys
+  // for the shared e2e@boopmark.local user)
+  const initialKeyCount = await page.getByTestId("api-key-row").count();
+
   // Create a key
   await page.getByTestId("api-key-name-input").fill("test-cli-key");
   await page.getByTestId("create-api-key-button").click();
@@ -817,15 +875,18 @@ test("can create and delete API keys from settings", async ({ page }) => {
   const keyValue = await page.getByTestId("new-api-key-value").textContent();
   expect(keyValue).toMatch(/^boop_/);
 
-  // Should see the key in the list
-  await expect(page.getByTestId("api-key-row")).toHaveCount(1);
+  // Should see one more key than before
+  await expect(page.getByTestId("api-key-row")).toHaveCount(initialKeyCount + 1);
   await expect(page.getByText("test-cli-key")).toBeVisible();
 
-  // Delete the key
-  await page.getByTestId("delete-api-key-button").click();
+  // Delete the key we just created (the last delete button corresponds to
+  // our key since it was most recently created, but to be safe find the
+  // row containing our key name and click its delete button)
+  const ourRow = page.getByTestId("api-key-row").filter({ hasText: "test-cli-key" });
+  await ourRow.getByTestId("delete-api-key-button").click();
 
-  // Verify key is gone
-  await expect(page.getByTestId("api-key-row")).toHaveCount(0);
+  // Verify we're back to the initial count
+  await expect(page.getByTestId("api-key-row")).toHaveCount(initialKeyCount);
 });
 ```
 
@@ -843,13 +904,13 @@ git commit -m "test(e2e): add API key management settings UI tests"
 
 ---
 
-### Task 8: Build the CLI E2E test as a Playwright spec
+### Task 9: Build the CLI E2E test as a Playwright spec
 
 Create a Playwright test spec that exercises the CLI binary against the E2E server. This approach reuses Playwright's existing `webServer` config (which starts the server via `scripts/e2e/start-server.sh`) so the CLI E2E tests have automated server lifecycle management and can run alongside the other E2E specs via `npx playwright test`.
 
-The test builds the CLI binary once in `beforeAll`, creates a temporary config directory, obtains an API key via the test-login endpoint, then shells out to the `boop` binary for each operation and asserts on exit codes and stdout. Uses `execFileSync` (not `exec`) with array arguments to avoid shell injection.
+The test builds the CLI binary once in `beforeAll`, creates a temporary config directory, obtains an API key via the `POST /api/v1/auth/test-token` endpoint, then shells out to the `boop` binary for each operation and asserts on exit codes and stdout. Uses `execFileSync` (not `exec`) with array arguments to avoid shell injection.
 
-**Important:** The E2E login endpoint is `POST /auth/test-login`. The CLI binary must be pre-built with `cargo build -p boop` to avoid repeated compilation.
+**Important:** The CLI binary must be pre-built with `cargo build -p boop` to avoid repeated compilation.
 
 **Files:**
 - Create: `tests/e2e/cli.spec.js`
@@ -894,17 +955,13 @@ function boopFails(...args) {
   }
 }
 
-// Helper: get session cookie via test-login
-async function getSessionCookie(request) {
-  const resp = await request.post(`${BASE}/auth/test-login`, {
-    maxRedirects: 0,
-  });
-  expect([200, 302]).toContain(resp.status());
-  const cookies = resp.headers()["set-cookie"];
-  expect(cookies).toBeTruthy();
-  const match = cookies.match(/session=([^;]+)/);
-  expect(match).toBeTruthy();
-  return match[1];
+// Helper: get a session token via the JSON test-token endpoint
+async function getSessionToken(request) {
+  const resp = await request.post(`${API}/auth/test-token`);
+  expect(resp.status()).toBe(200);
+  const body = await resp.json();
+  expect(body.session_token).toBeTruthy();
+  return body.session_token;
 }
 
 test.describe("CLI E2E", () => {
@@ -919,9 +976,9 @@ test.describe("CLI E2E", () => {
     configDir = fs.mkdtempSync(path.join(os.tmpdir(), "boop-e2e-"));
 
     // Get an API key
-    const sessionCookie = await getSessionCookie(request);
+    const sessionToken = await getSessionToken(request);
     const resp = await request.post(`${API}/auth/keys`, {
-      headers: { Cookie: `session=${sessionCookie}` },
+      headers: { Cookie: `session=${sessionToken}` },
       data: { name: "cli-e2e" },
     });
     expect(resp.status()).toBe(201);
@@ -1022,7 +1079,7 @@ git commit -m "test(e2e): add CLI E2E tests as Playwright spec"
 
 ---
 
-### Task 9: Integration testing — run all E2E tests and fix issues
+### Task 10: Integration testing — run all E2E tests and fix issues
 
 This is the integration task. Run all tests and fix any issues found.
 
@@ -1063,7 +1120,7 @@ git commit -m "fix: resolve E2E test failures for API and CLI"
 
 ---
 
-### Task 10: Clean up and final review
+### Task 11: Clean up and final review
 
 Review all changes for code quality, consistency, and completeness.
 
