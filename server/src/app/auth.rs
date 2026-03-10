@@ -100,6 +100,9 @@ where
         self.sessions.delete(token).await
     }
 
+    /// Maximum number of API keys a single user may create.
+    const MAX_API_KEYS_PER_USER: usize = 25;
+
     pub async fn create_api_key(&self, user_id: Uuid, name: &str) -> Result<String, DomainError> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
@@ -111,6 +114,13 @@ where
             return Err(DomainError::InvalidInput(
                 "API key name must be 128 characters or fewer".into(),
             ));
+        }
+        let existing = self.api_keys.list(user_id).await?;
+        if existing.len() >= Self::MAX_API_KEYS_PER_USER {
+            return Err(DomainError::InvalidInput(format!(
+                "maximum of {} API keys per user reached",
+                Self::MAX_API_KEYS_PER_USER
+            )));
         }
         let raw_key = format!("boop_{}", generate_token());
         let hash = hash_api_key(&raw_key);

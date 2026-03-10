@@ -169,6 +169,15 @@ struct CreateApiKeyForm {
     key_name: String,
 }
 
+/// Creates an API key and redirects back to settings with the raw key in the
+/// URL query parameter so the template can display it once.
+///
+/// **Known trade-off:** The raw key appears in the URL, which means it will be
+/// visible in browser history and potentially in server access logs. A flash/
+/// session-based approach would avoid this, but Axum does not have built-in
+/// flash message support and adding a cookie-based flash layer is out of scope
+/// for the initial implementation. The key is only shown once and the user is
+/// instructed to copy it immediately.
 async fn create_settings_api_key(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,

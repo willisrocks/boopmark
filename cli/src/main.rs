@@ -97,10 +97,20 @@ impl AppConfig {
     }
 
     fn load() -> Self {
-        std::fs::read_to_string(Self::path())
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default()
+        let path = Self::path();
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match toml::from_str(&contents) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: config file {} contains invalid TOML, using defaults: {e}",
+                        path.display()
+                    );
+                    Self::default()
+                }
+            },
+            Err(_) => Self::default(),
+        }
     }
 
     fn save(&self) -> Result<(), String> {
