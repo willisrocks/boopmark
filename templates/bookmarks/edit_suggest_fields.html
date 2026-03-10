@@ -1,0 +1,34 @@
+<div id="edit-suggest-target">
+    <div id="edit-suggest-spinner" class="htmx-indicator flex items-center justify-center py-8">
+        <svg class="animate-spin h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <span class="ml-2 text-gray-400 text-sm">Fetching suggestions...</span>
+    </div>
+    <div class="space-y-4">
+        <div>
+            <label class="block text-sm text-gray-400 mb-1">Title</label>
+            <input id="edit-title-input"
+                   type="text"
+                   name="title"
+                   value="{{ suggest_title }}"
+                   placeholder="Title"
+                   class="w-full px-3 py-2 rounded-lg bg-[#0f1117] border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500">
+        </div>
+        <div>
+            <label class="block text-sm text-gray-400 mb-1">Description</label>
+            <input id="edit-description-input"
+                   type="text"
+                   name="description"
+                   value="{{ suggest_description }}"
+                   placeholder="Description"
+                   class="w-full px-3 py-2 rounded-lg bg-[#0f1117] border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500">
+        </div>
+        <div>
+            <label class="block text-sm text-gray-400 mb-1">Tags</label>
+            <input type="text" name="tags_input" value="{{ suggest_tags }}" placeholder="tag1, tag2, tag3 (comma separated)"
+                   class="w-full px-3 py-2 rounded-lg bg-[#0f1117] border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500">
+        </div>
+    </div>
+</div>

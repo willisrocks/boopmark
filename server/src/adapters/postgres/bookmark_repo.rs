@@ -100,8 +100,8 @@ impl BookmarkRepository for PostgresPool {
     ) -> Result<Bookmark, DomainError> {
         sqlx::query_as::<_, Bookmark>(
             "UPDATE bookmarks SET
-                title = COALESCE($3, title),
-                description = COALESCE($4, description),
+                title = CASE WHEN $3 = '' THEN NULL ELSE COALESCE($3, title) END,
+                description = CASE WHEN $4 = '' THEN NULL ELSE COALESCE($4, description) END,
                 tags = COALESCE($5, tags),
                 updated_at = now()
              WHERE id = $1 AND user_id = $2
@@ -142,5 +142,17 @@ impl BookmarkRepository for PostgresPool {
         .map_err(|e| DomainError::Internal(e.to_string()))?;
 
         Ok(rows.into_iter().map(|(t,)| t).collect())
+    }
+
+    async fn tags_with_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT unnest(tags) AS tag, COUNT(*) AS count FROM bookmarks WHERE user_id = $1 GROUP BY tag ORDER BY count DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?;
+
+        Ok(rows)
     }
 }

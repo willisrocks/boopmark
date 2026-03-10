@@ -1,0 +1,37 @@
+<div id="edit-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    <div class="bg-[#1e2235] rounded-xl border border-gray-700 p-6 w-full max-w-md">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-medium">Edit Bookmark</h2>
+            <button onclick="document.getElementById('edit-modal').remove()"
+                    class="text-gray-500 hover:text-gray-300">&times;</button>
+        </div>
+        <form hx-put="/bookmarks/{{ bookmark_id }}"
+              hx-target="#bookmark-{{ bookmark_id }}"
+              hx-swap="outerHTML"
+              hx-on::after-request="if(event.detail.successful && event.detail.elt === this) { document.getElementById('edit-modal').remove(); }">
+            {% include "bookmarks/edit_suggest_fields.html" %}
+            <div class="flex gap-3 justify-end mt-4">
+                {% if has_llm %}
+                <button type="button"
+                        hx-post="/bookmarks/{{ bookmark_id }}/suggest"
+                        hx-target="#edit-suggest-target"
+                        hx-swap="outerHTML"
+                        hx-include="closest form"
+                        hx-indicator="#edit-suggest-spinner"
+                        class="px-4 py-2 rounded-lg border border-purple-700 text-purple-400 hover:text-purple-200 hover:border-purple-500 mr-auto">
+                    Suggest Edits
+                </button>
+                {% endif %}
+                <button type="button"
+                        onclick="document.getElementById('edit-modal').remove()"
+                        class="px-4 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-gray-200">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white">
+                    Save
+                </button>
+            </div>
+        </form>
+    </div>
+</div>

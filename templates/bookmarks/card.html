@@ -25,13 +25,22 @@
         </div>
         <div class="flex items-center justify-between mt-3">
             <span class="text-xs text-gray-600">{{ bookmark.created_at_display }}</span>
-            <button class="text-xs text-gray-600 hover:text-red-400"
-                    hx-delete="/bookmarks/{{ bookmark.id }}"
-                    hx-target="#bookmark-{{ bookmark.id }}"
-                    hx-swap="outerHTML swap:200ms"
-                    hx-confirm="Delete this bookmark?">
-                Delete
-            </button>
+            <div class="flex gap-2">
+                <button class="text-xs text-gray-600 hover:text-blue-400"
+                        hx-get="/bookmarks/{{ bookmark.id }}/edit"
+                        hx-target="body"
+                        hx-swap="beforeend"
+                        hx-on::before-request="var m = document.getElementById('edit-modal'); if (m) m.remove();">
+                    Edit
+                </button>
+                <button class="text-xs text-gray-600 hover:text-red-400"
+                        hx-delete="/bookmarks/{{ bookmark.id }}"
+                        hx-target="#bookmark-{{ bookmark.id }}"
+                        hx-swap="outerHTML swap:200ms"
+                        hx-confirm="Delete this bookmark?">
+                    Delete
+                </button>
+            </div>
         </div>
     </div>
 </div>

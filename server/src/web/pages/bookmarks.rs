@@ -6,7 +6,8 @@ use axum::response::{Html, IntoResponse};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UrlMetadata};
+use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UpdateBookmark, UrlMetadata};
+use crate::domain::error::DomainError;
 use crate::domain::ports::llm_enricher::{EnrichmentInput, EnrichmentOutput};
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
@@ -68,6 +69,16 @@ fn render(t: &impl Template) -> axum::response::Response {
     }
 }
 
+fn error_response(e: DomainError) -> axum::response::Response {
+    let status = match &e {
+        DomainError::NotFound => StatusCode::NOT_FOUND,
+        DomainError::Unauthorized => StatusCode::UNAUTHORIZED,
+        DomainError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, e.to_string()).into_response()
+}
+
 #[derive(Template)]
 #[template(path = "bookmarks/grid.html")]
 struct GridPage {
@@ -102,6 +113,24 @@ struct SuggestFields {
     suggest_title: String,
     suggest_description: String,
     suggest_preview_image_url: Option<String>,
+    suggest_tags: String,
+}
+
+#[derive(Template)]
+#[template(path = "bookmarks/edit_modal.html")]
+struct EditModal {
+    bookmark_id: Uuid,
+    suggest_title: String,
+    suggest_description: String,
+    suggest_tags: String,
+    has_llm: bool,
+}
+
+#[derive(Template)]
+#[template(path = "bookmarks/edit_suggest_fields.html")]
+struct EditSuggestFields {
+    suggest_title: String,
+    suggest_description: String,
     suggest_tags: String,
 }
 
@@ -241,7 +270,7 @@ pub async fn suggest(
     };
 
     // Attempt LLM enrichment if user has it configured
-    let enrichment = try_llm_enrich(&state, user.id, &form.url, &metadata).await;
+    let enrichment = try_llm_enrich(&state, user.id, &form.url, &metadata, None).await;
 
     // Preserve user-typed tags; only use LLM tags if user hasn't typed any
     let user_tags = form.tags_input.and_then(non_empty);
@@ -277,6 +306,7 @@ async fn try_llm_enrich(
     user_id: Uuid,
     url: &str,
     metadata: &Option<UrlMetadata>,
+    existing_tags: Option<Vec<(String, i64)>>,
 ) -> Option<EnrichmentOutput> {
     let (api_key, model) = match state.settings.get_decrypted_api_key(user_id).await {
         Ok(Some(pair)) => pair,
@@ -291,6 +321,7 @@ async fn try_llm_enrich(
         url: url.to_string(),
         scraped_title: metadata.as_ref().and_then(|m| m.title.clone()),
         scraped_description: metadata.as_ref().and_then(|m| m.description.clone()),
+        existing_tags,
     };
 
     match state.enricher.enrich(&api_key, &model, input).await {
@@ -311,6 +342,146 @@ pub async fn delete(
         Ok(()) => Html("").into_response(),
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
+}
+
+pub async fn edit(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let bookmark = match with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await) {
+        Ok(b) => b,
+        Err(e) => return error_response(e),
+    };
+
+    let has_llm = state
+        .settings
+        .get_decrypted_api_key(user.id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+    render(&EditModal {
+        bookmark_id: bookmark.id,
+        suggest_title: bookmark.title.unwrap_or_default(),
+        suggest_description: bookmark.description.unwrap_or_default(),
+        suggest_tags: bookmark.tags.join(", "),
+        has_llm,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct EditForm {
+    title: Option<String>,
+    description: Option<String>,
+    tags_input: Option<String>,
+}
+
+/// Separate form struct for the edit-suggest endpoint.
+/// Unlike `SuggestForm` (used by the add flow), this does NOT include a `url`
+/// field because the edit modal form has no URL input -- the URL is fetched
+/// from the database by bookmark ID.
+#[derive(Deserialize)]
+pub struct EditSuggestForm {
+    title: Option<String>,
+    description: Option<String>,
+    tags_input: Option<String>,
+}
+
+pub async fn update(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+    Form(form): Form<EditForm>,
+) -> axum::response::Response {
+    let tags = form
+        .tags_input
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            t.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        });
+
+    // Pass all three fields as Some(...) so the user can clear them.
+    //
+    // Title & description: the SQL uses
+    //   CASE WHEN $n = '' THEN NULL ELSE COALESCE($n, col) END
+    // so an empty string clears the field to NULL (matching never-set
+    // semantics), a non-empty string updates it, and None (NULL) keeps
+    // the old value.
+    //
+    // Tags: the SQL uses COALESCE($5, tags), so Some(vec![]) clears
+    // the array to '{}' and None keeps the old tags.
+    let input = UpdateBookmark {
+        title: form.title,
+        description: form.description,
+        tags: Some(tags.unwrap_or_default()),
+    };
+
+    match with_bookmarks!(&state.bookmarks, svc => svc.update(id, user.id, input).await) {
+        Ok(bookmark) => render(&BookmarkCard {
+            bookmark: bookmark.into(),
+        }),
+        Err(e) => error_response(e),
+    }
+}
+
+pub async fn edit_suggest(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+    Form(form): Form<EditSuggestForm>,
+) -> axum::response::Response {
+    // Get the bookmark to find its URL
+    let bookmark = match with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await) {
+        Ok(b) => b,
+        Err(e) => return error_response(e),
+    };
+
+    let metadata = with_bookmarks!(&state.bookmarks, svc =>
+        svc.extract_metadata(&bookmark.url).await
+    )
+    .ok();
+
+    // Get existing tags with counts for LLM context
+    let existing_tags = with_bookmarks!(&state.bookmarks, svc =>
+        svc.tags_with_counts(user.id).await
+    )
+    .ok();
+
+    let enrichment = try_llm_enrich(&state, user.id, &bookmark.url, &metadata, existing_tags).await;
+
+    // For edit suggest, always prefer LLM/scraped suggestions over current
+    // form values. The user explicitly asked for suggestions, so we replace
+    // all fields. Fall back to current form values only if no suggestion exists.
+    let suggest_tags = enrichment
+        .as_ref()
+        .map(|e| e.tags.join(", "))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| form.tags_input.and_then(non_empty).unwrap_or_default());
+
+    let suggest_title = enrichment
+        .as_ref()
+        .and_then(|e| e.title.clone())
+        .or_else(|| metadata.as_ref().and_then(|m| m.title.clone()))
+        .and_then(non_empty)
+        .unwrap_or_else(|| form.title.and_then(non_empty).unwrap_or_default());
+
+    let suggest_description = enrichment
+        .as_ref()
+        .and_then(|e| e.description.clone())
+        .or_else(|| metadata.as_ref().and_then(|m| m.description.clone()))
+        .and_then(non_empty)
+        .unwrap_or_else(|| form.description.and_then(non_empty).unwrap_or_default());
+
+    render(&EditSuggestFields {
+        suggest_title,
+        suggest_description,
+        suggest_tags,
+    })
 }
 
 fn fill_if_blank(current: Option<String>, suggested: Option<String>) -> String {

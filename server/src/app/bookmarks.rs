@@ -87,6 +87,10 @@ where
         self.repo.all_tags(user_id).await
     }
 
+    pub async fn tags_with_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
+        self.repo.tags_with_counts(user_id).await
+    }
+
     pub async fn extract_metadata(&self, url: &str) -> Result<UrlMetadata, DomainError> {
         self.metadata.extract(url).await
     }
