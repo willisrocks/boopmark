@@ -122,17 +122,48 @@ In `server/src/adapters/anthropic.rs`, replace the `build_prompt` method (lines 
     }
 ```
 
-**Step 3: Fix all `EnrichmentInput` construction sites**
+**Step 3: Add `existing_tags` parameter to `try_llm_enrich` and update its call site**
 
-In `server/src/web/pages/bookmarks.rs`, update the `try_llm_enrich` function where `EnrichmentInput` is constructed (around line 290). Add the `existing_tags` field:
+In `server/src/web/pages/bookmarks.rs`, update the `try_llm_enrich` function signature (around line 275) to accept an optional `existing_tags` parameter, and pass it through to `EnrichmentInput`:
+
+Change the function signature from:
+
+```rust
+async fn try_llm_enrich(
+    state: &AppState,
+    user_id: Uuid,
+    url: &str,
+    metadata: &Option<UrlMetadata>,
+) -> Option<EnrichmentOutput> {
+```
+
+to:
+
+```rust
+async fn try_llm_enrich(
+    state: &AppState,
+    user_id: Uuid,
+    url: &str,
+    metadata: &Option<UrlMetadata>,
+    existing_tags: Option<Vec<(String, i64)>>,
+) -> Option<EnrichmentOutput> {
+```
+
+And update the `EnrichmentInput` construction inside the function to include the new field:
 
 ```rust
     let input = EnrichmentInput {
         url: url.to_string(),
         scraped_title: metadata.as_ref().and_then(|m| m.title.clone()),
         scraped_description: metadata.as_ref().and_then(|m| m.description.clone()),
-        existing_tags: None,
+        existing_tags,
     };
+```
+
+Then update the existing call site in the `suggest` handler (around line 244) to pass `None`:
+
+```rust
+    let enrichment = try_llm_enrich(&state, user.id, &form.url, &metadata, None).await;
 ```
 
 **Step 4: Fix the test construction sites**
@@ -318,99 +349,7 @@ git commit -m "feat: add edit button to bookmark card"
 
 ---
 
-### Task 5: Make `UpdateBookmark` support explicit field clearing
-
-**Files:**
-- Modify: `server/src/domain/bookmark.rs`
-- Modify: `server/src/adapters/postgres/bookmark_repo.rs`
-- Modify: `server/src/web/api/bookmarks.rs`
-
-The current `UpdateBookmark` uses `Option<String>` for `title` and `description`. With `COALESCE($n, column)` in the SQL, `None` means "keep the old value." But an edit form must allow the user to clear a field. We need a three-state representation: absent (`None` = don't touch), explicitly cleared (`Some(None)` = set to NULL), or set (`Some(Some("value"))` = set to value).
-
-**Step 1: Change `UpdateBookmark` field types**
-
-In `server/src/domain/bookmark.rs`, change `UpdateBookmark` to:
-
-```rust
-#[derive(Debug, Deserialize)]
-pub struct UpdateBookmark {
-    pub title: Option<Option<String>>,
-    pub description: Option<Option<String>>,
-    pub tags: Option<Vec<String>>,
-}
-```
-
-**Step 2: Update the Postgres adapter's `update` method**
-
-In `server/src/adapters/postgres/bookmark_repo.rs`, replace the `update` method with:
-
-```rust
-    async fn update(
-        &self,
-        id: Uuid,
-        user_id: Uuid,
-        input: UpdateBookmark,
-    ) -> Result<Bookmark, DomainError> {
-        // Flatten Option<Option<String>>:
-        // None         -> bind NULL (COALESCE keeps old value)
-        // Some(None)   -> need to SET to NULL (can't use COALESCE)
-        // Some(Some(v))-> bind Some(v) (COALESCE uses new value)
-        //
-        // To handle Some(None) properly, we use a boolean flag per field
-        // to decide whether to force-set NULL or use COALESCE.
-        let (title_val, clear_title) = match &input.title {
-            None => (None, false),
-            Some(None) => (None, true),
-            Some(Some(v)) => (Some(v.as_str()), false),
-        };
-        let (desc_val, clear_desc) = match &input.description {
-            None => (None, false),
-            Some(None) => (None, true),
-            Some(Some(v)) => (Some(v.as_str()), false),
-        };
-
-        sqlx::query_as::<_, Bookmark>(
-            "UPDATE bookmarks SET
-                title = CASE WHEN $6 THEN NULL ELSE COALESCE($3, title) END,
-                description = CASE WHEN $7 THEN NULL ELSE COALESCE($4, description) END,
-                tags = COALESCE($5, tags),
-                updated_at = now()
-             WHERE id = $1 AND user_id = $2
-             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(title_val)
-        .bind(desc_val)
-        .bind(input.tags.as_deref())
-        .bind(clear_title)
-        .bind(clear_desc)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| DomainError::Internal(e.to_string()))?
-        .ok_or(DomainError::NotFound)
-    }
-```
-
-**Step 3: Update the JSON API handler**
-
-In `server/src/web/api/bookmarks.rs`, the `update_bookmark` handler passes `Json(input): Json<UpdateBookmark>` directly. The JSON deserialization of `Option<Option<String>>` already works correctly with serde: absent key = `None`, `"title": null` = `Some(None)`, `"title": "value"` = `Some(Some("value"))`. No code change needed for the API handler itself.
-
-**Step 4: Verify it compiles and tests pass**
-
-Run: `cargo test`
-Expected: All tests pass
-
-**Step 5: Commit**
-
-```bash
-git add server/src/domain/bookmark.rs server/src/adapters/postgres/bookmark_repo.rs
-git commit -m "feat: support explicit field clearing in UpdateBookmark with Option<Option<String>>"
-```
-
----
-
-### Task 6: Add page route handlers for edit, update, and edit-suggest
+### Task 5: Add page route handlers for edit, update, and edit-suggest
 
 **Files:**
 - Modify: `server/src/web/pages/bookmarks.rs`
@@ -507,13 +446,17 @@ pub async fn update(
         .filter(|t| !t.is_empty())
         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
 
-    // Always pass Some(...) for all three fields so the user can clear them.
-    // The SQL uses COALESCE($n, column) — passing Some(value) ensures the
-    // user's input (including empty/None) is written, rather than COALESCE
+    // Pass all three fields as Some(...) so the user can clear them.
+    // The SQL uses COALESCE($n, column) — passing a non-NULL value
+    // (even an empty string) causes COALESCE to use it rather than
     // falling back to the old value.
+    //
+    // We do NOT use non_empty() here (unlike the create flow), because
+    // non_empty converts "" to None, and COALESCE(NULL, column) keeps
+    // the old value — preventing the user from clearing a field.
     let input = crate::domain::bookmark::UpdateBookmark {
-        title: Some(form.title.and_then(non_empty)),
-        description: Some(form.description.and_then(non_empty)),
+        title: form.title,
+        description: form.description,
         tags: Some(tags.unwrap_or_default()),
     };
 
@@ -526,9 +469,7 @@ pub async fn update(
 }
 ```
 
-**Important — `UpdateBookmark` field type change:** The `title` and `description` fields on `UpdateBookmark` were changed from `Option<String>` to `Option<Option<String>>` in Task 5. Here we pass `Some(form.title.and_then(non_empty))` which yields `Some(None)` when the user clears the field, or `Some(Some("value"))` when they set it.
-
-Note: We always pass `Some(...)` for all three fields so the user can clear them. For tags, `Some(vec![])` writes an empty array. For title/description, `Some(None)` writes NULL.
+Note: `UpdateBookmark` is unchanged — it keeps `Option<String>` for title/description. The edit handler passes `form.title` directly (not filtered through `non_empty`), so an empty field becomes `Some("")`. The existing `COALESCE($3, title)` in the SQL sees a non-NULL empty string and uses it, which effectively clears the field. The JSON API contract at `PUT /api/v1/{id}` is also unchanged: `None` (absent key) keeps the old value, `Some("value")` sets it.
 
 **Step 4: Add the `edit_suggest` handler**
 
@@ -560,7 +501,7 @@ pub async fn edit_suggest(
     )
     .ok();
 
-    let enrichment = try_llm_enrich_with_tags(&state, user.id, &bookmark.url, &metadata, existing_tags).await;
+    let enrichment = try_llm_enrich(&state, user.id, &bookmark.url, &metadata, existing_tags).await;
 
     // For edit suggest, always prefer LLM/scraped suggestions over current
     // form values. The user explicitly asked for suggestions, so we replace
@@ -593,45 +534,7 @@ pub async fn edit_suggest(
 }
 ```
 
-**Step 5: Add the `try_llm_enrich_with_tags` helper**
-
-Add this new helper function after `try_llm_enrich` (around line 303):
-
-```rust
-async fn try_llm_enrich_with_tags(
-    state: &AppState,
-    user_id: Uuid,
-    url: &str,
-    metadata: &Option<UrlMetadata>,
-    existing_tags: Option<Vec<(String, i64)>>,
-) -> Option<EnrichmentOutput> {
-    let (api_key, model) = match state.settings.get_decrypted_api_key(user_id).await {
-        Ok(Some(pair)) => pair,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::warn!(user_id = %user_id, error = %e, "failed to load LLM settings for enrichment");
-            return None;
-        }
-    };
-
-    let input = EnrichmentInput {
-        url: url.to_string(),
-        scraped_title: metadata.as_ref().and_then(|m| m.title.clone()),
-        scraped_description: metadata.as_ref().and_then(|m| m.description.clone()),
-        existing_tags,
-    };
-
-    match state.enricher.enrich(&api_key, &model, input).await {
-        Ok(output) => Some(output),
-        Err(e) => {
-            tracing::warn!(user_id = %user_id, url = %url, error = %e, "LLM enrichment failed, falling back to scrape-only");
-            None
-        }
-    }
-}
-```
-
-**Step 6: Register the new routes**
+**Step 5: Register the new routes**
 
 In `server/src/web/pages/mod.rs`, add the new routes. Replace the existing routes function with:
 
@@ -654,7 +557,7 @@ pub fn routes() -> Router<AppState> {
 
 Note: The existing `delete` route at `/bookmarks/{id}` is combined with the new `put` for `update` on the same path.
 
-**Step 7: Add required imports**
+**Step 6: Add required imports**
 
 In `server/src/web/pages/mod.rs`, add `put` to the routing import:
 
@@ -662,17 +565,17 @@ In `server/src/web/pages/mod.rs`, add `put` to the routing import:
 use axum::routing::{delete, get, post, put};
 ```
 
-**Step 8: Verify it compiles**
+**Step 7: Verify it compiles**
 
 Run: `cargo build`
 Expected: Build succeeds
 
-**Step 9: Run tests**
+**Step 8: Run tests**
 
 Run: `cargo test`
 Expected: All tests pass
 
-**Step 10: Commit**
+**Step 9: Commit**
 
 ```bash
 git add server/src/web/pages/bookmarks.rs server/src/web/pages/mod.rs
@@ -681,7 +584,7 @@ git commit -m "feat: add edit, update, and edit-suggest page handlers with route
 
 ---
 
-### Task 7: Rebuild Tailwind CSS
+### Task 6: Rebuild Tailwind CSS
 
 **Files:**
 - Modify: `static/css/tailwind-output.css` (generated)
@@ -707,7 +610,7 @@ git commit -m "build: rebuild Tailwind CSS for edit modal styles"
 
 ---
 
-### Task 8: Verify via agent-browser screenshots
+### Task 7: Verify via agent-browser screenshots
 
 **Files:** None (manual verification)
 
