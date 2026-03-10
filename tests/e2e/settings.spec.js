@@ -109,24 +109,20 @@ test("settings page supports add and delete key flows", async ({ page }) => {
   await expect(page.getByTestId("delete-anthropic-api-key")).toHaveCount(0);
 });
 
-test("legacy api keys route redirects to settings", async ({ page }) => {
+test("settings page shows API Keys section", async ({ page }) => {
   await signIn(page);
+  await page.goto("/settings");
 
-  await page.goto("/settings/api-keys");
-
-  await expect(page).toHaveURL(/\/settings$/);
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "LLM Integration" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "API Keys" })).toBeVisible();
+  await expect(
+    page.getByText("Create keys to use the Boopmark API and CLI.")
+  ).toBeVisible();
+  await expect(page.getByTestId("create-api-key-form")).toBeVisible();
 });
 
 test("unauthenticated requests cannot read or save settings", async ({ page, request }) => {
   const getResponse = await request.get("/settings");
   expect(getResponse.status()).toBe(401);
-
-  const legacyResponse = await request.get("/settings/api-keys", {
-    maxRedirects: 0,
-  });
-  expect(legacyResponse.status()).toBe(401);
 
   const postResponse = await request.post("/settings", {
     form: {
@@ -139,8 +135,6 @@ test("unauthenticated requests cannot read or save settings", async ({ page, req
 
   await page.goto("/settings");
   await expect(page.getByRole("heading", { name: "Settings" })).toHaveCount(0);
-  await page.goto("/settings/api-keys");
-  await expect(page).not.toHaveURL(/\/settings$/);
 });
 
 test("settings rejects forged unsupported anthropic model submissions with 400", async ({

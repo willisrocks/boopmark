@@ -1,0 +1,21 @@
+{% if api_keys.is_empty() %}
+<p class="text-sm text-gray-400" data-testid="no-api-keys">No API keys yet.</p>
+{% else %}
+<div class="space-y-2">
+    {% for key in api_keys %}
+    <div class="flex items-center justify-between rounded-lg border border-gray-700 bg-[#1a1d2e] px-4 py-3" data-testid="api-key-row">
+        <div>
+            <p class="text-sm font-medium text-gray-200" data-testid="api-key-name">{{ key.name }}</p>
+            <p class="text-xs text-gray-400">Created {{ key.created_at_display }}</p>
+        </div>
+        <button
+            hx-delete="/settings/api-keys/{{ key.id }}"
+            hx-target="#api-keys-result"
+            hx-swap="innerHTML"
+            class="text-sm text-red-400 hover:text-red-300"
+            data-testid="delete-api-key"
+        >Delete</button>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
