@@ -10,8 +10,8 @@
 
 **Design decisions:**
 - The `server` service is added to `docker-compose.yml` so `docker compose up` starts the full stack (db, minio, server). This is the primary workflow for devproxy and production-like testing.
-- All required env vars get dev-safe defaults in the `environment:` block so `docker compose up` works without `.env`. The `env_file` with `required: false` layers real credentials on top when `.env` exists — values from `env_file` are overridden by `environment:` in Compose, so the `environment:` block only sets vars that need container-specific values (like `DATABASE_URL` pointing to `db` instead of `localhost`). All other defaults come from `env_file` or the app's own defaults.
-- Container-network overrides (`DATABASE_URL` using `db:5432`, `S3_ENDPOINT` using `minio:9000`) go in `environment:` since these must differ from host-side values in `.env`.
+- All required env vars get dev-safe defaults in the `environment:` block so `docker compose up` works without `.env`. The `.env.example` values are used as defaults. When `.env` exists, `env_file` loads it first, then `environment:` overrides any vars that need container-specific values (Compose precedence: `environment:` wins over `env_file`).
+- Container-network overrides (`DATABASE_URL` using `db:5432`, `S3_ENDPOINT` using `minio:9000`) must go in `environment:` since they must differ from host-side values in `.env`. These override whatever `.env` provides.
 - The README documents both workflows: full Docker (`docker compose up`) and hybrid (`docker compose up db minio` + `cargo run`). The hybrid workflow is for developers who want faster iteration without Docker rebuilds.
 
 ---
@@ -23,7 +23,7 @@
 
 **Step 1: Add the `server` service with devproxy label**
 
-Add a `server` service that builds from the existing `Dockerfile`, depends on `db`, passes env vars via `env_file` (with `required: false`), and has the `devproxy.port` label. Provide container-network overrides for `DATABASE_URL` and `S3_ENDPOINT` in the `environment:` block, since these must use compose service hostnames instead of `localhost`.
+Add a `server` service that builds from the existing `Dockerfile`, depends on `db` and `minio`, and has the `devproxy.port` label. All five required env vars get dev-safe defaults in the `environment:` block (values taken from `.env.example`). Container-network overrides for `DATABASE_URL` and `S3_ENDPOINT` use compose service hostnames. The `env_file` with `required: false` lets `.env` supply real credentials when present without erroring when absent.
 
 ```yaml
   server:
@@ -33,6 +33,10 @@ Add a `server` service that builds from the existing `Dockerfile`, depends on `d
         required: false
     environment:
       DATABASE_URL: postgres://boopmark:devpassword@db:5432/boopmark
+      SESSION_SECRET: change-me-in-production
+      LLM_SETTINGS_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      GOOGLE_CLIENT_ID: your-google-client-id
+      GOOGLE_CLIENT_SECRET: your-google-client-secret
       S3_ENDPOINT: http://minio:9000
     ports:
       - "4000:4000"
@@ -40,16 +44,19 @@ Add a `server` service that builds from the existing `Dockerfile`, depends on `d
       - "devproxy.port=4000"
     depends_on:
       - db
+      - minio
     volumes:
       - ./uploads:/app/uploads
 ```
 
 Key points:
-- `env_file` with `required: false` means compose won't error if `.env` doesn't exist yet. When `.env` is present, it supplies `SESSION_SECRET`, `LLM_SETTINGS_ENCRYPTION_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and other vars. When absent, the server will panic with a clear message naming the missing var — this is intentional, since there are no universal safe defaults for secrets like encryption keys. The README instructs users to copy `.env.example` to `.env` as step 1.
-- `DATABASE_URL` override uses `db` (the compose service name) as hostname and port `5432` (the container-internal port, not the host-mapped `5434`). This overrides whatever `DATABASE_URL` comes from `.env` since `environment:` takes precedence over `env_file` in Compose.
-- `S3_ENDPOINT` override uses `minio` (the compose service name) instead of `localhost`. Without this, S3 operations would fail when `STORAGE_BACKEND=s3` because the container can't reach `localhost:9000` on the host network.
-- `devproxy.port=4000` tells devproxy which container port to proxy
-- The `uploads` volume mount ensures local storage works inside the container
+- All five required env vars (`DATABASE_URL`, `SESSION_SECRET`, `LLM_SETTINGS_ENCRYPTION_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) have dev-safe defaults in the `environment:` block. This means `docker compose up` works immediately without `.env`.
+- `env_file` with `required: false` loads `.env` when present. Since `environment:` takes precedence over `env_file` in Compose, any var listed in both places uses the `environment:` value. This is correct for `DATABASE_URL` and `S3_ENDPOINT` (which must use container hostnames), but means `.env` values for `SESSION_SECRET` etc. won't override the defaults. This is fine for dev — production deployments don't use this compose file.
+- `DATABASE_URL` uses `db:5432` (compose service name + container-internal port, not the host-mapped `5434`).
+- `S3_ENDPOINT` uses `minio:9000` (compose service name) instead of `localhost:9000`. Without this, S3 operations would fail inside the container because `localhost` refers to the container itself.
+- `depends_on` includes both `db` and `minio` so the server doesn't start before its dependencies are ready.
+- `devproxy.port=4000` tells devproxy which container port to proxy.
+- The `uploads` volume mount ensures local storage works inside the container.
 
 **Step 2: Verify the compose file is valid**
 
