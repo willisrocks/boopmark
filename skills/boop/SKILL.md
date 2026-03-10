@@ -37,13 +37,13 @@ curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install
 Install a specific version:
 
 ```bash
-BOOP_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | BOOP_VERSION=v0.1.0 sh
 ```
 
 Custom install directory:
 
 ```bash
-BOOP_INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | BOOP_INSTALL_DIR=/usr/local/bin sh
 ```
 
 Verify installation:
