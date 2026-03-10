@@ -7,6 +7,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UpdateBookmark, UrlMetadata};
+use crate::domain::error::DomainError;
 use crate::domain::ports::llm_enricher::{EnrichmentInput, EnrichmentOutput};
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
@@ -66,6 +67,16 @@ fn render(t: &impl Template) -> axum::response::Response {
         Ok(body) => Html(body).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+fn error_response(e: DomainError) -> axum::response::Response {
+    let status = match &e {
+        DomainError::NotFound => StatusCode::NOT_FOUND,
+        DomainError::Unauthorized => StatusCode::UNAUTHORIZED,
+        DomainError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, e.to_string()).into_response()
 }
 
 #[derive(Template)]
@@ -340,7 +351,7 @@ pub async fn edit(
 ) -> axum::response::Response {
     let bookmark = match with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        Err(e) => return error_response(e),
     };
 
     let has_llm = state
@@ -395,10 +406,15 @@ pub async fn update(
         });
 
     // Pass all three fields as Some(...) so the user can clear them.
-    // The SQL uses CASE WHEN $n = '' THEN NULL ELSE COALESCE($n, col) END,
+    //
+    // Title & description: the SQL uses
+    //   CASE WHEN $n = '' THEN NULL ELSE COALESCE($n, col) END
     // so an empty string clears the field to NULL (matching never-set
-    // semantics), while a non-empty string updates it, and None (NULL)
-    // keeps the old value.
+    // semantics), a non-empty string updates it, and None (NULL) keeps
+    // the old value.
+    //
+    // Tags: the SQL uses COALESCE($5, tags), so Some(vec![]) clears
+    // the array to '{}' and None keeps the old tags.
     let input = UpdateBookmark {
         title: form.title,
         description: form.description,
@@ -409,7 +425,7 @@ pub async fn update(
         Ok(bookmark) => render(&BookmarkCard {
             bookmark: bookmark.into(),
         }),
-        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        Err(e) => error_response(e),
     }
 }
 
@@ -422,7 +438,7 @@ pub async fn edit_suggest(
     // Get the bookmark to find its URL
     let bookmark = match with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        Err(e) => return error_response(e),
     };
 
     let metadata = with_bookmarks!(&state.bookmarks, svc =>
