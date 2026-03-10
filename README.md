@@ -36,3 +36,22 @@ This project supports local HTTPS subdomains via [devproxy](https://github.com/f
 4. Open the printed HTTPS URL
 
 Run `devproxy ls` to see all running projects (`*` marks the current directory).
+
+### CLI (`boop`)
+
+Manage your bookmarks from the terminal:
+
+1. Install: `curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | sh`
+2. Configure:
+   ```bash
+   boop config set-server https://your-boopmark-instance.example.com
+   boop config set-key YOUR_API_KEY
+   ```
+3. Use:
+   ```bash
+   boop add https://example.com --title "Example" --tags "ref"
+   boop list
+   boop search "query"
+   ```
+
+See `boop --help` for all commands.
