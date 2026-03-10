@@ -87,7 +87,7 @@ Define `SuggestionResult` struct (with `Serialize` derive for JSON responses) an
 
 The `SuggestionResult` fields:
 ```rust
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SuggestionResult {
     pub title: Option<String>,
     pub description: Option<String>,
@@ -196,9 +196,31 @@ Then build `SuggestFields` from `result`:
 Replace lines 432-485. Instead of calling `with_bookmarks!` for metadata extraction and `try_llm_enrich`:
 
 1. Keep: Get bookmark by ID (lines 439-442)
-2. Keep: Get `tags_with_counts` (lines 450-453)
+2. Keep: Get `tags_with_counts` (lines 450-453) — pass result as `existing_tags` to the service
 3. Replace: Call `state.enrichment.suggest(user.id, &bookmark.url, existing_tags).await`
-4. Build `EditSuggestFields` from result, with the same fallback-to-form-values logic
+4. Build `EditSuggestFields` from result
+
+**Critical merge-semantics difference from `suggest()`:** The `edit_suggest` handler uses *replace* semantics, not *fill-if-blank*. The user explicitly asked for suggestions, so LLM/scrape results replace current form values. Fall back to form values only if no suggestion exists:
+
+```rust
+let result = state.enrichment.suggest(user.id, &bookmark.url, existing_tags).await;
+
+let suggest_tags = if !result.tags.is_empty() {
+    result.tags.join(", ")
+} else {
+    form.tags_input.and_then(non_empty).unwrap_or_default()
+};
+
+let suggest_title = result.title
+    .and_then(non_empty)
+    .unwrap_or_else(|| form.title.and_then(non_empty).unwrap_or_default());
+
+let suggest_description = result.description
+    .and_then(non_empty)
+    .unwrap_or_else(|| form.description.and_then(non_empty).unwrap_or_default());
+```
+
+This preserves the existing behavior where `edit_suggest` replaces all fields with suggestions (matching lines 460-478 of the current code).
 
 ### Step 2.5: Delete the `try_llm_enrich` private function (lines 304-334)
 
@@ -239,8 +261,6 @@ async fn suggest(
 }
 ```
 
-Add import: `use crate::app::enrichment::SuggestionResult;` (for type awareness, though not explicitly used in handler signature since it returns `impl IntoResponse`).
-
 Register route in `routes()`:
 ```rust
 .route("/suggest", post(suggest))
@@ -248,11 +268,12 @@ Register route in `routes()`:
 
 ### Step 3.2: Opt-in enrich on `create_bookmark`
 
-Add query params struct:
+Add a shared query params struct used by both create and update:
 ```rust
-#[derive(Debug, Deserialize)]
-struct CreateParams {
-    suggest: Option<bool>,
+#[derive(Debug, Default, Deserialize)]
+struct EnrichParams {
+    #[serde(default)]
+    suggest: bool,
 }
 ```
 
@@ -262,11 +283,11 @@ Modify the existing `create_bookmark` handler. When `?suggest=true` is passed, c
 async fn create_bookmark(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
-    Query(params): Query<CreateParams>,
+    Query(params): Query<EnrichParams>,
     Json(mut input): Json<CreateBookmark>,
 ) -> impl IntoResponse {
     // Enrich missing fields when explicitly requested via ?suggest=true
-    if params.suggest.unwrap_or(false) {
+    if params.suggest {
         let suggestions = state.enrichment.suggest(user.id, &input.url, None).await;
         if input.title.is_none() {
             input.title = suggestions.title;
@@ -299,24 +320,18 @@ async fn create_bookmark(
 
 ### Step 3.3: Optional enrich on `update_bookmark`
 
-Add query params struct:
-```rust
-#[derive(Debug, Deserialize)]
-struct UpdateParams {
-    suggest: Option<bool>,
-}
-```
+Reuse the same `EnrichParams` struct from Step 3.2.
 
-Modify handler signature to accept `Query(params): Query<UpdateParams>`:
+Modify handler signature to accept `Query(params): Query<EnrichParams>`:
 ```rust
 async fn update_bookmark(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Query(params): Query<UpdateParams>,
+    Query(params): Query<EnrichParams>,
     Json(mut input): Json<UpdateBookmark>,
 ) -> impl IntoResponse {
-    if params.suggest.unwrap_or(false) {
+    if params.suggest {
         // Get the existing bookmark to access its URL
         let bookmark = with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await);
         match bookmark {
@@ -417,14 +432,13 @@ struct CreateBookmarkRequest {
 
 ### Step 4.5: Add `UpdateBookmarkRequest` struct
 
+Note: `skip_serializing_if` is **not needed** here. The server's `UpdateBookmark` uses `Option<T>` with `Deserialize` — `None` from JSON `null` or absent keys both work the same way. The SQL layer uses `COALESCE` to preserve old values when the field is `NULL`. Sending `null` explicitly is fine. Keep the struct simple:
+
 ```rust
 #[derive(Serialize)]
 struct UpdateBookmarkRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     tags: Option<Vec<String>>,
 }
 ```
@@ -717,23 +731,16 @@ Write Playwright E2E tests that build the CLI binary and exercise it against the
 
 The CLI E2E tests need an API key and the server URL. The approach: sign in via E2E auth, create an API key via the settings UI, capture it, then use Node's `child_process.execSync` to run the `boop` CLI binary.
 
-Build the CLI once before all tests using `test.beforeAll`. **Important:** `cargo build` can take 60+ seconds on a cold build, so set `test.setTimeout` to accommodate:
+Wrap all tests in a `test.describe` block. Build the CLI once before all tests using `test.beforeAll`:
+
 ```javascript
+const { test, expect } = require("@playwright/test");
 const { execSync } = require("child_process");
-const path = require("path");
-const BOOP = path.join(process.cwd(), "target", "debug", "boop");
-
-test.beforeAll(async () => {
-    execSync("cargo build -p boop", { stdio: "inherit", timeout: 120000 });
-});
-```
-
-Helper to run boop with config. **Important:** On macOS, `dirs::config_dir()` returns `$HOME/Library/Application Support`. Set `HOME` to a temp directory so the CLI writes its config there. Place the config file at `<tempdir>/Library/Application Support/boop/config.toml`:
-
-```javascript
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+
+const BOOP = path.join(process.cwd(), "target", "debug", "boop");
 
 function runBoop(args, apiKey) {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "boop-e2e-"));
@@ -748,7 +755,17 @@ function runBoop(args, apiKey) {
     const env = { ...process.env, HOME: tempHome };
     return execSync(`${BOOP} ${args}`, { env, encoding: "utf-8", timeout: 30000 });
 }
+
+test.describe("CLI enrichment", () => {
+    test.beforeAll(async () => {
+        execSync("cargo build -p boop", { stdio: "inherit", timeout: 120000 });
+    });
+
+    // ... tests go here, each signs in and creates an API key via page ...
+});
 ```
+
+Each test must sign in, delete existing API keys, create a fresh key, and capture it (following the api-keys.spec.js pattern). The API key is then passed to `runBoop()`.
 
 **Test 1: `boop add` creates a bookmark and shows output**
 
