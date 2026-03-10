@@ -283,34 +283,68 @@ fn detect_target() -> Result<String, String> {
     Ok(target.to_string())
 }
 
-async fn upgrade() -> Result<(), String> {
-    let target = detect_target()?;
-    let url = format!(
-        "https://github.com/foundra-build/boopmark/releases/latest/download/boop-{target}"
-    );
+fn try_gh_download(asset_name: &str, staging_path: &std::path::Path) -> Result<(), String> {
+    use std::process::Command;
+    let output = Command::new("gh")
+        .args([
+            "release", "download", "--repo", "foundra-build/boopmark",
+            "--pattern", asset_name, "--dir",
+            staging_path.parent().unwrap().to_str().unwrap_or("."),
+            "--clobber",
+        ])
+        .output()
+        .map_err(|e| format!("gh not available: {e}"))?;
 
-    println!("Downloading latest boop for {target}...");
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Download failed: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    // gh downloads with the asset name; rename to staging path
+    let downloaded = staging_path.parent().unwrap().join(asset_name);
+    std::fs::rename(&downloaded, staging_path)
+        .map_err(|e| format!("Failed to rename downloaded file: {e}"))?;
+    Ok(())
+}
+
+async fn download_with_reqwest(url: &str) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(format!("boop/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+    let mut request = client.get(url);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        request = request.header("Authorization", format!("token {token}"));
+    }
+
+    let resp = request.send().await.map_err(|e| format!("Download failed: {e}"))?;
 
     if !resp.status().is_success() {
         return Err(format!("Download failed: HTTP {}", resp.status()));
     }
 
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read response: {e}"))?;
+    let bytes = resp.bytes().await.map_err(|e| format!("Failed to read response: {e}"))?;
+    Ok(bytes.to_vec())
+}
 
+async fn upgrade() -> Result<(), String> {
+    let target = detect_target()?;
+    let asset_name = format!("boop-{target}");
     let exe_path = std::env::current_exe().map_err(|e| format!("Cannot find current exe: {e}"))?;
     let staging_path = exe_path.with_extension(format!("tmp.{}", std::process::id()));
 
-    std::fs::write(&staging_path, &bytes)
-        .map_err(|e| format!("Failed to write staging file: {e}"))?;
+    println!("Downloading latest boop for {target}...");
+
+    // Try gh CLI first (handles private repo auth natively)
+    if let Err(_gh_err) = try_gh_download(&asset_name, &staging_path) {
+        // Fall back to reqwest (uses GITHUB_TOKEN env var if set)
+        let url = format!(
+            "https://github.com/foundra-build/boopmark/releases/latest/download/{asset_name}"
+        );
+        let bytes = download_with_reqwest(&url).await?;
+        std::fs::write(&staging_path, &bytes)
+            .map_err(|e| format!("Failed to write staging file: {e}"))?;
+    }
 
     let result = (|| -> Result<(), String> {
         #[cfg(unix)]
