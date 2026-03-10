@@ -717,13 +717,14 @@ Write Playwright E2E tests that build the CLI binary and exercise it against the
 
 The CLI E2E tests need an API key and the server URL. The approach: sign in via E2E auth, create an API key via the settings UI, capture it, then use Node's `child_process.execSync` to run the `boop` CLI binary.
 
-Build the CLI once before all tests using `test.beforeAll`:
+Build the CLI once before all tests using `test.beforeAll`. **Important:** `cargo build` can take 60+ seconds on a cold build, so set `test.setTimeout` to accommodate:
 ```javascript
 const { execSync } = require("child_process");
-const BOOP = "./target/debug/boop";
+const path = require("path");
+const BOOP = path.join(process.cwd(), "target", "debug", "boop");
 
 test.beforeAll(async () => {
-    execSync("cargo build -p boop", { stdio: "inherit" });
+    execSync("cargo build -p boop", { stdio: "inherit", timeout: 120000 });
 });
 ```
 
