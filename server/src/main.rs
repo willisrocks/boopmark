@@ -17,7 +17,7 @@ use config::{Config, StorageBackend};
 use domain::ports::llm_enricher::LlmEnricher;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
-use web::state::{AppState, Bookmarks};
+use web::state::{AppState, Bookmarks, ImageStorage};
 
 #[tokio::main]
 async fn main() {
@@ -75,6 +75,30 @@ async fn main() {
         }
     };
 
+    let images_storage = match config.storage_backend {
+        StorageBackend::Local => ImageStorage::Local(LocalStorage::new(
+            "./uploads/images".into(),
+            format!("{}/uploads/images", config.app_url),
+        )),
+        StorageBackend::S3 => {
+            let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .load()
+                .await;
+            let s3_client = aws_sdk_s3::Client::new(&s3_config);
+            ImageStorage::S3(S3Storage::new(
+                s3_client,
+                config.s3_images_bucket.clone(),
+                config
+                    .s3_public_url
+                    .clone()
+                    .map(|u| u.replace(&config.s3_bucket, &config.s3_images_bucket))
+                    .unwrap_or_else(|| {
+                        format!("https://{}.s3.amazonaws.com", config.s3_images_bucket)
+                    }),
+            ))
+        }
+    };
+
     let auth_service = Arc::new(AuthService::new(db.clone(), db.clone(), db.clone()));
     let secret_box = Arc::new(SecretBox::new(&config.llm_settings_encryption_key));
     let settings_service = Arc::new(SettingsService::new(db.clone(), secret_box));
@@ -86,6 +110,7 @@ async fn main() {
         settings: settings_service,
         config: Arc::new(config.clone()),
         enricher,
+        images_storage,
     };
 
     let app = web::router::create_router(state);

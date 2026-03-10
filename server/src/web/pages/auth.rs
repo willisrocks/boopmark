@@ -5,6 +5,7 @@ use axum::response::{Html, IntoResponse, Redirect};
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use serde::Deserialize;
 
+use crate::domain::ports::storage::ObjectStorage;
 use crate::web::state::AppState;
 
 #[derive(Template)]
@@ -93,10 +94,53 @@ async fn google_callback(
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
 
+    // Download and cache avatar image
+    let stored_image = if let Some(ref picture_url) = userinfo.picture {
+        match client.get(picture_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("image/jpeg")
+                    .to_string();
+                match resp.bytes().await {
+                    Ok(bytes) => {
+                        let ext = match content_type.split(';').next().unwrap_or("").trim() {
+                            "image/png" => "png",
+                            "image/gif" => "gif",
+                            "image/webp" => "webp",
+                            _ => "jpg",
+                        };
+                        let key = format!("avatars/{}.{}", uuid::Uuid::new_v4(), ext);
+                        match state
+                            .images_storage
+                            .put(&key, bytes.to_vec(), &content_type)
+                            .await
+                        {
+                            Ok(url) => Some(url),
+                            Err(e) => {
+                                tracing::warn!("Failed to store avatar: {e}");
+                                userinfo.picture.clone()
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to read avatar bytes: {e}");
+                        userinfo.picture.clone()
+                    }
+                }
+            }
+            _ => userinfo.picture.clone(),
+        }
+    } else {
+        None
+    };
+
     // Upsert user and create session
     let user = state
         .auth
-        .upsert_user(userinfo.email, userinfo.name, userinfo.picture)
+        .upsert_user(userinfo.email, userinfo.name, stored_image)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
