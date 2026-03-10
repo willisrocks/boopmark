@@ -78,9 +78,12 @@ This service encapsulates the scrape-then-enrich flow that currently lives in `w
 
 Define `SuggestionResult` struct (with `Serialize` derive for JSON responses) and `EnrichmentService` struct. The service has a single public method `suggest(user_id, url, existing_tags) -> SuggestionResult` that:
 
-1. Scrapes metadata via `MetadataExtractor::extract(url)` (skipping if URL is blank)
-2. Attempts LLM enrichment via `try_llm_enrich` (checking settings, building `EnrichmentInput`, calling `LlmEnricher::enrich`)
-3. Merges results: LLM takes priority over scrape for title/description/tags; image_url and domain come from scrape only
+1. Returns an all-`None`/empty-vec `SuggestionResult` immediately if the URL is blank (matching current page handler behavior at line 266-270)
+2. Scrapes metadata via `MetadataExtractor::extract(url)`, logging and continuing on failure
+3. Attempts LLM enrichment via `try_llm_enrich` (checking settings, building `EnrichmentInput`, calling `LlmEnricher::enrich`)
+4. Merges results: LLM takes priority over scrape for title/description/tags; image_url and domain come from scrape only
+
+**Important design property:** `suggest()` is infallible — it returns `SuggestionResult`, not `Result<SuggestionResult, _>`. Scrape failures and LLM failures are logged but swallowed, returning partial or empty results. This matches the existing page handler behavior where enrichment is best-effort and never blocks the user flow.
 
 The `SuggestionResult` fields:
 ```rust
@@ -684,7 +687,7 @@ const updateResp = await freshPage.evaluate(async ({ key, id }) => {
     return { status: response.status, body: await response.json() };
 }, { key: apiKey, id: bookmarkId });
 ```
-Assert: status is 200, returned bookmark has `id` matching `bookmarkId`. The title from the original create is preserved (since the update body didn't set it, and `suggest` fills in only `None` fields — but note: the update body sends `{}` so all fields are `None` in the `UpdateBookmark`, meaning suggest will fill them all). Assert the response has valid structure.
+Assert: status is 200, returned bookmark has `id` matching `bookmarkId`. Note: the update body is `{}`, so all fields in `UpdateBookmark` deserialize as `None`. When `?suggest=true` is set, the handler fills `None` fields from enrichment results (scrape and/or LLM). The original bookmark's title is NOT preserved by this call — it gets overwritten with whatever enrichment returns (which may be the same value if scraping the same URL). This test verifies the `?suggest=true` update pathway works end-to-end; assert the response has valid structure (`id`, `url`, `tags` array).
 
 **Test 6: All new endpoints return 401 without auth**
 
@@ -714,12 +717,14 @@ Write Playwright E2E tests that build the CLI binary and exercise it against the
 
 The CLI E2E tests need an API key and the server URL. The approach: sign in via E2E auth, create an API key via the settings UI, capture it, then use Node's `child_process.execSync` to run the `boop` CLI binary.
 
-Before the test suite, build the CLI:
+Build the CLI once before all tests using `test.beforeAll`:
 ```javascript
 const { execSync } = require("child_process");
-// Build CLI once before tests
-execSync("cargo build -p boop", { stdio: "inherit" });
 const BOOP = "./target/debug/boop";
+
+test.beforeAll(async () => {
+    execSync("cargo build -p boop", { stdio: "inherit" });
+});
 ```
 
 Helper to run boop with config. **Important:** On macOS, `dirs::config_dir()` returns `$HOME/Library/Application Support`. Set `HOME` to a temp directory so the CLI writes its config there. Place the config file at `<tempdir>/Library/Application Support/boop/config.toml`:
