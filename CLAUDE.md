@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Run all tests:** `cargo test`
 - **Run server:** `cargo run -p boopmark-server`
 - **Run CLI:** `cargo run -p boop`
-- **Local dev stack:** `docker compose up`
+- **Local dev stack:** `devproxy up` (NOT `docker compose up` — always use devproxy)
 - **Run suggest E2E:** `npx playwright test tests/e2e/suggest.spec.js`
 
 ## Testing Notes
@@ -28,6 +28,8 @@ When Google OAuth isn't available (e.g. behind devproxy), enable local username/
 This is for development only — do not use in production.
 
 ## Local HTTPS (devproxy)
+
+**IMPORTANT:** Always use `devproxy up` instead of `docker compose up`. devproxy manages the Docker Compose stack and adds HTTPS proxying. Running `docker compose up` directly will conflict with devproxy-managed containers. Use `docker exec` on devproxy-managed containers (e.g. `docker exec <container> psql ...`) instead of expecting tools like `psql` to be installed locally.
 
 This project uses [devproxy](https://github.com/foundra-build/devproxy) for local HTTPS dev subdomains.
 
