@@ -1,8 +1,8 @@
 # API & CLI LLM Enrichment — Implementation Plan
 
-**Goal:** Add LLM-powered bookmark enrichment (title, description, tags) to the REST API and CLI, matching the web app's existing capability.
+**Goal:** Add LLM-powered bookmark enrichment (title, description, tags) to the REST API and CLI, matching the web app's existing capability. Include full E2E test coverage for both API and CLI.
 
-**Architecture:** Extract the enrichment logic currently inlined in `web/pages/bookmarks.rs` (`try_llm_enrich` function, lines 304-334) into a new app-layer `EnrichmentService`. Both page handlers and API handlers call this service. The API auto-enriches on create when the user has LLM enabled and fields are missing. The API enriches on update when `?suggest=true` is passed. A new `POST /api/v1/bookmarks/suggest` endpoint returns suggestions without saving. The CLI gains an `edit` command with `--suggest`, and the `add` command gains `--description` and richer output.
+**Architecture:** Extract the enrichment logic currently inlined in `web/pages/bookmarks.rs` (`try_llm_enrich` function, lines 304-334) into a new app-layer `EnrichmentService`. Both page handlers and API handlers call this service. The API auto-enriches on create when the user has LLM enabled and fields are missing. The API enriches on update when `?suggest=true` is passed. A new `POST /api/v1/bookmarks/suggest` endpoint returns suggestions without saving. The CLI gains `edit` and `suggest` commands, and the `add` command gains `--description` and richer output.
 
 ---
 
@@ -32,6 +32,10 @@
 
 **Rationale:** Currently in `main.rs`, `metadata` is moved into `BookmarkService::new()`. `EnrichmentService` also needs it. The fix is simple: clone `metadata` before the `BookmarkService` construction. Both `Local` and `S3` branches need this change.
 
+### D7: E2E tests use Playwright following the existing api-keys.spec.js pattern
+
+**Rationale:** The codebase already has Playwright E2E tests that exercise the REST API via `page.evaluate(async () => fetch(...))` (see `tests/e2e/api-keys.spec.js`). API enrichment E2E tests follow this same pattern: sign in via E2E auth, create an API key, then call the enrichment endpoints with Bearer auth from a fresh browser context. CLI E2E tests build the CLI binary and shell out to it pointed at the E2E server.
+
 ---
 
 ## File Structure
@@ -45,6 +49,8 @@
 | Modify | `server/src/web/api/bookmarks.rs` | Add suggest endpoint, enrich on create, optional enrich on update |
 | Modify | `server/src/web/pages/bookmarks.rs` | Replace inline `try_llm_enrich` with calls to `EnrichmentService` |
 | Modify | `cli/src/main.rs` | Add `edit` command with `--suggest` flag, add `--description` to `add`, add `suggest` command, richer output |
+| Create | `tests/e2e/api-enrichment.spec.js` | E2E tests for API enrichment endpoints |
+| Create | `tests/e2e/cli-enrichment.spec.js` | E2E tests for CLI enrichment commands |
 
 ---
 
@@ -129,20 +135,7 @@ Add necessary imports: `use crate::app::enrichment::EnrichmentService;`
 
 **Critical detail:** `metadata` is currently moved into `BookmarkService::new()` on both the `Local` and `S3` branches. We need to clone it first for `EnrichmentService`.
 
-In both the `StorageBackend::Local` and `StorageBackend::S3` match arms:
-- Before creating `BookmarkService::new(db.clone(), metadata, storage)`, clone metadata: `let metadata_for_enrichment = metadata.clone();`
-- Then pass `metadata` (owned) into `BookmarkService` as before.
-
-After the match block (where `enricher` is created on line 101), create `EnrichmentService`:
-```rust
-let enrichment_service = Arc::new(EnrichmentService::new(
-    metadata_for_enrichment,
-    enricher.clone(),
-    settings_service.clone(),
-));
-```
-
-**Wait — `metadata_for_enrichment` is created inside the match arms but `EnrichmentService` is created after them.** Solution: move `metadata_for_enrichment` out by declaring it before the match and assigning inside each arm. Or simpler: clone metadata before the match:
+Clone metadata before the match block:
 
 ```rust
 let metadata = Arc::new(HtmlMetadataExtractor::new());
@@ -153,7 +146,14 @@ let (bookmarks, images_storage) = match config.storage_backend {
 };
 ```
 
-Then construct `EnrichmentService` using `metadata_for_enrichment`.
+After the match block (where `enricher` is created on line 101), create `EnrichmentService`:
+```rust
+let enrichment_service = Arc::new(EnrichmentService::new(
+    metadata_for_enrichment,
+    enricher.clone(),
+    settings_service.clone(),
+));
+```
 
 Update the `AppState` struct literal:
 - Add `enrichment: enrichment_service,`
@@ -281,7 +281,7 @@ async fn create_bookmark(
 }
 ```
 
-**Note on double-scrape avoidance:** `EnrichmentService.suggest()` already scrapes metadata internally. `BookmarkService::create()` also scrapes via `needs_metadata()`. After enrichment fills in title/description/domain, `BookmarkService::create` will still see `image_url` as `None` if the scrape found an image (since `SuggestionResult.image_url` comes from the scrape but gets set on `input.image_url` in the enrichment merge above). Wait — actually the code above does set `input.image_url = suggestions.image_url`, so `BookmarkService::create`'s `needs_metadata()` check should short-circuit if all fields are filled. The only case where `BookmarkService` still scrapes is if enrichment found no image. This is acceptable — the duplicate scrape is harmless and the code is cleaner than threading scrape results through.
+**Note on double-scrape:** `EnrichmentService.suggest()` scrapes metadata internally. `BookmarkService::create()` also has a `needs_metadata()` check that scrapes. After enrichment fills in title/description/domain/image_url, the service-layer check should see all fields filled and skip its own scrape. The only case where `BookmarkService` still scrapes is if enrichment found nothing (e.g., LLM disabled and scrape failed). This is acceptable and the code is clean.
 
 ### Step 3.3: Optional enrich on `update_bookmark`
 
@@ -411,9 +411,14 @@ struct UpdateBookmarkRequest {
 }
 ```
 
-### Step 4.6: Add `SuggestResponse` struct for CLI deserialization
+### Step 4.6: Add `SuggestRequest` and `SuggestResponse` structs for CLI
 
 ```rust
+#[derive(Serialize)]
+struct SuggestRequest {
+    url: String,
+}
+
 #[allow(dead_code)]
 #[derive(Deserialize)]
 struct SuggestResponse {
@@ -503,7 +508,7 @@ Commands::Edit { id, title, description, tags, suggest } => {
 ```rust
 Commands::Suggest { url } => {
     let client = AppConfig::load().client()?;
-    let body = serde_json::json!({ "url": url });
+    let body = SuggestRequest { url };
     let resp = client.post_json("/bookmarks/suggest", &body).await?;
     if resp.status().is_success() {
         let s: SuggestResponse = resp.json().await.map_err(|e| e.to_string())?;
@@ -560,46 +565,194 @@ Run: `cargo test -p boop`
 
 ---
 
-## Task 5: Full integration verification
+## Task 5: API E2E Tests
 
-### Step 5.1: Full build
+Write Playwright E2E tests for the new API enrichment endpoints. Follow the existing pattern from `tests/e2e/api-keys.spec.js`: sign in via E2E auth, create an API key, then call the API with Bearer auth.
+
+**Files:**
+- Create: `tests/e2e/api-enrichment.spec.js`
+
+### Step 5.1: Create `tests/e2e/api-enrichment.spec.js`
+
+The test file should include the following tests. All tests that call API endpoints requiring auth must first sign in via E2E auth, create an API key via the settings UI, capture the raw key value, and use it as a Bearer token in `fetch()` calls from a fresh browser context (no session cookie, bearer only).
+
+**Test 1: POST /api/v1/bookmarks/suggest returns enrichment data**
+
+Sign in, create an API key, then from a fresh browser context:
+```javascript
+const resp = await fetch("/api/v1/bookmarks/suggest", {
+    method: "POST",
+    headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ url: "https://github.com/danshapiro/trycycle" }),
+});
+```
+Assert: status is 200, response body has `title` (string or null), `description`, `tags` (array), `image_url`, `domain`. At minimum, `domain` should be `"github.com"` from scraping (this works even without LLM configured).
+
+**Test 2: POST /api/v1/bookmarks creates a bookmark with auto-enrichment**
+
+Create a bookmark with only the URL, no title/description/tags:
+```javascript
+const resp = await fetch("/api/v1/bookmarks", {
+    method: "POST",
+    headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ url: "https://github.com/danshapiro/trycycle" }),
+});
+```
+Assert: status is 201, response body has a `title` or `description` that is non-null (auto-enriched from scraping at minimum). Assert that `domain` is `"github.com"`.
+
+**Test 3: POST /api/v1/bookmarks preserves client-provided fields**
+
+Create a bookmark with all fields pre-populated:
+```javascript
+const resp = await fetch("/api/v1/bookmarks", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+        url: "https://example.com",
+        title: "My Title",
+        description: "My Description",
+        tags: ["tag1", "tag2"],
+    }),
+});
+```
+Assert: status is 201, returned `title` is `"My Title"`, `description` is `"My Description"`, `tags` contains `"tag1"` and `"tag2"`.
+
+**Test 4: PUT /api/v1/bookmarks/{id} normal update (no suggest)**
+
+Create a bookmark, then update its title:
+```javascript
+const updateResp = await fetch(`/api/v1/bookmarks/${id}`, {
+    method: "PUT",
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "Updated Title" }),
+});
+```
+Assert: status is 200, returned `title` is `"Updated Title"`.
+
+**Test 5: PUT /api/v1/bookmarks/{id}?suggest=true enriches missing fields**
+
+Create a bookmark with a real URL and a title but no description, then update with `?suggest=true` and no body fields:
+```javascript
+const updateResp = await fetch(`/api/v1/bookmarks/${id}?suggest=true`, {
+    method: "PUT",
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+});
+```
+Assert: status is 200, returned bookmark has enriched fields (at minimum `title` is non-null from original create, and `description` is non-null from enrichment).
+
+**Test 6: All new endpoints return 401 without auth**
+
+```javascript
+const suggestResp = await fetch("/api/v1/bookmarks/suggest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: "https://example.com" }),
+});
+expect(suggestResp.status).toBe(401);
+```
+
+### Step 5.2: Run API E2E tests
+
+Run: `npx playwright test tests/e2e/api-enrichment.spec.js`
+Expected: All tests pass.
+
+---
+
+## Task 6: CLI E2E Tests
+
+Write Playwright E2E tests that build the CLI binary and exercise it against the E2E server. Follow the same E2E infrastructure (the Playwright webServer boots the server on port 4010).
+
+**Files:**
+- Create: `tests/e2e/cli-enrichment.spec.js`
+
+### Step 6.1: Create `tests/e2e/cli-enrichment.spec.js`
+
+The CLI E2E tests need an API key and the server URL. The approach: sign in via E2E auth, create an API key via the settings UI, capture it, then use Node's `child_process.execSync` to run the `boop` CLI binary.
+
+Before the test suite, build the CLI:
+```javascript
+const { execSync } = require("child_process");
+// Build CLI once before tests
+execSync("cargo build -p boop", { stdio: "inherit" });
+const BOOP = "./target/debug/boop";
+```
+
+Helper to run boop with config:
+```javascript
+function runBoop(args, apiKey) {
+    const env = {
+        ...process.env,
+        // boop reads config from file, so we use env vars or create a temp config
+    };
+    // Create a temp config dir for the test
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "boop-e2e-"));
+    const configPath = path.join(configDir, "config.toml");
+    fs.writeFileSync(configPath, `server_url = "http://127.0.0.1:4010"\napi_key = "${apiKey}"\n`);
+    env.XDG_CONFIG_HOME = configDir; // or set HOME to control config location
+
+    return execSync(`${BOOP} ${args}`, { env, encoding: "utf-8", timeout: 30000 });
+}
+```
+
+Note: The CLI uses `dirs::config_dir()` which on macOS reads `$HOME/Library/Application Support`. To isolate the test, set `HOME` to a temp directory so `dirs::config_dir()` returns a writable temp path. Then place the config at `boop/config.toml` under that path.
+
+**Test 1: `boop add` creates a bookmark and shows enriched output**
+
+```javascript
+const output = runBoop('add "https://github.com/danshapiro/trycycle"', apiKey);
+expect(output).toContain("Added:");
+expect(output).toContain("("); // contains UUID in parens
+```
+
+**Test 2: `boop suggest` returns enrichment suggestions**
+
+```javascript
+const output = runBoop('suggest "https://github.com/danshapiro/trycycle"', apiKey);
+expect(output).toMatch(/Domain: github\.com/);
+```
+
+**Test 3: `boop edit` with `--suggest` updates a bookmark**
+
+First create a bookmark via API, capture its ID, then:
+```javascript
+const output = runBoop(`edit ${bookmarkId} --suggest`, apiKey);
+expect(output).toContain("Updated:");
+```
+
+**Test 4: `boop edit` with explicit fields**
+
+```javascript
+const output = runBoop(`edit ${bookmarkId} --title "New Title" --description "New Desc"`, apiKey);
+expect(output).toContain("Updated: New Title");
+```
+
+### Step 6.2: Run CLI E2E tests
+
+Run: `npx playwright test tests/e2e/cli-enrichment.spec.js`
+Expected: All tests pass.
+
+---
+
+## Task 7: Full integration verification
+
+### Step 7.1: Full build
 
 Run: `cargo build`
 Expected: Clean build, no warnings.
 
-### Step 5.2: Full test suite
+### Step 7.2: Full test suite
 
 Run: `cargo test`
 Expected: All tests pass.
 
-### Step 5.3: E2E test
+### Step 7.3: Run all E2E tests
 
-Run: `npx playwright test tests/e2e/suggest.spec.js`
-Expected: Existing E2E suggest test still passes (page handler behavior unchanged).
-
----
-
-## Testing Strategy Notes
-
-The following tests should be validated during implementation:
-
-### API E2E tests (to be written as integration tests or Playwright tests)
-
-1. **POST /api/v1/bookmarks/suggest** — returns enrichment suggestions for a URL
-2. **POST /api/v1/bookmarks** (create) — auto-enriches when fields are missing and user has LLM configured
-3. **POST /api/v1/bookmarks** (create) — does NOT enrich when all fields are provided
-4. **PUT /api/v1/bookmarks/{id}** — normal update without suggest works as before
-5. **PUT /api/v1/bookmarks/{id}?suggest=true** — enriches missing fields with LLM suggestions
-6. **All endpoints** — return 401 without auth
-
-### CLI tests
-
-1. `boop edit <id> --suggest` parses correctly
-2. `boop edit <id> --title "foo"` parses correctly (suggest=false)
-3. `boop suggest <url>` parses correctly
-4. `boop add <url> --description "desc"` parses correctly
-
-### Existing tests
-
-1. `cargo test` — all existing unit tests pass
-2. `npx playwright test tests/e2e/suggest.spec.js` — existing E2E test passes (page handler behavior unchanged)
+Run: `npx playwright test`
+Expected: All E2E tests pass, including the existing `suggest.spec.js` (page handler behavior unchanged), the new `api-enrichment.spec.js`, and `cli-enrichment.spec.js`.
