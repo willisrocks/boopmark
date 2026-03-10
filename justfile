@@ -56,3 +56,16 @@ add-user *ARGS:
 deploy:
     just css-build
     fly deploy
+
+# Run install script tests
+test-install:
+    sh tests/test_install.sh
+
+# Format check (CI)
+fmt-check:
+    cargo fmt -- --check
+
+# Run clippy
+check:
+    cargo clippy -p boop --all-targets -- -D warnings
+    cargo test -p boop

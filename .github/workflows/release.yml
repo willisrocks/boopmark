@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 0.1.0)'
+        required: true
+        type: string
+
+concurrency:
+  group: "release"
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate version format
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if ! echo "${RELEASE_VERSION}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Error: version '${RELEASE_VERSION}' does not match semver format (e.g., 0.1.0)" >&2
+            exit 1
+          fi
+
+      - name: Check tag does not already exist
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/v${RELEASE_VERSION}$"; then
+            echo "Error: tag v${RELEASE_VERSION} already exists" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Set CLI version from release input
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          sed -i.bak '1,/^version = ".*"/{s/^version = ".*"/version = "'"${RELEASE_VERSION}"'"/;}' cli/Cargo.toml && rm -f cli/Cargo.toml.bak
+          cargo update -p boop
+
+      - name: Run tests
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo test -p boop
+
+      - name: Install cross (Linux cross-compile)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo install cross --version 0.2.5
+
+      - name: Build (native)
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo build --release -p boop --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cross build --release -p boop --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: cp target/${{ matrix.target }}/release/boop boop-${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boop-${{ matrix.target }}
+          path: boop-${{ matrix.target }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare and verify binaries
+        run: |
+          mkdir -p release
+          for dir in artifacts/boop-*/; do
+            cp "$dir"boop-* release/
+          done
+          chmod +x release/*
+          EXPECTED_COUNT=4
+          ACTUAL_COUNT=$(ls release/ | wc -l | tr -d ' ')
+          if [ "$ACTUAL_COUNT" -ne "$EXPECTED_COUNT" ]; then
+            echo "Error: expected $EXPECTED_COUNT binaries but found $ACTUAL_COUNT" >&2
+            ls -la release/
+            exit 1
+          fi
+          ls -la release/
+
+      - name: Re-check tag does not exist
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/v${RELEASE_VERSION}$"; then
+            echo "Error: tag v${RELEASE_VERSION} was created since validation (concurrent release?)" >&2
+            exit 1
+          fi
+
+      - name: Create tag
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${RELEASE_VERSION}" -m "Release v${RELEASE_VERSION}"
+          git push origin "v${RELEASE_VERSION}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          gh release create "v${RELEASE_VERSION}" \
+            --title "v${RELEASE_VERSION}" \
+            --generate-notes \
+            release/*
