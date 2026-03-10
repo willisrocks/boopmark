@@ -2,7 +2,7 @@
 
 **Goal:** Add LLM-powered bookmark enrichment (title, description, tags) to the REST API and CLI, matching the web app's existing capability. Include full E2E test coverage for both API and CLI.
 
-**Architecture:** Extract the enrichment logic currently inlined in `web/pages/bookmarks.rs` (`try_llm_enrich` function, lines 304-334) into a new app-layer `EnrichmentService`. Both page handlers and API handlers call this service. The API auto-enriches on create when the user has LLM enabled and fields are missing. The API enriches on update when `?suggest=true` is passed. A new `POST /api/v1/bookmarks/suggest` endpoint returns suggestions without saving. The CLI gains `edit` and `suggest` commands, and the `add` command gains `--description` and richer output.
+**Architecture:** Extract the enrichment logic currently inlined in `web/pages/bookmarks.rs` (`try_llm_enrich` function, lines 304-334) into a new app-layer `EnrichmentService`. Both page handlers and API handlers call this service. A new `POST /api/v1/bookmarks/suggest` endpoint returns suggestions without saving. Create and update endpoints support opt-in enrichment via `?suggest=true`. The CLI gains `edit` and `suggest` commands, and the `add` command gains `--description`, `--suggest`, and richer output.
 
 ---
 
@@ -20,9 +20,9 @@
 
 **Rationale:** After `EnrichmentService` is wired in, nothing else in the codebase accesses `state.enricher` directly. Keeping it would create two paths to the same functionality. Removing it enforces a single entry point for enrichment.
 
-### D4: Auto-enrich on API create is opt-out (automatic when user has LLM configured)
+### D4: API enrichment is opt-in via `?suggest=true` on create and update
 
-**Rationale:** This matches the web app behavior — the suggest flow fires on URL blur. API users get the same benefit automatically. If the user hasn't configured an LLM API key, `EnrichmentService.suggest()` gracefully returns scrape-only results (no error). Users who send all fields pre-populated will skip enrichment because the condition `input.title.is_none() || input.description.is_none() || input.tags.as_ref().map_or(true, |t| t.is_empty())` won't be true.
+**Rationale:** The web app triggers enrichment as an explicit user action (suggest button on URL blur), not automatically on save. The API should follow the same pattern: enrichment is opt-in via `?suggest=true` query parameter on both `POST /api/v1/bookmarks` and `PUT /api/v1/bookmarks/{id}`. This avoids adding unexpected latency to simple create/update calls (scraping + potential LLM round-trip), gives API consumers explicit control, and is consistent with the web app's separation of suggest-from-save. Without `?suggest=true`, create and update behave exactly as they do today — `BookmarkService` still scrapes metadata for missing fields as its default behavior, but the LLM enrichment step is skipped.
 
 ### D5: The `Bookmarks` enum and `with_bookmarks!` macro approach stays as-is
 
@@ -36,6 +36,18 @@
 
 **Rationale:** The codebase already has Playwright E2E tests that exercise the REST API via `page.evaluate(async () => fetch(...))` (see `tests/e2e/api-keys.spec.js`). API enrichment E2E tests follow this same pattern: sign in via E2E auth, create an API key, then call the enrichment endpoints with Bearer auth from a fresh browser context. CLI E2E tests build the CLI binary and shell out to it pointed at the E2E server.
 
+### D8: E2E tests use the E2E server URL as the test bookmark URL
+
+**Rationale:** Using external URLs (e.g., `https://github.com/...`) in E2E tests introduces network dependency and flakiness. The E2E server at `http://127.0.0.1:4010` is guaranteed to be running (Playwright starts it) and returns HTML that the scraper can extract metadata from. For tests that need a URL to enrich, use `http://127.0.0.1:4010/` — the scraper will extract whatever title/meta tags the login page contains. For tests that need predictable field values, provide all fields explicitly and assert they are preserved.
+
+### D9: `SuggestionResult` serves as the API response type directly
+
+**Rationale:** `SuggestionResult` already derives `Serialize`. Defining a separate `SuggestResponse` type in the API handler with identical fields is unnecessary duplication. The API handler returns `Json(result)` directly.
+
+### D10: `UpdateBookmark` does not include `image_url` or `domain`
+
+**Rationale:** The domain type `UpdateBookmark` only has `title`, `description`, and `tags` fields. When `?suggest=true` is passed on update, enrichment can only fill these three fields. `image_url` and `domain` are set at create time and not updateable. This matches the existing web app behavior where the edit modal only shows title, description, and tags.
+
 ---
 
 ## File Structure
@@ -46,9 +58,9 @@
 | Modify | `server/src/app/mod.rs` | Export new `enrichment` module |
 | Modify | `server/src/web/state.rs` | Add `EnrichmentService` to `AppState`, remove `enricher` field |
 | Modify | `server/src/main.rs` | Wire `EnrichmentService` into `AppState`, clone `metadata` before `BookmarkService`, stop passing `enricher` directly |
-| Modify | `server/src/web/api/bookmarks.rs` | Add suggest endpoint, enrich on create, optional enrich on update |
+| Modify | `server/src/web/api/bookmarks.rs` | Add suggest endpoint, opt-in enrich on create and update |
 | Modify | `server/src/web/pages/bookmarks.rs` | Replace inline `try_llm_enrich` with calls to `EnrichmentService` |
-| Modify | `cli/src/main.rs` | Add `edit` command with `--suggest` flag, add `--description` to `add`, add `suggest` command, richer output |
+| Modify | `cli/src/main.rs` | Add `edit` command with `--suggest` flag, add `--description` and `--suggest` to `add`, add `suggest` command, richer output |
 | Create | `tests/e2e/api-enrichment.spec.js` | E2E tests for API enrichment endpoints |
 | Create | `tests/e2e/cli-enrichment.spec.js` | E2E tests for CLI enrichment commands |
 
@@ -72,6 +84,7 @@ Define `SuggestionResult` struct (with `Serialize` derive for JSON responses) an
 
 The `SuggestionResult` fields:
 ```rust
+#[derive(Serialize)]
 pub struct SuggestionResult {
     pub title: Option<String>,
     pub description: Option<String>,
@@ -203,24 +216,15 @@ All existing tests must pass. The page handlers now delegate to `EnrichmentServi
 
 ### Step 3.1: Add `POST /api/v1/bookmarks/suggest` endpoint
 
-Add request/response types:
+Add request type:
 ```rust
 #[derive(Deserialize)]
 struct SuggestRequest {
     url: String,
 }
-
-#[derive(Serialize)]
-struct SuggestResponse {
-    title: Option<String>,
-    description: Option<String>,
-    tags: Vec<String>,
-    image_url: Option<String>,
-    domain: Option<String>,
-}
 ```
 
-Add handler:
+Add handler (uses `SuggestionResult` from `enrichment.rs` directly as the JSON response — see D9):
 ```rust
 async fn suggest(
     AuthUser(user): AuthUser,
@@ -228,33 +232,38 @@ async fn suggest(
     Json(input): Json<SuggestRequest>,
 ) -> impl IntoResponse {
     let result = state.enrichment.suggest(user.id, &input.url, None).await;
-    Json(SuggestResponse {
-        title: result.title,
-        description: result.description,
-        tags: result.tags,
-        image_url: result.image_url,
-        domain: result.domain,
-    })
+    Json(result)
 }
 ```
+
+Add import: `use crate::app::enrichment::SuggestionResult;` (for type awareness, though not explicitly used in handler signature since it returns `impl IntoResponse`).
 
 Register route in `routes()`:
 ```rust
 .route("/suggest", post(suggest))
 ```
 
-### Step 3.2: Auto-enrich on `create_bookmark`
+### Step 3.2: Opt-in enrich on `create_bookmark`
 
-Modify the existing `create_bookmark` handler. Before calling `with_bookmarks!`, check if fields are missing and enrich:
+Add query params struct:
+```rust
+#[derive(Debug, Deserialize)]
+struct CreateParams {
+    suggest: Option<bool>,
+}
+```
+
+Modify the existing `create_bookmark` handler. When `?suggest=true` is passed, call `EnrichmentService` to fill missing fields before creating:
 
 ```rust
 async fn create_bookmark(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
+    Query(params): Query<CreateParams>,
     Json(mut input): Json<CreateBookmark>,
 ) -> impl IntoResponse {
-    // Auto-enrich missing fields if user has LLM enabled
-    if input.title.is_none() || input.description.is_none() || input.tags.as_ref().map_or(true, |t| t.is_empty()) {
+    // Enrich missing fields when explicitly requested via ?suggest=true
+    if params.suggest.unwrap_or(false) {
         let suggestions = state.enrichment.suggest(user.id, &input.url, None).await;
         if input.title.is_none() {
             input.title = suggestions.title;
@@ -281,7 +290,9 @@ async fn create_bookmark(
 }
 ```
 
-**Note on double-scrape:** `EnrichmentService.suggest()` scrapes metadata internally. `BookmarkService::create()` also has a `needs_metadata()` check that scrapes. After enrichment fills in title/description/domain/image_url, the service-layer check should see all fields filled and skip its own scrape. The only case where `BookmarkService` still scrapes is if enrichment found nothing (e.g., LLM disabled and scrape failed). This is acceptable and the code is clean.
+**Note on double-scrape when `?suggest=true`:** `EnrichmentService.suggest()` scrapes metadata internally. `BookmarkService::create()` also has a `needs_metadata()` check that scrapes. After enrichment fills in title/description/domain/image_url, the service-layer check should see all fields filled and skip its own scrape. The only case where `BookmarkService` still scrapes is if enrichment found nothing (e.g., LLM disabled and scrape failed). This is acceptable.
+
+**Note on create without `?suggest=true`:** The existing `BookmarkService::create()` already scrapes metadata for missing title/description/domain/image_url as part of its `needs_metadata()` logic. So even without `?suggest=true`, basic scrape-based metadata filling still happens — the `?suggest=true` flag adds LLM enrichment on top.
 
 ### Step 3.3: Optional enrich on `update_bookmark`
 
@@ -317,6 +328,7 @@ async fn update_bookmark(
                 if input.description.is_none() {
                     input.description = suggestions.description;
                 }
+                // Note: image_url and domain are not fields on UpdateBookmark (see D10)
                 if input.tags.as_ref().map_or(true, |t| t.is_empty()) && !suggestions.tags.is_empty() {
                     input.tags = Some(suggestions.tags);
                 }
@@ -344,7 +356,7 @@ Run: `cargo test`
 **Files:**
 - Modify: `cli/src/main.rs`
 
-### Step 4.1: Add `--description` to `Add` command
+### Step 4.1: Add `--description` and `--suggest` to `Add` command
 
 ```rust
 Add {
@@ -355,6 +367,9 @@ Add {
     description: Option<String>,
     #[arg(long)]
     tags: Option<String>,
+    /// Use LLM to suggest missing title, description, and tags
+    #[arg(long)]
+    suggest: bool,
 },
 ```
 
@@ -450,14 +465,15 @@ async fn put_json(
 
 ### Step 4.8: Update `Add` handler
 
-Update to accept `description`, include it in `CreateBookmarkRequest`, and show richer output:
+Update to accept `description` and `suggest`, include them in `CreateBookmarkRequest`, append `?suggest=true` when requested, and show richer output:
 
 ```rust
-Commands::Add { url, title, description, tags } => {
+Commands::Add { url, title, description, tags, suggest } => {
     let client = AppConfig::load().client()?;
     let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
     let body = CreateBookmarkRequest { url, title, description, tags };
-    let resp = client.post_json("/bookmarks", &body).await?;
+    let path = if suggest { "/bookmarks?suggest=true" } else { "/bookmarks" };
+    let resp = client.post_json(path, &body).await?;
     if resp.status().is_success() {
         let bm: Bookmark = resp.json().await.map_err(|e| e.to_string())?;
         println!("Added: {} ({})", bm.title.unwrap_or(bm.url), bm.id);
@@ -557,6 +573,12 @@ fn test_cli_add_with_description() {
     let cli = Cli::try_parse_from(["boop", "add", "https://example.com", "--description", "A test"]).unwrap();
     assert!(matches!(cli.command, Commands::Add { .. }));
 }
+
+#[test]
+fn test_cli_add_with_suggest() {
+    let cli = Cli::try_parse_from(["boop", "add", "https://example.com", "--suggest"]).unwrap();
+    assert!(matches!(cli.command, Commands::Add { suggest: true, .. }));
+}
 ```
 
 ### Step 4.12: Verify CLI compilation and tests
@@ -576,50 +598,61 @@ Write Playwright E2E tests for the new API enrichment endpoints. Follow the exis
 
 The test file should include the following tests. All tests that call API endpoints requiring auth must first sign in via E2E auth, create an API key via the settings UI, capture the raw key value, and use it as a Bearer token in `fetch()` calls from a fresh browser context (no session cookie, bearer only).
 
+Extract shared helpers into a `beforeEach` or helper function that signs in, deletes existing API keys, creates a fresh key, captures the raw value, and provides it to the test. Follow the exact pattern from `tests/e2e/api-keys.spec.js` for the sign-in and key creation flow.
+
 **Test 1: POST /api/v1/bookmarks/suggest returns enrichment data**
 
 Sign in, create an API key, then from a fresh browser context:
 ```javascript
-const resp = await fetch("/api/v1/bookmarks/suggest", {
-    method: "POST",
-    headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ url: "https://github.com/danshapiro/trycycle" }),
-});
+const resp = await freshPage.evaluate(async (key) => {
+    const response = await fetch("/api/v1/bookmarks/suggest", {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${key}`,
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ url: "http://127.0.0.1:4010/" }),
+    });
+    return { status: response.status, body: await response.json() };
+}, apiKey);
 ```
-Assert: status is 200, response body has `title` (string or null), `description`, `tags` (array), `image_url`, `domain`. At minimum, `domain` should be `"github.com"` from scraping (this works even without LLM configured).
+Assert: status is 200, response body has `title` (string or null), `description` (string or null), `tags` (array), `image_url` (string or null), `domain` (string or null). Assert structural correctness — the E2E server's HTML may or may not have `<title>` or meta tags, so don't assert specific values. Assert `tags` is an array (may be empty without LLM configured).
 
-**Test 2: POST /api/v1/bookmarks creates a bookmark with auto-enrichment**
+**Test 2: POST /api/v1/bookmarks?suggest=true creates a bookmark with enrichment**
 
-Create a bookmark with only the URL, no title/description/tags:
+Create a bookmark with only the URL, requesting enrichment:
 ```javascript
-const resp = await fetch("/api/v1/bookmarks", {
-    method: "POST",
-    headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ url: "https://github.com/danshapiro/trycycle" }),
-});
+const resp = await freshPage.evaluate(async (key) => {
+    const response = await fetch("/api/v1/bookmarks?suggest=true", {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${key}`,
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ url: "http://127.0.0.1:4010/" }),
+    });
+    return { status: response.status, body: await response.json() };
+}, apiKey);
 ```
-Assert: status is 201, response body has a `title` or `description` that is non-null (auto-enriched from scraping at minimum). Assert that `domain` is `"github.com"`.
+Assert: status is 201, response body has `id` (UUID), `url` is `"http://127.0.0.1:4010/"`. The bookmark was created successfully.
 
-**Test 3: POST /api/v1/bookmarks preserves client-provided fields**
+**Test 3: POST /api/v1/bookmarks preserves client-provided fields (no suggest)**
 
-Create a bookmark with all fields pre-populated:
+Create a bookmark with all fields pre-populated, no `?suggest=true`:
 ```javascript
-const resp = await fetch("/api/v1/bookmarks", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-        url: "https://example.com",
-        title: "My Title",
-        description: "My Description",
-        tags: ["tag1", "tag2"],
-    }),
-});
+const resp = await freshPage.evaluate(async (key) => {
+    const response = await fetch("/api/v1/bookmarks", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+            url: "https://example.com/test-preserve",
+            title: "My Title",
+            description: "My Description",
+            tags: ["tag1", "tag2"],
+        }),
+    });
+    return { status: response.status, body: await response.json() };
+}, apiKey);
 ```
 Assert: status is 201, returned `title` is `"My Title"`, `description` is `"My Description"`, `tags` contains `"tag1"` and `"tag2"`.
 
@@ -627,35 +660,40 @@ Assert: status is 201, returned `title` is `"My Title"`, `description` is `"My D
 
 Create a bookmark, then update its title:
 ```javascript
-const updateResp = await fetch(`/api/v1/bookmarks/${id}`, {
-    method: "PUT",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ title: "Updated Title" }),
-});
+const updateResp = await freshPage.evaluate(async ({ key, id }) => {
+    const response = await fetch(`/api/v1/bookmarks/${id}`, {
+        method: "PUT",
+        headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Updated Title" }),
+    });
+    return { status: response.status, body: await response.json() };
+}, { key: apiKey, id: bookmarkId });
 ```
 Assert: status is 200, returned `title` is `"Updated Title"`.
 
 **Test 5: PUT /api/v1/bookmarks/{id}?suggest=true enriches missing fields**
 
-Create a bookmark with a real URL and a title but no description, then update with `?suggest=true` and no body fields:
+Create a bookmark with a title but no description, then update with `?suggest=true` and empty body:
 ```javascript
-const updateResp = await fetch(`/api/v1/bookmarks/${id}?suggest=true`, {
-    method: "PUT",
-    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-});
+const updateResp = await freshPage.evaluate(async ({ key, id }) => {
+    const response = await fetch(`/api/v1/bookmarks/${id}?suggest=true`, {
+        method: "PUT",
+        headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+    });
+    return { status: response.status, body: await response.json() };
+}, { key: apiKey, id: bookmarkId });
 ```
-Assert: status is 200, returned bookmark has enriched fields (at minimum `title` is non-null from original create, and `description` is non-null from enrichment).
+Assert: status is 200, returned bookmark has `id` matching `bookmarkId`. The title from the original create is preserved (since the update body didn't set it, and `suggest` fills in only `None` fields — but note: the update body sends `{}` so all fields are `None` in the `UpdateBookmark`, meaning suggest will fill them all). Assert the response has valid structure.
 
 **Test 6: All new endpoints return 401 without auth**
 
 ```javascript
-const suggestResp = await fetch("/api/v1/bookmarks/suggest", {
-    method: "POST",
+const suggestResp = await request.post("/api/v1/bookmarks/suggest", {
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url: "https://example.com" }),
+    data: { url: "https://example.com" },
 });
-expect(suggestResp.status).toBe(401);
+expect(suggestResp.status()).toBe(401);
 ```
 
 ### Step 5.2: Run API E2E tests
@@ -684,43 +722,48 @@ execSync("cargo build -p boop", { stdio: "inherit" });
 const BOOP = "./target/debug/boop";
 ```
 
-Helper to run boop with config:
-```javascript
-function runBoop(args, apiKey) {
-    const env = {
-        ...process.env,
-        // boop reads config from file, so we use env vars or create a temp config
-    };
-    // Create a temp config dir for the test
-    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "boop-e2e-"));
-    const configPath = path.join(configDir, "config.toml");
-    fs.writeFileSync(configPath, `server_url = "http://127.0.0.1:4010"\napi_key = "${apiKey}"\n`);
-    env.XDG_CONFIG_HOME = configDir; // or set HOME to control config location
+Helper to run boop with config. **Important:** On macOS, `dirs::config_dir()` returns `$HOME/Library/Application Support`. Set `HOME` to a temp directory so the CLI writes its config there. Place the config file at `<tempdir>/Library/Application Support/boop/config.toml`:
 
+```javascript
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+
+function runBoop(args, apiKey) {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "boop-e2e-"));
+    // dirs::config_dir() on macOS = $HOME/Library/Application Support
+    const configDir = path.join(tempHome, "Library", "Application Support", "boop");
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+        path.join(configDir, "config.toml"),
+        `server_url = "http://127.0.0.1:4010"\napi_key = "${apiKey}"\n`
+    );
+
+    const env = { ...process.env, HOME: tempHome };
     return execSync(`${BOOP} ${args}`, { env, encoding: "utf-8", timeout: 30000 });
 }
 ```
 
-Note: The CLI uses `dirs::config_dir()` which on macOS reads `$HOME/Library/Application Support`. To isolate the test, set `HOME` to a temp directory so `dirs::config_dir()` returns a writable temp path. Then place the config at `boop/config.toml` under that path.
-
-**Test 1: `boop add` creates a bookmark and shows enriched output**
+**Test 1: `boop add` creates a bookmark and shows output**
 
 ```javascript
-const output = runBoop('add "https://github.com/danshapiro/trycycle"', apiKey);
+const output = runBoop('add "https://example.com/cli-test-1"', apiKey);
 expect(output).toContain("Added:");
 expect(output).toContain("("); // contains UUID in parens
 ```
 
-**Test 2: `boop suggest` returns enrichment suggestions**
+**Test 2: `boop suggest` returns suggestions**
 
 ```javascript
-const output = runBoop('suggest "https://github.com/danshapiro/trycycle"', apiKey);
-expect(output).toMatch(/Domain: github\.com/);
+const output = runBoop('suggest "http://127.0.0.1:4010/"', apiKey);
+// Without LLM configured, at minimum the output should not error.
+// The suggest endpoint returns 200 even with no LLM; scrape results vary.
+expect(output).toBeDefined();
 ```
 
 **Test 3: `boop edit` with `--suggest` updates a bookmark**
 
-First create a bookmark via API, capture its ID, then:
+First create a bookmark via API (using `page.evaluate` and Bearer token), capture its ID, then:
 ```javascript
 const output = runBoop(`edit ${bookmarkId} --suggest`, apiKey);
 expect(output).toContain("Updated:");
@@ -731,6 +774,13 @@ expect(output).toContain("Updated:");
 ```javascript
 const output = runBoop(`edit ${bookmarkId} --title "New Title" --description "New Desc"`, apiKey);
 expect(output).toContain("Updated: New Title");
+```
+
+**Test 5: `boop add --suggest` creates with enrichment**
+
+```javascript
+const output = runBoop('add "http://127.0.0.1:4010/" --suggest', apiKey);
+expect(output).toContain("Added:");
 ```
 
 ### Step 6.2: Run CLI E2E tests
