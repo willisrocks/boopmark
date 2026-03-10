@@ -179,13 +179,14 @@ created_key: Option<String>,
 
 Note: The `ApiKeyView` intentionally does NOT include a `prefix` field. The `key_hash` in the database is a SHA-256 hex digest of the original key, not the key itself. There is no way to recover a meaningful prefix from it. The UI will show only the key name and creation date.
 
-Add `created_key` query param support:
+Extend the **existing** `SettingsQuery` struct (at line 39-42 of `settings.rs`) by adding a `created_key` field. Do NOT create a new struct — one already exists with `saved: Option<String>`:
 
 ```rust
+// Modify the existing SettingsQuery — add the created_key field:
 #[derive(Deserialize, Default)]
 struct SettingsQuery {
     saved: Option<String>,
-    created_key: Option<String>,
+    created_key: Option<String>,  // <-- add this line
 }
 ```
 
@@ -419,14 +420,35 @@ git commit -m "feat(api): add JSON error middleware for all API routes"
 
 ---
 
-### Task 5: Enhance the CLI with update, get, tags, global output format, and improved error handling
+### Task 5: Enhance the CLI with update, get, tags, global output format, config dir override, and improved error handling
 
-The CLI has basic add/list/search/delete. Add: `get`, `update`, `tags`, a global `--output` flag (json/plain), and improve error handling. This task combines all CLI feature work into a single step to avoid wasteful intermediate states.
+The CLI has basic add/list/search/delete. Add: `get`, `update`, `tags`, a global `--output` flag (json/plain), a `BOOP_CONFIG_DIR` env var override for the config directory, and improve error handling. This task combines all CLI feature work into a single step to avoid wasteful intermediate states.
 
 **Files:**
 - Modify: `cli/src/main.rs`
 
-**Step 1: Add global output format and new commands**
+**Step 1: Add global output format, config dir override, and new commands**
+
+First, update `AppConfig::path()` to respect the `BOOP_CONFIG_DIR` environment variable. On macOS, `dirs::config_dir()` returns `$HOME/Library/Application Support` and does NOT respect `XDG_CONFIG_HOME`. Agents, CI, and E2E tests need a way to point the CLI at an arbitrary config location:
+
+```rust
+impl AppConfig {
+    fn path() -> PathBuf {
+        let dir = if let Ok(custom) = std::env::var("BOOP_CONFIG_DIR") {
+            PathBuf::from(custom)
+        } else {
+            dirs::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("boop")
+        };
+        std::fs::create_dir_all(&dir).ok();
+        dir.join("config.toml")
+    }
+    // ... rest unchanged
+}
+```
+
+Then add the global output format flag:
 
 ```rust
 #[derive(Parser)]
@@ -851,7 +873,7 @@ let apiKey;
 // Helper: run the boop CLI binary with the isolated config dir
 function boop(...args) {
   return execFileSync(BOOP, args, {
-    env: { ...process.env, XDG_CONFIG_HOME: configDir },
+    env: { ...process.env, BOOP_CONFIG_DIR: configDir },
     encoding: "utf-8",
     timeout: 30_000,
   });
@@ -861,7 +883,7 @@ function boop(...args) {
 function boopFails(...args) {
   try {
     execFileSync(BOOP, args, {
-      env: { ...process.env, XDG_CONFIG_HOME: configDir },
+      env: { ...process.env, BOOP_CONFIG_DIR: configDir },
       encoding: "utf-8",
       timeout: 30_000,
     });
