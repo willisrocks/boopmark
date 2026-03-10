@@ -226,28 +226,43 @@ const MAX_AVATAR_BYTES: u64 = 5 * 1024 * 1024;
 const AVATAR_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Recognized image formats with their magic bytes.
-/// Returns the format name (used as file extension) if bytes match a known image format.
-fn detect_image_format(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.len() < 6 {
+/// Returns `(extension, mime_type)` if bytes match a known image format.
+fn detect_image_format(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.len() < 3 {
         return None;
     }
-    // JPEG: FF D8 FF
+    // JPEG: FF D8 FF (3 bytes)
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return Some("jpg");
+        return Some(("jpg", "image/jpeg"));
     }
-    // PNG: 89 50 4E 47
-    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        return Some("png");
+    // PNG: 89 50 4E 47 (4 bytes)
+    if bytes.len() >= 4 && bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        return Some(("png", "image/png"));
     }
-    // GIF: GIF87a or GIF89a (must check full 6-byte signature)
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return Some("gif");
+    // GIF: GIF87a or GIF89a (6 bytes)
+    if bytes.len() >= 6 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        return Some(("gif", "image/gif"));
     }
-    // WebP: RIFF....WEBP
+    // WebP: RIFF....WEBP (12 bytes)
     if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        return Some("webp");
+        return Some(("webp", "image/webp"));
     }
     None
+}
+
+/// Allowed Google domains for avatar image URLs.
+const ALLOWED_AVATAR_HOSTS: &[&str] = &[".googleusercontent.com", ".google.com"];
+
+/// Check that a URL's host belongs to a known Google domain.
+fn is_allowed_avatar_host(url_str: &str) -> bool {
+    url::Url::parse(url_str)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+        .is_some_and(|host| {
+            ALLOWED_AVATAR_HOSTS
+                .iter()
+                .any(|suffix| host.ends_with(suffix) || host == suffix.trim_start_matches('.'))
+        })
 }
 
 /// Download a Google avatar image, validate it, and store it in the images bucket.
@@ -261,9 +276,13 @@ async fn download_and_store_avatar(
     client: &reqwest::Client,
     state: &AppState,
 ) -> Option<String> {
-    // Only allow HTTPS URLs to prevent SSRF via redirects to internal HTTP endpoints
+    // Only allow HTTPS URLs from known Google domains to prevent SSRF
     if !picture_url.starts_with("https://") {
         tracing::warn!("Rejecting non-HTTPS avatar URL: {picture_url}");
+        return None;
+    }
+    if !is_allowed_avatar_host(picture_url) {
+        tracing::warn!("Rejecting avatar URL from non-Google domain: {picture_url}");
         return None;
     }
 
@@ -300,13 +319,6 @@ async fn download_and_store_avatar(
         }
     }
 
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
-
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
@@ -321,9 +333,9 @@ async fn download_and_store_avatar(
         return None;
     }
 
-    // Validate magic bytes and derive the file extension from actual content,
-    // not the Content-Type header (which could be wrong or misleading)
-    let ext = match detect_image_format(&bytes) {
+    // Validate magic bytes and derive both the file extension and content type
+    // from actual content, not the HTTP Content-Type header (which could mismatch)
+    let (ext, content_type) = match detect_image_format(&bytes) {
         Some(fmt) => fmt,
         None => {
             tracing::warn!("Avatar response does not look like a valid image, skipping");
@@ -335,7 +347,7 @@ async fn download_and_store_avatar(
 
     match state
         .images_storage
-        .put(&key, bytes.to_vec(), &content_type)
+        .put(&key, bytes.to_vec(), content_type)
         .await
     {
         Ok(url) => Some(url),
@@ -362,24 +374,38 @@ mod tests {
     #[test]
     fn detect_image_format_identifies_jpeg() {
         let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
-        assert_eq!(detect_image_format(&jpeg), Some("jpg"));
+        assert_eq!(detect_image_format(&jpeg), Some(("jpg", "image/jpeg")));
+    }
+
+    #[test]
+    fn detect_image_format_identifies_jpeg_minimal_3_bytes() {
+        // JPEG only needs 3 magic bytes
+        assert_eq!(
+            detect_image_format(&[0xFF, 0xD8, 0xFF]),
+            Some(("jpg", "image/jpeg"))
+        );
     }
 
     #[test]
     fn detect_image_format_identifies_png() {
         let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-        assert_eq!(detect_image_format(&png), Some("png"));
+        assert_eq!(detect_image_format(&png), Some(("png", "image/png")));
     }
 
     #[test]
     fn detect_image_format_identifies_gif() {
-        assert_eq!(detect_image_format(b"GIF89a..."), Some("gif"));
-        assert_eq!(detect_image_format(b"GIF87a..."), Some("gif"));
+        assert_eq!(
+            detect_image_format(b"GIF89a..."),
+            Some(("gif", "image/gif"))
+        );
+        assert_eq!(
+            detect_image_format(b"GIF87a..."),
+            Some(("gif", "image/gif"))
+        );
     }
 
     #[test]
     fn detect_image_format_rejects_invalid_gif_version() {
-        // GIF80a is not a valid GIF version
         assert_eq!(detect_image_format(b"GIF80a..."), None);
     }
 
@@ -388,7 +414,7 @@ mod tests {
         let mut webp = vec![0u8; 12];
         webp[..4].copy_from_slice(b"RIFF");
         webp[8..12].copy_from_slice(b"WEBP");
-        assert_eq!(detect_image_format(&webp), Some("webp"));
+        assert_eq!(detect_image_format(&webp), Some(("webp", "image/webp")));
     }
 
     #[test]
@@ -397,8 +423,32 @@ mod tests {
     }
 
     #[test]
-    fn detect_image_format_rejects_short_input() {
-        assert_eq!(detect_image_format(&[0xFF, 0xD8, 0xFF]), None);
+    fn detect_image_format_rejects_too_short() {
+        assert_eq!(detect_image_format(&[0xFF, 0xD8]), None);
         assert_eq!(detect_image_format(&[]), None);
+    }
+
+    #[test]
+    fn is_allowed_avatar_host_accepts_google_domains() {
+        assert!(is_allowed_avatar_host(
+            "https://lh3.googleusercontent.com/a/photo.jpg"
+        ));
+        assert!(is_allowed_avatar_host(
+            "https://www.google.com/images/photo.jpg"
+        ));
+        assert!(is_allowed_avatar_host(
+            "https://googleusercontent.com/photo.jpg"
+        ));
+    }
+
+    #[test]
+    fn is_allowed_avatar_host_rejects_non_google_domains() {
+        assert!(!is_allowed_avatar_host("https://evil.com/photo.jpg"));
+        assert!(!is_allowed_avatar_host(
+            "https://fakegoogleusercontent.com/photo.jpg"
+        ));
+        assert!(!is_allowed_avatar_host(
+            "https://evil.com/googleusercontent.com"
+        ));
     }
 }
