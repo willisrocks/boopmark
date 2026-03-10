@@ -4,14 +4,14 @@
 
 **Goal:** Add local HTTPS dev subdomains via devproxy so the app is accessible over HTTPS during development.
 
-**Architecture:** The app server (`boopmark-server`) already has a Dockerfile and listens on port 4000. We need to add it as a service in `docker-compose.yml` with the `devproxy.port` label, then document the setup. The server requires several env vars (`DATABASE_URL`, `SESSION_SECRET`, `LLM_SETTINGS_ENCRYPTION_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) that will panic on startup if missing. We provide sensible dev defaults for all of them inline in the `environment:` block, then layer `.env` on top (with `required: false`) so real credentials override when present.
+**Architecture:** The app server (`boopmark-server`) already has a Dockerfile and listens on port 4000. We need to add it as a service in `docker-compose.yml` with the `devproxy.port` label, then document the setup. The server requires several env vars (`DATABASE_URL`, `SESSION_SECRET`, `LLM_SETTINGS_ENCRYPTION_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) that will panic on startup if missing. Credentials come from `.env` via `env_file`; only container-network overrides (`DATABASE_URL`, `S3_ENDPOINT`) go in the `environment:` block.
 
 **Tech Stack:** Docker Compose, devproxy, Rust/Axum (existing), Playwright MCP (verification)
 
 **Design decisions:**
 - The `server` service is added to `docker-compose.yml` so `docker compose up` starts the full stack (db, minio, server). This is the primary workflow for devproxy and production-like testing.
-- All required env vars get dev-safe defaults in the `environment:` block so `docker compose up` works without `.env`. The `.env.example` values are used as defaults. When `.env` exists, `env_file` loads it first, then `environment:` overrides any vars that need container-specific values (Compose precedence: `environment:` wins over `env_file`).
-- Container-network overrides (`DATABASE_URL` using `db:5432`, `S3_ENDPOINT` using `minio:9000`) must go in `environment:` since they must differ from host-side values in `.env`. These override whatever `.env` provides.
+- Only vars that must differ between host and container go in the `environment:` block (`DATABASE_URL`, `S3_ENDPOINT`). All other required vars (`SESSION_SECRET`, `LLM_SETTINGS_ENCRYPTION_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) come from `.env` via `env_file`. If `.env` is missing (`required: false`), the server panics with a clear message naming the missing var, which is better than silently using dummy credentials that break OAuth.
+- The `db` service gets a healthcheck (`pg_isready`), and the server uses `depends_on: db: condition: service_healthy` so it doesn't start before Postgres is accepting connections.
 - The README documents both workflows: full Docker (`docker compose up`) and hybrid (`docker compose up db minio` + `cargo run`). The hybrid workflow is for developers who want faster iteration without Docker rebuilds.
 
 ---
@@ -23,7 +23,27 @@
 
 **Step 1: Add the `server` service with devproxy label**
 
-Add a `server` service that builds from the existing `Dockerfile`, depends on `db` and `minio`, and has the `devproxy.port` label. All five required env vars get dev-safe defaults in the `environment:` block (values taken from `.env.example`). Container-network overrides for `DATABASE_URL` and `S3_ENDPOINT` use compose service hostnames. The `env_file` with `required: false` lets `.env` supply real credentials when present without erroring when absent.
+First, add a healthcheck to the existing `db` service so the server can wait for Postgres readiness:
+
+```yaml
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: boopmark
+      POSTGRES_USER: boopmark
+      POSTGRES_PASSWORD: devpassword
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U boopmark"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+```
+
+Then add the `server` service. Only container-network overrides go in `environment:` (`DATABASE_URL`, `S3_ENDPOINT`). All other required vars come from `.env` via `env_file`. The `env_file` uses `required: false` so compose doesn't error when `.env` is absent — instead the server panics with a clear message naming the missing var.
 
 ```yaml
   server:
@@ -33,28 +53,26 @@ Add a `server` service that builds from the existing `Dockerfile`, depends on `d
         required: false
     environment:
       DATABASE_URL: postgres://boopmark:devpassword@db:5432/boopmark
-      SESSION_SECRET: change-me-in-production
-      LLM_SETTINGS_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
-      GOOGLE_CLIENT_ID: your-google-client-id
-      GOOGLE_CLIENT_SECRET: your-google-client-secret
       S3_ENDPOINT: http://minio:9000
     ports:
       - "4000:4000"
     labels:
       - "devproxy.port=4000"
     depends_on:
-      - db
-      - minio
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_started
     volumes:
       - ./uploads:/app/uploads
 ```
 
 Key points:
-- All five required env vars (`DATABASE_URL`, `SESSION_SECRET`, `LLM_SETTINGS_ENCRYPTION_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) have dev-safe defaults in the `environment:` block. This means `docker compose up` works immediately without `.env`.
-- `env_file` with `required: false` loads `.env` when present. Since `environment:` takes precedence over `env_file` in Compose, any var listed in both places uses the `environment:` value. This is correct for `DATABASE_URL` and `S3_ENDPOINT` (which must use container hostnames), but means `.env` values for `SESSION_SECRET` etc. won't override the defaults. This is fine for dev — production deployments don't use this compose file.
-- `DATABASE_URL` uses `db:5432` (compose service name + container-internal port, not the host-mapped `5434`).
-- `S3_ENDPOINT` uses `minio:9000` (compose service name) instead of `localhost:9000`. Without this, S3 operations would fail inside the container because `localhost` refers to the container itself.
-- `depends_on` includes both `db` and `minio` so the server doesn't start before its dependencies are ready.
+- Only `DATABASE_URL` and `S3_ENDPOINT` are in `environment:` because these must use compose service hostnames (`db`, `minio`) instead of `localhost`. Since `environment:` takes precedence over `env_file`, these always use the container-network values regardless of what `.env` says.
+- All other required vars (`SESSION_SECRET`, `LLM_SETTINGS_ENCRYPTION_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) come exclusively from `.env` via `env_file`. This means a developer's real Google OAuth credentials in `.env` are used as-is, not overridden by dummy values.
+- If `.env` is missing, the server will panic with a clear error like `SESSION_SECRET required`. This is better than silently using dummy credentials that break OAuth.
+- The `db` service has a healthcheck using `pg_isready`. The server uses `depends_on: db: condition: service_healthy` so it waits for Postgres to accept connections before starting. Without this, the server would panic on `Failed to connect to database` during Postgres initialization.
+- `depends_on: minio: condition: service_started` ensures MinIO's container is running (MinIO starts fast, so a healthcheck is not necessary).
 - `devproxy.port=4000` tells devproxy which container port to proxy.
 - The `uploads` volume mount ensures local storage works inside the container.
 
