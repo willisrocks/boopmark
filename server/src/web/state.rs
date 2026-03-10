@@ -72,3 +72,56 @@ impl ObjectStorage for ImageStorage {
         }
     }
 }
+
+impl ImageStorage {
+    /// Extract the storage key from a full public URL produced by this storage.
+    /// Returns `None` if the URL does not match this storage's prefix.
+    pub fn key_from_url(&self, url: &str) -> Option<String> {
+        // public_url("") gives us the prefix with a trailing separator
+        let prefix = self.public_url("");
+        url.strip_prefix(prefix.trim_end_matches('/'))
+            .map(|rest| rest.trim_start_matches('/').to_string())
+            .filter(|key| !key.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_from_url_extracts_key_from_local_url() {
+        let storage = ImageStorage::Local(LocalStorage::new(
+            "./uploads/images".into(),
+            "http://localhost:4000/uploads/images".to_string(),
+        ));
+        assert_eq!(
+            storage.key_from_url("http://localhost:4000/uploads/images/avatars/abc.jpg"),
+            Some("avatars/abc.jpg".to_string()),
+        );
+    }
+
+    #[test]
+    fn key_from_url_returns_none_for_foreign_url() {
+        let storage = ImageStorage::Local(LocalStorage::new(
+            "./uploads/images".into(),
+            "http://localhost:4000/uploads/images".to_string(),
+        ));
+        assert_eq!(
+            storage.key_from_url("https://lh3.googleusercontent.com/photo.jpg"),
+            None,
+        );
+    }
+
+    #[test]
+    fn key_from_url_returns_none_for_empty_key() {
+        let storage = ImageStorage::Local(LocalStorage::new(
+            "./uploads/images".into(),
+            "http://localhost:4000/uploads/images".to_string(),
+        ));
+        assert_eq!(
+            storage.key_from_url("http://localhost:4000/uploads/images/"),
+            None,
+        );
+    }
+}

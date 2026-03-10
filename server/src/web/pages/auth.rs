@@ -96,53 +96,37 @@ async fn google_callback(
 
     // Download and cache avatar image
     let stored_image = if let Some(ref picture_url) = userinfo.picture {
-        match client.get(picture_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let content_type = resp
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("image/jpeg")
-                    .to_string();
-                match resp.bytes().await {
-                    Ok(bytes) => {
-                        let ext = match content_type.split(';').next().unwrap_or("").trim() {
-                            "image/png" => "png",
-                            "image/gif" => "gif",
-                            "image/webp" => "webp",
-                            _ => "jpg",
-                        };
-                        let key = format!("avatars/{}.{}", uuid::Uuid::new_v4(), ext);
-                        match state
-                            .images_storage
-                            .put(&key, bytes.to_vec(), &content_type)
-                            .await
-                        {
-                            Ok(url) => Some(url),
-                            Err(e) => {
-                                tracing::warn!("Failed to store avatar: {e}");
-                                userinfo.picture.clone()
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read avatar bytes: {e}");
-                        userinfo.picture.clone()
-                    }
-                }
-            }
-            _ => userinfo.picture.clone(),
-        }
+        download_and_store_avatar(picture_url, &state).await
     } else {
         None
     };
 
+    // Look up the user's current avatar so we can clean up the old one after upsert
+    let old_avatar_url = state
+        .auth
+        .find_user_by_email(&userinfo.email)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|u| u.image);
+
     // Upsert user and create session
     let user = state
         .auth
-        .upsert_user(userinfo.email, userinfo.name, stored_image)
+        .upsert_user(userinfo.email, userinfo.name, stored_image.clone())
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Clean up old avatar from storage if it was replaced
+    if let Some(ref old_url) = old_avatar_url {
+        if stored_image.as_ref() != Some(old_url) {
+            if let Some(old_key) = state.images_storage.key_from_url(old_url) {
+                if let Err(e) = state.images_storage.delete(&old_key).await {
+                    tracing::warn!("Failed to delete old avatar {old_key}: {e}");
+                }
+            }
+        }
+    }
 
     let session_token = state
         .auth
@@ -220,6 +204,113 @@ fn urlencoding(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
+/// Maximum avatar image size: 5 MB.
+const MAX_AVATAR_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Download timeout for avatar fetch.
+const AVATAR_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// JPEG, PNG, GIF, and WebP magic bytes for content validation.
+fn looks_like_image(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+    // JPEG: FF D8 FF
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return true;
+    }
+    // PNG: 89 50 4E 47
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        return true;
+    }
+    // GIF: GIF87a or GIF89a
+    if bytes.starts_with(b"GIF8") {
+        return true;
+    }
+    // WebP: RIFF....WEBP
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return true;
+    }
+    false
+}
+
+/// Download a Google avatar image, validate it, and store it in the images bucket.
+/// Returns `None` on any failure (graceful degradation — the Google URL is not stored
+/// as a fallback because we want to avoid hotlinking).
+async fn download_and_store_avatar(picture_url: &str, state: &AppState) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(AVATAR_DOWNLOAD_TIMEOUT)
+        .build()
+        .ok()?;
+
+    let resp = match client.get(picture_url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            tracing::warn!("Avatar download returned status {}", r.status());
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("Avatar download failed: {e}");
+            return None;
+        }
+    };
+
+    // Check Content-Length before reading the body
+    if let Some(len) = resp.content_length() {
+        if len > MAX_AVATAR_BYTES {
+            tracing::warn!("Avatar too large ({len} bytes), skipping");
+            return None;
+        }
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Failed to read avatar bytes: {e}");
+            return None;
+        }
+    };
+
+    // Enforce size limit even if Content-Length was absent or wrong
+    if bytes.len() as u64 > MAX_AVATAR_BYTES {
+        tracing::warn!("Avatar too large ({} bytes), skipping", bytes.len());
+        return None;
+    }
+
+    // Validate magic bytes to confirm the response is actually an image
+    if !looks_like_image(&bytes) {
+        tracing::warn!("Avatar response does not look like a valid image, skipping");
+        return None;
+    }
+
+    let ext = match content_type.split(';').next().unwrap_or("").trim() {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "jpg",
+    };
+    let key = format!("avatars/{}.{}", uuid::Uuid::new_v4(), ext);
+
+    match state
+        .images_storage
+        .put(&key, bytes.to_vec(), &content_type)
+        .await
+    {
+        Ok(url) => Some(url),
+        Err(e) => {
+            tracing::warn!("Failed to store avatar: {e}");
+            None
+        }
+    }
+}
+
 fn build_session_cookie(config: &crate::config::Config, token: String) -> Cookie<'static> {
     Cookie::build(("session", token))
         .path("/")
@@ -227,4 +318,46 @@ fn build_session_cookie(config: &crate::config::Config, token: String) -> Cookie
         .secure(config.app_url.starts_with("https://"))
         .same_site(axum_extra::extract::cookie::SameSite::Lax)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_image_detects_jpeg() {
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        assert!(looks_like_image(&jpeg));
+    }
+
+    #[test]
+    fn looks_like_image_detects_png() {
+        let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        assert!(looks_like_image(&png));
+    }
+
+    #[test]
+    fn looks_like_image_detects_gif() {
+        assert!(looks_like_image(b"GIF89a..."));
+        assert!(looks_like_image(b"GIF87a..."));
+    }
+
+    #[test]
+    fn looks_like_image_detects_webp() {
+        let mut webp = vec![0u8; 12];
+        webp[..4].copy_from_slice(b"RIFF");
+        webp[8..12].copy_from_slice(b"WEBP");
+        assert!(looks_like_image(&webp));
+    }
+
+    #[test]
+    fn looks_like_image_rejects_html() {
+        assert!(!looks_like_image(b"<html>"));
+    }
+
+    #[test]
+    fn looks_like_image_rejects_short_input() {
+        assert!(!looks_like_image(&[0xFF, 0xD8]));
+        assert!(!looks_like_image(&[]));
+    }
 }

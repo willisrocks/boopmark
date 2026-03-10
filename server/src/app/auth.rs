@@ -29,6 +29,10 @@ where
         }
     }
 
+    pub async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, DomainError> {
+        self.users.find_by_email(email).await
+    }
+
     pub async fn upsert_user(
         &self,
         email: String,
