@@ -320,41 +320,101 @@ git commit -m "feat(settings): add API key management UI"
 
 ---
 
-### Task 4: Improve the API error responses
+### Task 4: Add JSON error middleware for API routes
 
-Currently the API auth endpoint returns bare status codes on error. Make all API endpoints return consistent JSON error bodies `{"error": "message"}` and return `401` with a JSON body when the `AuthUser` extractor rejects an unauthenticated request.
+Currently the `AuthUser` extractor returns a bare `401` status code with no body. This is fine for the HTMX web pages (which redirect to login), but API consumers — especially agents and CLI tools — need a JSON body like `{"error": "unauthorized"}` to provide good error messages. The same applies to any other bare status code responses from the API layer.
+
+The `AuthUser` extractor is shared between page routes and API routes, so we cannot change its rejection type without breaking pages. Instead, add a response-transforming middleware layer on the `/api/v1` nest that intercepts any response with an error status code and an empty body, and replaces the body with a JSON error object.
 
 **Files:**
-- Modify: `server/src/web/extractors.rs`
+- Create: `server/src/web/middleware/api_error_json.rs`
+- Modify: `server/src/web/middleware/mod.rs`
+- Modify: `server/src/web/api/mod.rs`
 - Modify: `server/src/web/api/auth.rs`
 
-**Step 1: Improve AuthUser extractor rejection for JSON APIs**
+**Step 1: Create the API error JSON middleware**
 
-The current `AuthUser` extractor returns a bare `401`. For API clients, a JSON body is much better. However, since the extractor is shared with page routes, we need to be careful. The simplest approach: create a dedicated `ApiAuthUser` extractor that returns JSON errors, or keep the current approach and let API routes handle it.
+Create `server/src/web/middleware/api_error_json.rs`:
 
-Decision: Keep the current `AuthUser` returning bare `401` — this is fine for both web and API since the status code is the primary signal. API clients check status codes. The `error_response` helper in `bookmarks.rs` already provides JSON for domain errors.
+```rust
+use axum::body::Body;
+use axum::http::{Request, Response, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::IntoResponse;
+use serde_json::json;
 
-Update `server/src/web/api/auth.rs` to use JSON error bodies:
+/// Middleware that transforms bare error status code responses (4xx/5xx with
+/// empty body) into JSON `{"error": "..."}` responses. This ensures API
+/// clients always receive structured errors, even from extractors like
+/// `AuthUser` that return bare status codes.
+pub async fn json_error_layer(
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let response = next.run(request).await;
+    let status = response.status();
+
+    // Only transform error responses (4xx and 5xx)
+    if !status.is_client_error() && !status.is_server_error() {
+        return response;
+    }
+
+    // If the response already has a content-type (i.e., it already has a
+    // JSON body from error_response or similar), leave it alone.
+    if response.headers().contains_key(header::CONTENT_TYPE) {
+        return response;
+    }
+
+    // Build a JSON error body from the status code's canonical reason phrase
+    let reason = status.canonical_reason().unwrap_or("error");
+    let body = json!({"error": reason.to_lowercase()});
+    (status, axum::Json(body)).into_response()
+}
+```
+
+**Step 2: Register the middleware on the API nest**
+
+In `server/src/web/middleware/mod.rs`, add:
+
+```rust
+pub mod api_error_json;
+```
+
+In `server/src/web/api/mod.rs`, apply the middleware layer to the API router:
+
+```rust
+use axum::middleware;
+use crate::web::middleware::api_error_json::json_error_layer;
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .nest("/bookmarks", bookmarks::routes())
+        .nest("/auth", auth::routes())
+        .layer(middleware::from_fn(json_error_layer))
+}
+```
+
+**Step 3: Also clean up auth.rs error handling to use JSON**
+
+Update `server/src/web/api/auth.rs` error handling to use `Json` error bodies for domain-level errors (not just bare status codes), matching the pattern in `bookmarks.rs`:
 
 ```rust
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
 }
-
-// Use this in error handling for create/list/delete
 ```
 
-**Step 2: Verify it compiles**
+**Step 4: Verify it compiles**
 
 Run: `cargo check -p boopmark-server`
 Expected: compiles without errors
 
-**Step 3: Commit**
+**Step 5: Commit**
 
 ```bash
-git add server/src/web/api/auth.rs server/src/web/extractors.rs
-git commit -m "feat(api): consistent JSON error responses for auth endpoints"
+git add server/src/web/middleware/api_error_json.rs server/src/web/middleware/mod.rs server/src/web/api/mod.rs server/src/web/api/auth.rs
+git commit -m "feat(api): add JSON error middleware for all API routes"
 ```
 
 ---
@@ -761,206 +821,181 @@ git commit -m "test(e2e): add API key management settings UI tests"
 
 ---
 
-### Task 8: Build the CLI E2E test harness
+### Task 8: Build the CLI E2E test as a Playwright spec
 
-Create a shell-based E2E test harness that tests the CLI against a real server. The harness assumes the E2E server is already running (started by Playwright or manually via `scripts/e2e/start-server.sh`), creates an API key, then runs the pre-built CLI binary through all operations.
+Create a Playwright test spec that exercises the CLI binary against the E2E server. This approach reuses Playwright's existing `webServer` config (which starts the server via `scripts/e2e/start-server.sh`) so the CLI E2E tests have automated server lifecycle management and can run alongside the other E2E specs via `npx playwright test`.
 
-**Important:** The E2E login endpoint is `POST /auth/test-login`. The script must build the CLI binary once upfront with `cargo build -p boop` and use the resulting `target/debug/boop` binary for all assertions, avoiding the overhead of `cargo run` on each invocation.
+The test builds the CLI binary once in `beforeAll`, creates a temporary config directory, obtains an API key via the test-login endpoint, then shells out to the `boop` binary for each operation and asserts on exit codes and stdout. Uses `execFileSync` (not `exec`) with array arguments to avoid shell injection.
+
+**Important:** The E2E login endpoint is `POST /auth/test-login`. The CLI binary must be pre-built with `cargo build -p boop` to avoid repeated compilation.
 
 **Files:**
-- Create: `scripts/e2e/test-cli.sh`
+- Create: `tests/e2e/cli.spec.js`
 
-**Step 1: Write the CLI E2E test script**
+**Step 1: Write the CLI E2E Playwright spec**
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+```javascript
+const { test, expect } = require("@playwright/test");
+const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-PASS=0
-FAIL=0
+const BASE = "http://127.0.0.1:4010";
+const API = `${BASE}/api/v1`;
+const BOOP = path.resolve("target/debug/boop");
 
-assert_exit_code() {
-  local expected="$1"
-  shift
-  local actual
-  set +e
-  "$@" > /tmp/boop-test-stdout 2>/tmp/boop-test-stderr
-  actual=$?
-  set -e
-  if [ "$actual" -ne "$expected" ]; then
-    echo -e "${RED}FAIL${NC}: Expected exit code $expected, got $actual"
-    echo "  Command: $*"
-    echo "  stdout: $(cat /tmp/boop-test-stdout)"
-    echo "  stderr: $(cat /tmp/boop-test-stderr)"
-    FAIL=$((FAIL + 1))
-    return 1
-  fi
-  PASS=$((PASS + 1))
-  return 0
+let configDir;
+let apiKey;
+
+// Helper: run the boop CLI binary with the isolated config dir
+function boop(...args) {
+  return execFileSync(BOOP, args, {
+    env: { ...process.env, XDG_CONFIG_HOME: configDir },
+    encoding: "utf-8",
+    timeout: 30_000,
+  });
 }
 
-assert_output_contains() {
-  local pattern="$1"
-  if ! grep -q "$pattern" /tmp/boop-test-stdout; then
-    echo -e "${RED}FAIL${NC}: Output does not contain '$pattern'"
-    echo "  stdout: $(cat /tmp/boop-test-stdout)"
-    FAIL=$((FAIL + 1))
-    return 1
-  fi
-  PASS=$((PASS + 1))
-  return 0
+// Helper: run boop and expect it to fail (non-zero exit)
+function boopFails(...args) {
+  try {
+    execFileSync(BOOP, args, {
+      env: { ...process.env, XDG_CONFIG_HOME: configDir },
+      encoding: "utf-8",
+      timeout: 30_000,
+    });
+    throw new Error("Expected boop to fail but it succeeded: boop " + args.join(" "));
+  } catch (err) {
+    if (err.status === undefined || err.status === null) throw err;
+    return { stderr: err.stderr || "", stdout: err.stdout || "", exitCode: err.status };
+  }
 }
 
-assert_json_field() {
-  local field="$1"
-  local expected="$2"
-  local actual
-  actual=$(cat /tmp/boop-test-stdout | python3 -c "import sys,json; print(json.load(sys.stdin)$field)" 2>/dev/null || echo "PARSE_ERROR")
-  if [ "$actual" != "$expected" ]; then
-    echo -e "${RED}FAIL${NC}: JSON field $field expected '$expected', got '$actual'"
-    FAIL=$((FAIL + 1))
-    return 1
-  fi
-  PASS=$((PASS + 1))
-  return 0
+// Helper: get session cookie via test-login
+async function getSessionCookie(request) {
+  const resp = await request.post(`${BASE}/auth/test-login`, {
+    maxRedirects: 0,
+  });
+  expect([200, 302]).toContain(resp.status());
+  const cookies = resp.headers()["set-cookie"];
+  expect(cookies).toBeTruthy();
+  const match = cookies.match(/session=([^;]+)/);
+  expect(match).toBeTruthy();
+  return match[1];
 }
 
-SERVER_URL="http://127.0.0.1:4010"
+test.describe("CLI E2E", () => {
+  test.beforeAll(async ({ request }) => {
+    // Build the CLI binary
+    execFileSync("cargo", ["build", "-p", "boop"], {
+      encoding: "utf-8",
+      timeout: 120_000,
+    });
 
-# Build the CLI binary once upfront
-echo "Building CLI binary..."
-cargo build -p boop
-BOOP="./target/debug/boop"
+    // Create isolated config directory
+    configDir = fs.mkdtempSync(path.join(os.tmpdir(), "boop-e2e-"));
 
-# Use an isolated config directory so we don't clobber the user's real config
-CONFIG_DIR=$(mktemp -d)
-export XDG_CONFIG_HOME="$CONFIG_DIR"
+    // Get an API key
+    const sessionCookie = await getSessionCookie(request);
+    const resp = await request.post(`${API}/auth/keys`, {
+      headers: { Cookie: `session=${sessionCookie}` },
+      data: { name: "cli-e2e" },
+    });
+    expect(resp.status()).toBe(201);
+    const body = await resp.json();
+    apiKey = body.key;
 
-echo "=== Boopmark CLI E2E Tests ==="
-echo ""
+    // Configure the CLI
+    boop("config", "set-server", BASE);
+    boop("config", "set-key", apiKey);
+  });
 
-# Step 1: Get an API key via the E2E test-login endpoint
-# /auth/test-login returns a 302 with Set-Cookie; curl -c captures cookies from redirects
-echo "Setting up: creating API key via E2E auth..."
-COOKIE_JAR=$(mktemp)
-curl -s -L -c "$COOKIE_JAR" "${SERVER_URL}/auth/test-login" -X POST > /dev/null
-SESSION_COOKIE=$(grep session "$COOKIE_JAR" | awk '{print $NF}')
-if [ -z "$SESSION_COOKIE" ]; then
-  echo "ERROR: Failed to get session cookie from /auth/test-login"
-  exit 1
-fi
-API_KEY=$(curl -s -b "session=${SESSION_COOKIE}" "${SERVER_URL}/api/v1/auth/keys" -X POST -H "Content-Type: application/json" -d '{"name":"cli-e2e"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
-rm -f "$COOKIE_JAR"
-echo "Got API key: ${API_KEY:0:12}..."
+  test.afterAll(() => {
+    if (configDir) {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
 
-# Step 2: Configure the CLI
-echo ""
-echo "--- Config commands ---"
-assert_exit_code 0 $BOOP config set-server "$SERVER_URL"
-assert_output_contains "Server URL saved"
+  test("config show displays server and key", () => {
+    const output = boop("config", "show");
+    expect(output).toContain("Server:");
+    expect(output).toContain("API Key:");
+  });
 
-assert_exit_code 0 $BOOP config set-key "$API_KEY"
-assert_output_contains "API key saved"
+  test("full bookmark CRUD lifecycle", () => {
+    // Add
+    const addOutput = boop("add", "https://example.com/cli-test", "--title", "CLI Test", "--tags", "cli,test");
+    expect(addOutput).toContain("Added:");
 
-assert_exit_code 0 $BOOP config show
-assert_output_contains "Server:"
-assert_output_contains "API Key:"
+    // List (JSON) and extract the ID
+    const listJson = boop("--output", "json", "list");
+    const bookmarks = JSON.parse(listJson);
+    const created = bookmarks.find((b) => b.title === "CLI Test");
+    expect(created).toBeTruthy();
+    const id = created.id;
 
-# Step 3: Create a bookmark
-echo ""
-echo "--- Add command ---"
-assert_exit_code 0 $BOOP add "https://example.com/cli-test" --title "CLI Test" --tags "cli,test"
-assert_output_contains "Added:"
+    // Get
+    const getOutput = boop("get", id);
+    expect(getOutput).toContain("CLI Test");
 
-# Get the bookmark ID from JSON output
-$BOOP --output json list > /tmp/boop-test-stdout 2>/tmp/boop-test-stderr || true
-BOOKMARK_ID=$(cat /tmp/boop-test-stdout | python3 -c "import sys,json; bms=json.load(sys.stdin); print([b['id'] for b in bms if b.get('title')=='CLI Test'][0])")
+    // Get (JSON)
+    const getJson = boop("--output", "json", "get", id);
+    const fetched = JSON.parse(getJson);
+    expect(fetched.title).toBe("CLI Test");
 
-# Step 4: Get a bookmark
-echo ""
-echo "--- Get command ---"
-assert_exit_code 0 $BOOP get "$BOOKMARK_ID"
-assert_output_contains "CLI Test"
+    // Update
+    const updateOutput = boop("update", id, "--title", "Updated CLI Test", "--tags", "cli,test,updated");
+    expect(updateOutput).toContain("Updated");
 
-assert_exit_code 0 $BOOP --output json get "$BOOKMARK_ID"
-assert_json_field "['title']" "CLI Test"
+    // Verify update via JSON get
+    const updatedJson = boop("--output", "json", "get", id);
+    const updated = JSON.parse(updatedJson);
+    expect(updated.title).toBe("Updated CLI Test");
 
-# Step 5: Update a bookmark
-echo ""
-echo "--- Update command ---"
-assert_exit_code 0 $BOOP update "$BOOKMARK_ID" --title "Updated CLI Test" --tags "cli,test,updated"
-assert_output_contains "Updated"
+    // List (plain) should contain updated title
+    const listPlain = boop("list");
+    expect(listPlain).toContain("Updated CLI Test");
 
-# Verify update
-assert_exit_code 0 $BOOP --output json get "$BOOKMARK_ID"
-assert_json_field "['title']" "Updated CLI Test"
+    // Search
+    const searchOutput = boop("search", "Updated");
+    expect(searchOutput).toContain("Updated CLI Test");
 
-# Step 6: List bookmarks
-echo ""
-echo "--- List command ---"
-assert_exit_code 0 $BOOP list
-assert_output_contains "Updated CLI Test"
+    // Tags
+    const tagsOutput = boop("tags");
+    expect(tagsOutput).toContain("cli");
 
-assert_exit_code 0 $BOOP --output json list
+    // Tags (JSON)
+    const tagsJson = boop("--output", "json", "tags");
+    const tags = JSON.parse(tagsJson);
+    expect(tags.some((t) => t.name === "cli")).toBe(true);
 
-# Step 7: Search
-echo ""
-echo "--- Search command ---"
-assert_exit_code 0 $BOOP search "Updated"
-assert_output_contains "Updated CLI Test"
+    // Delete
+    const deleteOutput = boop("delete", id);
+    expect(deleteOutput).toContain("Deleted");
 
-# Step 8: Tags
-echo ""
-echo "--- Tags command ---"
-assert_exit_code 0 $BOOP tags
-assert_output_contains "cli"
+    // Verify deleted (should fail)
+    const result = boopFails("get", id);
+    expect(result.exitCode).not.toBe(0);
+  });
 
-assert_exit_code 0 $BOOP --output json tags
-
-# Step 9: Delete
-echo ""
-echo "--- Delete command ---"
-assert_exit_code 0 $BOOP delete "$BOOKMARK_ID"
-assert_output_contains "Deleted"
-
-# Verify deleted
-assert_exit_code 1 $BOOP get "$BOOKMARK_ID"
-
-# Step 10: Error handling
-echo ""
-echo "--- Error handling ---"
-assert_exit_code 1 $BOOP get "00000000-0000-0000-0000-000000000000"
-
-# Summary
-echo ""
-echo "==========================="
-echo -e "Passed: ${GREEN}${PASS}${NC}"
-echo -e "Failed: ${RED}${FAIL}${NC}"
-echo "==========================="
-
-# Cleanup
-rm -rf "$CONFIG_DIR"
-
-if [ "$FAIL" -gt 0 ]; then
-  exit 1
-fi
+  test("get nonexistent bookmark fails", () => {
+    const result = boopFails("get", "00000000-0000-0000-0000-000000000000");
+    expect(result.exitCode).not.toBe(0);
+  });
+});
 ```
 
-**Step 2: Verify script is executable**
+**Step 2: Verify it works with the Playwright runner**
 
-```bash
-chmod +x scripts/e2e/test-cli.sh
-```
+Run: `npx playwright test tests/e2e/cli.spec.js`
+Expected: Playwright starts the server via the `webServer` config, builds the CLI, runs all assertions, and reports results. This is fully automated with no manual server management.
 
 **Step 3: Commit**
 
 ```bash
-git add scripts/e2e/test-cli.sh
-git commit -m "test(e2e): add CLI E2E test harness"
+git add tests/e2e/cli.spec.js
+git commit -m "test(e2e): add CLI E2E tests as Playwright spec"
 ```
 
 ---
@@ -994,12 +1029,8 @@ Expected: All tests pass
 
 **Step 5: Run CLI E2E tests**
 
-The CLI E2E test needs the E2E server to be running. Either:
-- Start the server manually: `bash scripts/e2e/start-server.sh &` then run `bash scripts/e2e/test-cli.sh`
-- Or add a Playwright config that starts the server, then runs the shell script
-
-Run: `bash scripts/e2e/test-cli.sh` (with E2E server running)
-Expected: All tests pass
+Run: `npx playwright test tests/e2e/cli.spec.js`
+Expected: Playwright starts the E2E server automatically, builds the CLI binary, and all CLI tests pass.
 
 **Step 6: Fix any issues found and commit**
 
