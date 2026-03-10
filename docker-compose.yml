@@ -9,6 +9,11 @@ services:
       - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U boopmark"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
 
   minio:
     image: minio/minio
@@ -19,6 +24,26 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+
+  server:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://boopmark:devpassword@db:5432/boopmark
+      S3_ENDPOINT: http://minio:9000
+    ports:
+      - "4000:4000"
+    labels:
+      - "devproxy.port=4000"
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    volumes:
+      - ./uploads:/app/uploads
 
 volumes:
   pgdata:
