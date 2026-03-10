@@ -4,9 +4,14 @@
 
 **Goal:** Add local HTTPS dev subdomains via devproxy so the app is accessible over HTTPS during development.
 
-**Architecture:** The app server (`boopmark-server`) already has a Dockerfile and listens on port 4000. We need to add it as a service in `docker-compose.yml` with the `devproxy.port` label, then document the setup. The server needs DATABASE_URL, SESSION_SECRET, and other env vars from `.env`, which we pass via `env_file`.
+**Architecture:** The app server (`boopmark-server`) already has a Dockerfile and listens on port 4000. We need to add it as a service in `docker-compose.yml` with the `devproxy.port` label, then document the setup. The server needs DATABASE_URL, SESSION_SECRET, and other env vars from `.env`, which we pass via `env_file` with `required: false` so compose doesn't fail on fresh clones before `.env` is created.
 
 **Tech Stack:** Docker Compose, devproxy, Rust/Axum (existing), Playwright MCP (verification)
+
+**Design decisions:**
+- The `server` service is added to `docker-compose.yml` so `docker compose up` starts the full stack (db, minio, server). This is the primary workflow for devproxy and production-like testing.
+- `env_file` uses `required: false` so `docker compose up` doesn't error on fresh clones before `.env` exists. The server will fail at runtime if required vars are missing, which is the correct behavior (clear error message vs opaque compose startup failure).
+- The README documents both workflows: full Docker (`docker compose up`) and hybrid (`docker compose up db minio` + `cargo run`). The hybrid workflow is for developers who want faster iteration without Docker rebuilds.
 
 ---
 
@@ -17,12 +22,14 @@
 
 **Step 1: Add the `server` service with devproxy label**
 
-Add a `server` service that builds from the existing `Dockerfile`, depends on `db`, passes env vars via `env_file`, and has the `devproxy.port` label. Override `DATABASE_URL` so it points to the `db` container hostname instead of `localhost`.
+Add a `server` service that builds from the existing `Dockerfile`, depends on `db`, passes env vars via `env_file` (with `required: false`), and has the `devproxy.port` label. Override `DATABASE_URL` so it points to the `db` container hostname instead of `localhost`.
 
 ```yaml
   server:
     build: .
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgres://boopmark:devpassword@db:5432/boopmark
     ports:
@@ -36,7 +43,7 @@ Add a `server` service that builds from the existing `Dockerfile`, depends on `d
 ```
 
 Key points:
-- `env_file: .env` loads all env vars from the root `.env` file
+- `env_file` with `required: false` means compose won't error if `.env` doesn't exist yet (fresh clone). The server binary itself will error with a clear message about missing env vars.
 - The `DATABASE_URL` override uses `db` (the compose service name) as hostname and port `5432` (the container-internal port, not the host-mapped `5434`)
 - `devproxy.port=4000` tells devproxy which container port to proxy
 - The `uploads` volume mount ensures local storage works inside the container
@@ -145,6 +152,8 @@ git commit -m "docs: add devproxy and worktree setup sections to CLAUDE.md"
 
 **Step 1: Create README.md**
 
+The README documents two development workflows to avoid confusion: full Docker (all services in compose) and hybrid (infra in compose, server via cargo run for faster iteration).
+
 ```markdown
 # Boopmark
 
@@ -153,9 +162,18 @@ A full-stack bookmark management app built with Rust (Axum), HTMX, and Tailwind 
 ## Getting Started
 
 1. Copy `.env.example` to `.env` and fill in values
-2. Run `docker compose up -d` to start Postgres and MinIO
-3. Run `cargo run -p boopmark-server` to start the dev server
-4. Open `http://localhost:4000`
+2. Run `docker compose up -d` to start all services (Postgres, MinIO, and the app server)
+3. Open `http://localhost:4000`
+
+### Hybrid development (faster iteration)
+
+For faster rebuilds without Docker, run only the infrastructure services and start the server directly:
+
+1. Run `docker compose up -d db minio` to start only Postgres and MinIO
+2. Run `cargo run -p boopmark-server` to start the dev server
+3. Open `http://localhost:4000`
+
+> **Note:** Do not run both workflows at the same time — they both bind port 4000.
 
 ### Local HTTPS Dev URLs
 
