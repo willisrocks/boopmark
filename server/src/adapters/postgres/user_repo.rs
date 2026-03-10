@@ -7,7 +7,7 @@ use uuid::Uuid;
 impl UserRepository for PostgresPool {
     async fn find_by_id(&self, id: Uuid) -> Result<User, DomainError> {
         sqlx::query_as::<_, User>(
-            "SELECT id, email, name, image, created_at FROM users WHERE id = $1",
+            "SELECT id, email, name, image, password_hash, created_at FROM users WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -18,7 +18,7 @@ impl UserRepository for PostgresPool {
 
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, DomainError> {
         sqlx::query_as::<_, User>(
-            "SELECT id, email, name, image, created_at FROM users WHERE email = $1",
+            "SELECT id, email, name, image, password_hash, created_at FROM users WHERE email = $1",
         )
         .bind(email)
         .fetch_optional(&self.pool)
@@ -30,7 +30,7 @@ impl UserRepository for PostgresPool {
         sqlx::query_as::<_, User>(
             "INSERT INTO users (email, name, image) VALUES ($1, $2, $3)
              ON CONFLICT (email) DO UPDATE SET name = COALESCE($2, users.name), image = COALESCE($3, users.image)
-             RETURNING id, email, name, image, created_at",
+             RETURNING id, email, name, image, password_hash, created_at",
         )
         .bind(&input.email)
         .bind(&input.name)
@@ -39,4 +39,5 @@ impl UserRepository for PostgresPool {
         .await
         .map_err(|e| DomainError::Internal(e.to_string()))
     }
+
 }

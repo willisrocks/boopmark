@@ -17,6 +17,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - The E2E bootstrap script sets its own env inline, including `ENABLE_E2E_AUTH=1` and `STORAGE_BACKEND=local`, then waits for Postgres readiness before starting the server.
 - Use Playwright MCP or agent-browser for ad-hoc verification against the same local server, but keep the committed regression in `tests/e2e/suggest.spec.js` as the source of truth.
 
+## Local Auth (Development)
+
+When Google OAuth isn't available (e.g. behind devproxy), enable local username/password login:
+
+1. Set `ENABLE_LOCAL_AUTH=1` in `.env` (already set in `docker-compose.yml`)
+2. Create a user: `just add-user email@example.com mypassword`
+3. Sign in with the local form on the login page
+
+This is for development only — do not use in production.
+
 ## Local HTTPS (devproxy)
 
 This project uses [devproxy](https://github.com/foundra-build/devproxy) for local HTTPS dev subdomains.

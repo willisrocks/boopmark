@@ -50,6 +50,9 @@ docker-down:
 migrate:
     sqlx migrate run --source migrations
 
+add-user *ARGS:
+    ./scripts/add-user.sh {{ARGS}}
+
 deploy:
     just css-build
     fly deploy

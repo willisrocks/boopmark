@@ -13,20 +13,34 @@ use crate::web::state::AppState;
 #[template(path = "auth/login.html")]
 struct LoginPage {
     enable_e2e_auth: bool,
+    enable_local_auth: bool,
+    login_error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LoginQueryParams {
+    #[serde(default)]
+    error: Option<String>,
 }
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/auth/login", axum::routing::get(login_page))
+        .route("/auth/local-login", axum::routing::post(local_login))
         .route("/auth/test-login", axum::routing::post(test_login))
         .route("/auth/google", axum::routing::get(google_redirect))
         .route("/auth/google/callback", axum::routing::get(google_callback))
         .route("/auth/logout", axum::routing::post(logout))
 }
 
-async fn login_page(State(state): State<AppState>) -> impl IntoResponse {
+async fn login_page(
+    State(state): State<AppState>,
+    Query(params): Query<LoginQueryParams>,
+) -> impl IntoResponse {
     let page = LoginPage {
         enable_e2e_auth: state.config.enable_e2e_auth,
+        enable_local_auth: state.config.enable_local_auth,
+        login_error: params.error,
     };
 
     match page.render() {
@@ -188,6 +202,34 @@ async fn google_callback(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let cookie = build_session_cookie(&origin, session_token);
+
+    Ok((jar.add(cookie), Redirect::to("/")))
+}
+
+#[derive(Deserialize)]
+struct LocalLoginForm {
+    email: String,
+    password: String,
+}
+
+async fn local_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    axum::Form(form): axum::Form<LocalLoginForm>,
+) -> Result<(CookieJar, Redirect), Redirect> {
+    if !state.config.enable_local_auth {
+        return Err(Redirect::to("/auth/login"));
+    }
+
+    let (_, token) = state
+        .auth
+        .local_login(&form.email, &form.password)
+        .await
+        .map_err(|_| Redirect::to("/auth/login?error=Invalid+email+or+password"))?;
+
+    let origin = origin_from_headers(&headers, &state.config);
+    let cookie = build_session_cookie(&origin, token);
 
     Ok((jar.add(cookie), Redirect::to("/")))
 }

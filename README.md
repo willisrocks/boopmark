@@ -18,6 +18,14 @@ For faster rebuilds without Docker, run only the infrastructure services and sta
 
 > **Note:** Do not run both workflows at the same time — they both bind port 4000.
 
+### Local Auth (Development)
+
+When Google OAuth isn't available (e.g. behind a reverse proxy), you can use local username/password login:
+
+1. Set `ENABLE_LOCAL_AUTH=1` in your `.env` file (already enabled in `docker-compose.yml`)
+2. Create a user: `just add-user you@example.com yourpassword`
+3. Sign in with email and password on the login page
+
 ### Local HTTPS Dev URLs
 
 This project supports local HTTPS subdomains via [devproxy](https://github.com/foundra-build/devproxy):
