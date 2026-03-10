@@ -80,19 +80,27 @@ download_binary() {
         exit 1
     fi
 
-    if ! cp "$TMPFILE" "${BOOP_INSTALL_DIR}/boop"; then
-        echo "Error: failed to copy binary to ${BOOP_INSTALL_DIR}/boop" >&2
+    STAGING="${BOOP_INSTALL_DIR}/boop.tmp.$$"
+    if ! cp "$TMPFILE" "$STAGING"; then
+        rm -f "$STAGING"
+        echo "Error: failed to copy binary to ${BOOP_INSTALL_DIR}" >&2
         exit 1
     fi
-    if ! chmod 755 "${BOOP_INSTALL_DIR}/boop"; then
-        echo "Error: failed to set executable permissions on ${BOOP_INSTALL_DIR}/boop" >&2
+    if ! chmod 755 "$STAGING"; then
+        rm -f "$STAGING"
+        echo "Error: failed to set executable permissions" >&2
         exit 1
     fi
     if [ "$(uname -s)" = "Darwin" ]; then
-        xattr -cr "${BOOP_INSTALL_DIR}/boop" 2>/dev/null || true
-        if ! codesign --force --sign - "${BOOP_INSTALL_DIR}/boop" 2>/dev/null; then
+        xattr -cr "$STAGING" 2>/dev/null || true
+        if ! codesign --force --sign - "$STAGING" 2>/dev/null; then
             echo "Warning: failed to ad-hoc sign binary; Gatekeeper may kill the binary on first run" >&2
         fi
+    fi
+    if ! mv "$STAGING" "${BOOP_INSTALL_DIR}/boop"; then
+        rm -f "$STAGING"
+        echo "Error: failed to install binary to ${BOOP_INSTALL_DIR}/boop" >&2
+        exit 1
     fi
     rm -f "$TMPFILE"
     trap - EXIT

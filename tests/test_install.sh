@@ -299,7 +299,7 @@ mkdir -p "$INSTALL_DIR_NODL"
 
 MINIMAL_BIN="$TMPDIR_ROOT/minimal-bin"
 mkdir -p "$MINIMAL_BIN"
-for cmd in sh uname mktemp chmod mkdir mv rm cat sed grep printf echo test tr cut; do
+for cmd in sh uname mktemp chmod mkdir mv cp rm cat sed grep printf echo test tr cut; do
     cmd_path="$(command -v "$cmd" 2>/dev/null || true)"
     if [ -n "$cmd_path" ]; then
         ln -sf "$cmd_path" "$MINIMAL_BIN/$cmd" 2>/dev/null || true
