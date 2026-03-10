@@ -29,7 +29,8 @@
                 <button class="text-xs text-gray-600 hover:text-blue-400"
                         hx-get="/bookmarks/{{ bookmark.id }}/edit"
                         hx-target="body"
-                        hx-swap="beforeend">
+                        hx-swap="beforeend"
+                        hx-on::before-request="var m = document.getElementById('edit-modal'); if (m) m.remove();">
                     Edit
                 </button>
                 <button class="text-xs text-gray-600 hover:text-red-400"

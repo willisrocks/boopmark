@@ -387,16 +387,18 @@ pub async fn update(
     let tags = form
         .tags_input
         .filter(|t| !t.is_empty())
-        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
+        .map(|t| {
+            t.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        });
 
     // Pass all three fields as Some(...) so the user can clear them.
-    // The SQL uses COALESCE($n, column) -- passing a non-NULL value
-    // (even an empty string) causes COALESCE to use it rather than
-    // falling back to the old value.
-    //
-    // We do NOT use non_empty() here (unlike the create flow), because
-    // non_empty converts "" to None, and COALESCE(NULL, column) keeps
-    // the old value -- preventing the user from clearing a field.
+    // The SQL uses CASE WHEN $n = '' THEN NULL ELSE COALESCE($n, col) END,
+    // so an empty string clears the field to NULL (matching never-set
+    // semantics), while a non-empty string updates it, and None (NULL)
+    // keeps the old value.
     let input = UpdateBookmark {
         title: form.title,
         description: form.description,
