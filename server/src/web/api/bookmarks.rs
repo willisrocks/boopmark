@@ -81,6 +81,21 @@ struct MetadataRequest {
 
 // --- Handlers ---
 
+async fn list_tags(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let result = with_bookmarks!(&state.bookmarks, svc => svc.tags_with_counts(user.id).await);
+    match result {
+        Ok(tags) => Ok(Json(
+            tags.into_iter()
+                .map(|(name, count)| serde_json::json!({"name": name, "count": count}))
+                .collect::<Vec<_>>(),
+        )),
+        Err(e) => Err(error_response(e)),
+    }
+}
+
 async fn list_bookmarks(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -158,11 +173,12 @@ async fn extract_metadata(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_bookmarks).post(create_bookmark))
+        .route("/tags", get(list_tags))
+        .route("/metadata", post(extract_metadata))
         .route(
             "/{id}",
             get(get_bookmark)
                 .put(update_bookmark)
                 .delete(delete_bookmark),
         )
-        .route("/metadata", post(extract_metadata))
 }

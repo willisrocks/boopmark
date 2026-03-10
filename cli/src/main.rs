@@ -5,8 +5,18 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "boop", about = "Boopmark CLI — manage your bookmarks")]
 struct Cli {
+    /// Output format: json or plain (default: plain)
+    #[arg(long, short, global = true, default_value = "plain")]
+    output: OutputFormat,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum OutputFormat {
+    Json,
+    Plain,
 }
 
 #[derive(Subcommand)]
@@ -30,8 +40,22 @@ enum Commands {
     },
     /// Search bookmarks
     Search { query: String },
+    /// Get a bookmark by ID
+    Get { id: String },
+    /// Update a bookmark
+    Update {
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        tags: Option<String>,
+    },
     /// Delete a bookmark
     Delete { id: String },
+    /// List all tags
+    Tags,
     /// Configure CLI
     Config {
         #[command(subcommand)]
@@ -57,9 +81,13 @@ struct AppConfig {
 
 impl AppConfig {
     fn path() -> PathBuf {
-        let dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("boop");
+        let dir = if let Ok(custom) = std::env::var("BOOP_CONFIG_DIR") {
+            PathBuf::from(custom)
+        } else {
+            dirs::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("boop")
+        };
         std::fs::create_dir_all(&dir).ok();
         dir.join("config.toml")
     }
@@ -127,6 +155,20 @@ impl ApiClient {
             .map_err(|e| e.to_string())
     }
 
+    async fn put_json(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Result<reqwest::Response, String> {
+        self.client
+            .put(self.url(path))
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn delete(&self, path: &str) -> Result<reqwest::Response, String> {
         self.client
             .delete(self.url(path))
@@ -137,6 +179,16 @@ impl ApiClient {
     }
 }
 
+async fn check_response(resp: reqwest::Response) -> Result<reqwest::Response, String> {
+    if resp.status().is_success() {
+        Ok(resp)
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("HTTP {status}: {body}"))
+    }
+}
+
 #[derive(Serialize)]
 struct CreateBookmarkRequest {
     url: String,
@@ -144,8 +196,15 @@ struct CreateBookmarkRequest {
     tags: Option<Vec<String>>,
 }
 
+#[derive(Serialize)]
+struct UpdateBookmarkRequest {
+    title: Option<String>,
+    description: Option<String>,
+    tags: Option<Vec<String>>,
+}
+
 #[allow(dead_code)]
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Bookmark {
     id: uuid::Uuid,
     url: String,
@@ -154,6 +213,12 @@ struct Bookmark {
     domain: Option<String>,
     tags: Vec<String>,
     created_at: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Tag {
+    name: String,
+    count: i64,
 }
 
 #[tokio::main]
@@ -165,7 +230,18 @@ async fn main() {
     }
 }
 
+fn print_bookmark_plain(bm: &Bookmark) {
+    println!(
+        "{} | {} | [{}]",
+        bm.title.as_deref().unwrap_or("(no title)"),
+        bm.url,
+        bm.tags.join(", ")
+    );
+}
+
 async fn run(cli: Cli) -> Result<(), String> {
+    let output = cli.output.clone();
+
     match cli.command {
         Commands::Config { action } => {
             let mut config = AppConfig::load();
@@ -202,12 +278,15 @@ async fn run(cli: Cli) -> Result<(), String> {
             let client = AppConfig::load().client()?;
             let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
             let body = CreateBookmarkRequest { url, title, tags };
-            let resp = client.post_json("/bookmarks", &body).await?;
-            if resp.status().is_success() {
-                let bm: Bookmark = resp.json().await.map_err(|e| e.to_string())?;
-                println!("Added: {} ({})", bm.title.unwrap_or(bm.url), bm.id);
-            } else {
-                eprintln!("Failed: {}", resp.status());
+            let resp = check_response(client.post_json("/bookmarks", &body).await?).await?;
+            let bm: Bookmark = resp.json().await.map_err(|e| e.to_string())?;
+            match output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&bm).unwrap());
+                }
+                OutputFormat::Plain => {
+                    println!("Added: {} ({})", bm.title.as_deref().unwrap_or(&bm.url), bm.id);
+                }
             }
             Ok(())
         }
@@ -215,53 +294,127 @@ async fn run(cli: Cli) -> Result<(), String> {
         Commands::List { search, tags, sort } => {
             let client = AppConfig::load().client()?;
             let mut query = format!("?sort={sort}");
-            if let Some(s) = search {
+            if let Some(s) = &search {
                 query.push_str(&format!("&search={s}"));
             }
-            if let Some(t) = tags {
+            if let Some(t) = &tags {
                 query.push_str(&format!("&tags={t}"));
             }
-            let resp = client.get(&format!("/bookmarks{query}")).await?;
+            let resp = check_response(client.get(&format!("/bookmarks{query}")).await?).await?;
             let bookmarks: Vec<Bookmark> = resp.json().await.map_err(|e| e.to_string())?;
-            for bm in &bookmarks {
-                println!(
-                    "{} | {} | [{}]",
-                    bm.title.as_deref().unwrap_or("(no title)"),
-                    bm.url,
-                    bm.tags.join(", ")
-                );
-            }
-            if bookmarks.is_empty() {
-                println!("No bookmarks found.");
+            match output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&bookmarks).unwrap());
+                }
+                OutputFormat::Plain => {
+                    for bm in &bookmarks {
+                        print_bookmark_plain(bm);
+                    }
+                    if bookmarks.is_empty() {
+                        println!("No bookmarks found.");
+                    }
+                }
             }
             Ok(())
         }
 
         Commands::Search { query } => {
             let client = AppConfig::load().client()?;
-            let resp = client.get(&format!("/bookmarks?search={query}")).await?;
+            let resp =
+                check_response(client.get(&format!("/bookmarks?search={query}")).await?).await?;
             let bookmarks: Vec<Bookmark> = resp.json().await.map_err(|e| e.to_string())?;
-            for bm in &bookmarks {
-                println!(
-                    "{} | {} | [{}]",
-                    bm.title.as_deref().unwrap_or("(no title)"),
-                    bm.url,
-                    bm.tags.join(", ")
-                );
+            match output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&bookmarks).unwrap());
+                }
+                OutputFormat::Plain => {
+                    for bm in &bookmarks {
+                        print_bookmark_plain(bm);
+                    }
+                    if bookmarks.is_empty() {
+                        println!("No results.");
+                    }
+                }
             }
-            if bookmarks.is_empty() {
-                println!("No results.");
+            Ok(())
+        }
+
+        Commands::Get { id } => {
+            let client = AppConfig::load().client()?;
+            let resp = check_response(client.get(&format!("/bookmarks/{id}")).await?).await?;
+            let bm: Bookmark = resp.json().await.map_err(|e| e.to_string())?;
+            match output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&bm).unwrap());
+                }
+                OutputFormat::Plain => {
+                    print_bookmark_plain(&bm);
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Update {
+            id,
+            title,
+            description,
+            tags,
+        } => {
+            let client = AppConfig::load().client()?;
+            let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
+            let body = UpdateBookmarkRequest {
+                title,
+                description,
+                tags,
+            };
+            let resp =
+                check_response(client.put_json(&format!("/bookmarks/{id}"), &body).await?).await?;
+            let bm: Bookmark = resp.json().await.map_err(|e| e.to_string())?;
+            match output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&bm).unwrap());
+                }
+                OutputFormat::Plain => {
+                    println!(
+                        "Updated: {} ({})",
+                        bm.title.as_deref().unwrap_or(&bm.url),
+                        bm.id
+                    );
+                }
             }
             Ok(())
         }
 
         Commands::Delete { id } => {
             let client = AppConfig::load().client()?;
-            let resp = client.delete(&format!("/bookmarks/{id}")).await?;
-            if resp.status().is_success() {
-                println!("Deleted.");
-            } else {
-                eprintln!("Failed: {}", resp.status());
+            check_response(client.delete(&format!("/bookmarks/{id}")).await?).await?;
+            match output {
+                OutputFormat::Json => {
+                    println!(r#"{{"deleted": "{}"}}"#, id);
+                }
+                OutputFormat::Plain => {
+                    println!("Deleted.");
+                }
+            }
+            Ok(())
+        }
+
+        Commands::Tags => {
+            let client = AppConfig::load().client()?;
+            let resp = check_response(client.get("/bookmarks/tags").await?).await?;
+            let tags: Vec<Tag> = resp.json().await.map_err(|e| e.to_string())?;
+            match output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&tags).unwrap());
+                }
+                OutputFormat::Plain => {
+                    for tag in &tags {
+                        println!("{} ({})", tag.name, tag.count);
+                    }
+                    if tags.is_empty() {
+                        println!("No tags found.");
+                    }
+                }
             }
             Ok(())
         }

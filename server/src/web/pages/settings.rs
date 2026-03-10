@@ -17,6 +17,12 @@ struct ModelOptionView {
     selected: bool,
 }
 
+struct ApiKeyView {
+    id: String,
+    name: String,
+    created_at: String,
+}
+
 #[derive(Template)]
 #[template(path = "settings/index.html")]
 struct SettingsPage {
@@ -27,6 +33,8 @@ struct SettingsPage {
     has_anthropic_api_key: bool,
     anthropic_model_options: Vec<ModelOptionView>,
     success_message: Option<String>,
+    api_keys: Vec<ApiKeyView>,
+    created_key: Option<String>,
 }
 
 fn render(t: &impl Template) -> axum::response::Response {
@@ -39,6 +47,7 @@ fn render(t: &impl Template) -> axum::response::Response {
 #[derive(Deserialize, Default)]
 struct SettingsQuery {
     saved: Option<String>,
+    created_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +85,10 @@ fn build_model_option_views(current_model: &str) -> Vec<ModelOptionView> {
     options
 }
 
+fn url_encode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
 async fn settings_page(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -85,6 +98,16 @@ async fn settings_page(
         Ok(settings) => {
             let email = user.email.clone();
             let anthropic_model = settings.anthropic_model;
+
+            let api_keys_result = state.auth.list_api_keys(user.id).await.unwrap_or_default();
+            let api_keys: Vec<ApiKeyView> = api_keys_result
+                .iter()
+                .map(|k| ApiKeyView {
+                    id: k.id.to_string(),
+                    name: k.name.clone(),
+                    created_at: k.created_at.format("%Y-%m-%d").to_string(),
+                })
+                .collect();
 
             render(&SettingsPage {
                 user: Some(user.into()),
@@ -97,6 +120,8 @@ async fn settings_page(
                     .saved
                     .filter(|value| value == "1")
                     .map(|_| "Settings saved".to_string()),
+                api_keys,
+                created_key: query.created_key,
             })
         }
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -139,6 +164,41 @@ async fn save_settings(
     }
 }
 
+#[derive(Deserialize)]
+struct CreateApiKeyForm {
+    key_name: String,
+}
+
+async fn create_settings_api_key(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Form(form): Form<CreateApiKeyForm>,
+) -> axum::response::Response {
+    match state.auth.create_api_key(user.id, &form.key_name).await {
+        Ok(key) => {
+            let encoded = url_encode(&key);
+            Redirect::to(&format!("/settings?created_key={encoded}")).into_response()
+        }
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteApiKeyForm {
+    key_id: String,
+}
+
+async fn delete_settings_api_key(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Form(form): Form<DeleteApiKeyForm>,
+) -> axum::response::Response {
+    if let Ok(id) = form.key_id.parse::<uuid::Uuid>() {
+        let _ = state.auth.delete_api_key(id, user.id).await;
+    }
+    Redirect::to("/settings?saved=1").into_response()
+}
+
 async fn legacy_api_keys_redirect(AuthUser(_user): AuthUser) -> Redirect {
     Redirect::to("/settings")
 }
@@ -152,6 +212,14 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/settings/api-keys",
             axum::routing::get(legacy_api_keys_redirect),
+        )
+        .route(
+            "/settings/api-keys/create",
+            axum::routing::post(create_settings_api_key),
+        )
+        .route(
+            "/settings/api-keys/delete",
+            axum::routing::post(delete_settings_api_key),
         )
 }
 

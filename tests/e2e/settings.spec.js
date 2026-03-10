@@ -143,6 +143,36 @@ test("unauthenticated requests cannot read or save settings", async ({ page, req
   await expect(page).not.toHaveURL(/\/settings$/);
 });
 
+test("can create and delete API keys from settings", async ({ page }) => {
+  await signIn(page);
+  await page.goto("/settings");
+
+  // Count existing keys before we start (other specs may have created keys
+  // for the shared e2e@boopmark.local user)
+  const initialKeyCount = await page.getByTestId("api-key-row").count();
+
+  // Create a key
+  await page.getByTestId("api-key-name-input").fill("test-cli-key");
+  await page.getByTestId("create-api-key-button").click();
+
+  // Should see the created key banner
+  await expect(page.getByTestId("new-api-key-banner")).toBeVisible();
+  const keyValue = await page.getByTestId("new-api-key-value").textContent();
+  expect(keyValue).toMatch(/^boop_/);
+
+  // Should see one more key than before
+  await expect(page.getByTestId("api-key-row")).toHaveCount(initialKeyCount + 1);
+  await expect(page.getByText("test-cli-key")).toBeVisible();
+
+  // Delete the key we just created (find the row containing our key name
+  // and click its delete button)
+  const ourRow = page.getByTestId("api-key-row").filter({ hasText: "test-cli-key" });
+  await ourRow.getByTestId("delete-api-key-button").click();
+
+  // Verify we're back to the initial count
+  await expect(page.getByTestId("api-key-row")).toHaveCount(initialKeyCount);
+});
+
 test("settings rejects forged unsupported anthropic model submissions with 400", async ({
   page,
 }) => {

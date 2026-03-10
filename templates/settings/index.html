@@ -71,6 +71,51 @@
                 </button>
             </form>
         </section>
+
+        <section class="space-y-5">
+            <div>
+                <h2 class="text-lg font-semibold">API Keys</h2>
+                <p class="text-sm text-gray-400">Manage API keys for CLI and programmatic access.</p>
+            </div>
+
+            {% if let Some(key) = created_key %}
+            <div class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200" data-testid="new-api-key-banner">
+                <p class="font-medium">API key created! Copy it now — it won't be shown again:</p>
+                <code class="block mt-2 px-3 py-2 bg-[#0d1117] rounded text-xs font-mono break-all select-all" data-testid="new-api-key-value">{{ key }}</code>
+            </div>
+            {% endif %}
+
+            <form method="post" action="/settings/api-keys/create" class="flex gap-3">
+                <input
+                    name="key_name"
+                    type="text"
+                    placeholder="Key name (e.g. laptop-cli)"
+                    required
+                    class="flex-1 px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500 text-sm"
+                    data-testid="api-key-name-input"
+                >
+                <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium" data-testid="create-api-key-button">
+                    Create key
+                </button>
+            </form>
+
+            {% if !api_keys.is_empty() %}
+            <div class="space-y-2" data-testid="api-keys-list">
+                {% for key in api_keys %}
+                <div class="flex items-center justify-between px-4 py-3 rounded-lg border border-gray-700 bg-[#1a1d2e]" data-testid="api-key-row">
+                    <div>
+                        <span class="text-sm font-medium text-gray-200">{{ key.name }}</span>
+                        <span class="text-xs text-gray-500 ml-2">Created {{ key.created_at }}</span>
+                    </div>
+                    <form method="post" action="/settings/api-keys/delete" class="inline">
+                        <input type="hidden" name="key_id" value="{{ key.id }}">
+                        <button type="submit" class="text-xs text-red-400 hover:text-red-300" data-testid="delete-api-key-button">Delete</button>
+                    </form>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </section>
     </div>
 </main>
 {% endblock %}
