@@ -20,11 +20,23 @@ impl AnthropicEnricher {
     }
 
     fn build_prompt(input: &EnrichmentInput) -> String {
+        let existing_tags_instruction = match &input.existing_tags {
+            Some(tags) if !tags.is_empty() => {
+                let tag_list: Vec<String> = tags.iter().map(|(t, c)| format!("{t} ({c})")).collect();
+                format!(
+                    "\n\nThe user already has these tags (listed most-popular first): {}. \
+                     Prefer reusing these existing tags. Only create new tags if none of these fit.",
+                    tag_list.join(", ")
+                )
+            }
+            _ => String::new(),
+        };
+
         format!(
             "You are a bookmark organizer. Given a URL and its scraped metadata, suggest:\n\
              1. A concise, clear title (improve the scraped title if present)\n\
              2. A brief, useful description (1-2 sentences, improve the scraped description if present)\n\
-             3. 3-5 relevant tags for categorization\n\n\
+             3. 3-5 relevant tags for categorization{existing_tags_instruction}\n\n\
              URL: {}\n\
              Scraped title: {}\n\
              Scraped description: {}\n\n\
@@ -167,6 +179,7 @@ mod tests {
             url: "https://example.com".to_string(),
             scraped_title: Some("Example Title".to_string()),
             scraped_description: Some("Example description".to_string()),
+            existing_tags: None,
         };
         let prompt = AnthropicEnricher::build_prompt(&input);
         assert!(prompt.contains("https://example.com"));
@@ -180,9 +193,40 @@ mod tests {
             url: "https://example.com".to_string(),
             scraped_title: None,
             scraped_description: None,
+            existing_tags: None,
         };
         let prompt = AnthropicEnricher::build_prompt(&input);
         assert!(prompt.contains("(none)"));
+    }
+
+    #[test]
+    fn build_prompt_includes_existing_tags_when_present() {
+        let input = EnrichmentInput {
+            url: "https://example.com".to_string(),
+            scraped_title: Some("Example".to_string()),
+            scraped_description: None,
+            existing_tags: Some(vec![
+                ("rust".to_string(), 5),
+                ("web".to_string(), 3),
+            ]),
+        };
+        let prompt = AnthropicEnricher::build_prompt(&input);
+        assert!(prompt.contains("rust (5)"));
+        assert!(prompt.contains("web (3)"));
+        assert!(prompt.contains("Prefer reusing these existing tags"));
+    }
+
+    #[test]
+    fn build_prompt_omits_existing_tags_when_empty() {
+        let input = EnrichmentInput {
+            url: "https://example.com".to_string(),
+            scraped_title: None,
+            scraped_description: None,
+            existing_tags: Some(vec![]),
+        };
+        let prompt = AnthropicEnricher::build_prompt(&input);
+        assert!(!prompt.contains("Prefer reusing these existing tags"));
+        assert!(prompt.contains("https://example.com"));
     }
 
     #[test]

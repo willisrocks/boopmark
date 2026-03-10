@@ -7,6 +7,7 @@ pub struct EnrichmentInput {
     pub url: String,
     pub scraped_title: Option<String>,
     pub scraped_description: Option<String>,
+    pub existing_tags: Option<Vec<(String, i64)>>,
 }
 
 /// LLM-suggested improvements.
