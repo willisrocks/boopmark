@@ -12,7 +12,7 @@ COPY migrations/ migrations/
 COPY templates/ templates/
 RUN touch server/src/main.rs && cargo build --release -p boopmark-server
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/boopmark-server .
