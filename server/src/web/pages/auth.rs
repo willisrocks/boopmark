@@ -126,11 +126,23 @@ async fn google_callback(
     // download on subsequent logins will preserve that stale Google URL rather than
     // clearing it. This is acceptable as a transitional state — the next successful
     // login will replace it with a locally-stored avatar.
-    let user = state
+    let user = match state
         .auth
         .upsert_user(userinfo.email, userinfo.name, stored_image.clone())
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    {
+        Ok(user) => user,
+        Err(e) => {
+            // Clean up the newly stored avatar since the upsert failed —
+            // no user record will reference it, so it would be orphaned.
+            if let Some(ref new_url) = stored_image {
+                if let Some(key) = state.images_storage.key_from_url(new_url) {
+                    let _ = state.images_storage.delete(&key).await;
+                }
+            }
+            return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+        }
+    };
 
     // Clean up old avatar from storage if it was replaced
     if let Some(ref old_url) = old_avatar_url {
@@ -265,15 +277,19 @@ fn is_allowed_avatar_host(url_str: &str) -> bool {
         })
 }
 
+/// Maximum number of HTTP redirects to follow when downloading an avatar.
+const MAX_AVATAR_REDIRECTS: usize = 5;
+
 /// Download a Google avatar image, validate it, and store it in the images bucket.
 /// Returns `None` on any failure (graceful degradation — the Google URL is not stored
 /// as a fallback because we want to avoid hotlinking).
 ///
-/// Reuses the caller's `reqwest::Client` (which handles Google API calls) but applies
-/// a per-request timeout and HTTPS-only restriction to mitigate SSRF risks.
+/// Uses a dedicated `reqwest::Client` with a strict redirect policy (max 5 redirects)
+/// and per-request timeout. Both the initial URL and the final URL after redirects are
+/// validated to be HTTPS on an allowed Google domain.
 async fn download_and_store_avatar(
     picture_url: &str,
-    client: &reqwest::Client,
+    _oauth_client: &reqwest::Client,
     state: &AppState,
 ) -> Option<String> {
     // Only allow HTTPS URLs from known Google domains to prevent SSRF
@@ -286,17 +302,25 @@ async fn download_and_store_avatar(
         return None;
     }
 
-    let resp = match client
-        .get(picture_url)
+    let client = reqwest::Client::builder()
         .timeout(AVATAR_DOWNLOAD_TIMEOUT)
-        .send()
-        .await
-    {
+        .redirect(reqwest::redirect::Policy::limited(MAX_AVATAR_REDIRECTS))
+        .build()
+        .ok()?;
+
+    let mut resp = match client.get(picture_url).send().await {
         Ok(r) if r.status().is_success() => {
-            // After following redirects, verify we're still on HTTPS
+            // After following redirects, verify the final URL is still HTTPS
+            // on an allowed Google domain
             let final_url = r.url().as_str();
             if !final_url.starts_with("https://") {
                 tracing::warn!("Avatar redirect landed on non-HTTPS URL: {final_url}");
+                return None;
+            }
+            if !is_allowed_avatar_host(final_url) {
+                tracing::warn!(
+                    "Avatar redirect landed on non-Google domain: {final_url}"
+                );
                 return None;
             }
             r
@@ -319,23 +343,26 @@ async fn download_and_store_avatar(
         }
     }
 
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
+    // Stream the body in chunks with a hard size cap to prevent memory exhaustion
+    // if Content-Length is absent or lies
+    let mut body = Vec::new();
+    while let Some(chunk) = match resp.chunk().await {
+        Ok(c) => c,
         Err(e) => {
-            tracing::warn!("Failed to read avatar bytes: {e}");
+            tracing::warn!("Failed to read avatar chunk: {e}");
             return None;
         }
-    };
-
-    // Enforce size limit even if Content-Length was absent or wrong
-    if bytes.len() as u64 > MAX_AVATAR_BYTES {
-        tracing::warn!("Avatar too large ({} bytes), skipping", bytes.len());
-        return None;
+    } {
+        if body.len() + chunk.len() > MAX_AVATAR_BYTES as usize {
+            tracing::warn!("Avatar exceeded {MAX_AVATAR_BYTES} bytes during streaming, aborting");
+            return None;
+        }
+        body.extend_from_slice(&chunk);
     }
 
     // Validate magic bytes and derive both the file extension and content type
     // from actual content, not the HTTP Content-Type header (which could mismatch)
-    let (ext, content_type) = match detect_image_format(&bytes) {
+    let (ext, content_type) = match detect_image_format(&body) {
         Some(fmt) => fmt,
         None => {
             tracing::warn!("Avatar response does not look like a valid image, skipping");
@@ -347,7 +374,7 @@ async fn download_and_store_avatar(
 
     match state
         .images_storage
-        .put(&key, bytes.to_vec(), content_type)
+        .put(&key, body, content_type)
         .await
     {
         Ok(url) => Some(url),
