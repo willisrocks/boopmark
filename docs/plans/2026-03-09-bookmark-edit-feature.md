@@ -318,7 +318,99 @@ git commit -m "feat: add edit button to bookmark card"
 
 ---
 
-### Task 5: Add page route handlers for edit, update, and edit-suggest
+### Task 5: Make `UpdateBookmark` support explicit field clearing
+
+**Files:**
+- Modify: `server/src/domain/bookmark.rs`
+- Modify: `server/src/adapters/postgres/bookmark_repo.rs`
+- Modify: `server/src/web/api/bookmarks.rs`
+
+The current `UpdateBookmark` uses `Option<String>` for `title` and `description`. With `COALESCE($n, column)` in the SQL, `None` means "keep the old value." But an edit form must allow the user to clear a field. We need a three-state representation: absent (`None` = don't touch), explicitly cleared (`Some(None)` = set to NULL), or set (`Some(Some("value"))` = set to value).
+
+**Step 1: Change `UpdateBookmark` field types**
+
+In `server/src/domain/bookmark.rs`, change `UpdateBookmark` to:
+
+```rust
+#[derive(Debug, Deserialize)]
+pub struct UpdateBookmark {
+    pub title: Option<Option<String>>,
+    pub description: Option<Option<String>>,
+    pub tags: Option<Vec<String>>,
+}
+```
+
+**Step 2: Update the Postgres adapter's `update` method**
+
+In `server/src/adapters/postgres/bookmark_repo.rs`, replace the `update` method with:
+
+```rust
+    async fn update(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        input: UpdateBookmark,
+    ) -> Result<Bookmark, DomainError> {
+        // Flatten Option<Option<String>>:
+        // None         -> bind NULL (COALESCE keeps old value)
+        // Some(None)   -> need to SET to NULL (can't use COALESCE)
+        // Some(Some(v))-> bind Some(v) (COALESCE uses new value)
+        //
+        // To handle Some(None) properly, we use a boolean flag per field
+        // to decide whether to force-set NULL or use COALESCE.
+        let (title_val, clear_title) = match &input.title {
+            None => (None, false),
+            Some(None) => (None, true),
+            Some(Some(v)) => (Some(v.as_str()), false),
+        };
+        let (desc_val, clear_desc) = match &input.description {
+            None => (None, false),
+            Some(None) => (None, true),
+            Some(Some(v)) => (Some(v.as_str()), false),
+        };
+
+        sqlx::query_as::<_, Bookmark>(
+            "UPDATE bookmarks SET
+                title = CASE WHEN $6 THEN NULL ELSE COALESCE($3, title) END,
+                description = CASE WHEN $7 THEN NULL ELSE COALESCE($4, description) END,
+                tags = COALESCE($5, tags),
+                updated_at = now()
+             WHERE id = $1 AND user_id = $2
+             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(title_val)
+        .bind(desc_val)
+        .bind(input.tags.as_deref())
+        .bind(clear_title)
+        .bind(clear_desc)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?
+        .ok_or(DomainError::NotFound)
+    }
+```
+
+**Step 3: Update the JSON API handler**
+
+In `server/src/web/api/bookmarks.rs`, the `update_bookmark` handler passes `Json(input): Json<UpdateBookmark>` directly. The JSON deserialization of `Option<Option<String>>` already works correctly with serde: absent key = `None`, `"title": null` = `Some(None)`, `"title": "value"` = `Some(Some("value"))`. No code change needed for the API handler itself.
+
+**Step 4: Verify it compiles and tests pass**
+
+Run: `cargo test`
+Expected: All tests pass
+
+**Step 5: Commit**
+
+```bash
+git add server/src/domain/bookmark.rs server/src/adapters/postgres/bookmark_repo.rs
+git commit -m "feat: support explicit field clearing in UpdateBookmark with Option<Option<String>>"
+```
+
+---
+
+### Task 6: Add page route handlers for edit, update, and edit-suggest
 
 **Files:**
 - Modify: `server/src/web/pages/bookmarks.rs`
@@ -381,13 +473,24 @@ pub async fn edit(
 }
 ```
 
-**Step 3: Add the `UpdateForm` deserialize struct and `update` handler**
+**Step 3: Add the `EditForm` and `EditSuggestForm` deserialize structs and `update` handler**
 
 Add after the `edit` handler:
 
 ```rust
 #[derive(Deserialize)]
 pub struct EditForm {
+    title: Option<String>,
+    description: Option<String>,
+    tags_input: Option<String>,
+}
+
+/// Separate form struct for the edit-suggest endpoint.
+/// Unlike `SuggestForm` (used by the add flow), this does NOT include a `url`
+/// field because the edit modal form has no URL input — the URL is fetched
+/// from the database by bookmark ID.
+#[derive(Deserialize)]
+pub struct EditSuggestForm {
     title: Option<String>,
     description: Option<String>,
     tags_input: Option<String>,
@@ -404,9 +507,13 @@ pub async fn update(
         .filter(|t| !t.is_empty())
         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
 
+    // Always pass Some(...) for all three fields so the user can clear them.
+    // The SQL uses COALESCE($n, column) — passing Some(value) ensures the
+    // user's input (including empty/None) is written, rather than COALESCE
+    // falling back to the old value.
     let input = crate::domain::bookmark::UpdateBookmark {
-        title: form.title.and_then(non_empty),
-        description: form.description.and_then(non_empty),
+        title: Some(form.title.and_then(non_empty)),
+        description: Some(form.description.and_then(non_empty)),
         tags: Some(tags.unwrap_or_default()),
     };
 
@@ -419,18 +526,22 @@ pub async fn update(
 }
 ```
 
-Note: We always pass `Some(...)` for `tags` so that clearing all tags actually updates the stored value to an empty array rather than being treated as "no change" by the `COALESCE` in the SQL.
+**Important — `UpdateBookmark` field type change:** The `title` and `description` fields on `UpdateBookmark` were changed from `Option<String>` to `Option<Option<String>>` in Task 5. Here we pass `Some(form.title.and_then(non_empty))` which yields `Some(None)` when the user clears the field, or `Some(Some("value"))` when they set it.
+
+Note: We always pass `Some(...)` for all three fields so the user can clear them. For tags, `Some(vec![])` writes an empty array. For title/description, `Some(None)` writes NULL.
 
 **Step 4: Add the `edit_suggest` handler**
 
-Add after the `update` handler:
+Add after the `update` handler. This uses the `EditSuggestForm` struct (defined in Step 3) instead of `SuggestForm`, because the edit modal form has no `url` field -- the URL comes from the bookmark looked up by ID.
+
+Unlike the add-flow suggest (which uses `fill_if_blank` to only populate empty fields on initial URL entry), the edit suggest always replaces fields with LLM/scraped suggestions. The user explicitly clicked "Suggest Edits" to get fresh recommendations for already-populated fields. The current form values are used only as a fallback if no suggestion is available.
 
 ```rust
 pub async fn edit_suggest(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
-    Form(form): Form<SuggestForm>,
+    Form(form): Form<EditSuggestForm>,
 ) -> axum::response::Response {
     // Get the bookmark to find its URL
     let bookmark = match with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await) {
@@ -451,30 +562,32 @@ pub async fn edit_suggest(
 
     let enrichment = try_llm_enrich_with_tags(&state, user.id, &bookmark.url, &metadata, existing_tags).await;
 
-    // Preserve user-typed tags; only use LLM tags if user hasn't typed any
-    let user_tags = form.tags_input.and_then(non_empty);
-    let suggest_tags = user_tags.unwrap_or_else(|| {
-        enrichment
-            .as_ref()
-            .map(|e| e.tags.join(", "))
-            .unwrap_or_default()
-    });
+    // For edit suggest, always prefer LLM/scraped suggestions over current
+    // form values. The user explicitly asked for suggestions, so we replace
+    // all fields. Fall back to current form values only if no suggestion exists.
+    let suggest_tags = enrichment
+        .as_ref()
+        .map(|e| e.tags.join(", "))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| form.tags_input.and_then(non_empty).unwrap_or_default());
+
+    let suggest_title = enrichment
+        .as_ref()
+        .and_then(|e| e.title.clone())
+        .or_else(|| metadata.as_ref().and_then(|m| m.title.clone()))
+        .and_then(non_empty)
+        .unwrap_or_else(|| form.title.and_then(non_empty).unwrap_or_default());
+
+    let suggest_description = enrichment
+        .as_ref()
+        .and_then(|e| e.description.clone())
+        .or_else(|| metadata.as_ref().and_then(|m| m.description.clone()))
+        .and_then(non_empty)
+        .unwrap_or_else(|| form.description.and_then(non_empty).unwrap_or_default());
 
     render(&EditSuggestFields {
-        suggest_title: fill_if_blank(
-            form.title,
-            enrichment
-                .as_ref()
-                .and_then(|e| e.title.clone())
-                .or_else(|| metadata.as_ref().and_then(|m| m.title.clone())),
-        ),
-        suggest_description: fill_if_blank(
-            form.description,
-            enrichment
-                .as_ref()
-                .and_then(|e| e.description.clone())
-                .or_else(|| metadata.as_ref().and_then(|m| m.description.clone())),
-        ),
+        suggest_title,
+        suggest_description,
         suggest_tags,
     })
 }
@@ -568,7 +681,7 @@ git commit -m "feat: add edit, update, and edit-suggest page handlers with route
 
 ---
 
-### Task 6: Rebuild Tailwind CSS
+### Task 7: Rebuild Tailwind CSS
 
 **Files:**
 - Modify: `static/css/tailwind-output.css` (generated)
@@ -594,7 +707,7 @@ git commit -m "build: rebuild Tailwind CSS for edit modal styles"
 
 ---
 
-### Task 7: Verify via agent-browser screenshots
+### Task 8: Verify via agent-browser screenshots
 
 **Files:** None (manual verification)
 
