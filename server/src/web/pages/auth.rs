@@ -1,6 +1,7 @@
 use askama::Template;
 use axum::Router;
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse, Redirect};
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use serde::Deserialize;
@@ -34,10 +35,29 @@ async fn login_page(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Derive the origin (scheme + host) from request headers, falling back to config.app_url.
+fn origin_from_headers(headers: &HeaderMap, config: &crate::config::Config) -> String {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get("host"))
+        .and_then(|v| v.to_str().ok());
+
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+
+    match host {
+        Some(h) => format!("{proto}://{h}"),
+        None => config.app_url.clone(),
+    }
+}
+
 /// Redirect the user to Google's OAuth consent screen.
-async fn google_redirect(State(state): State<AppState>) -> Redirect {
+async fn google_redirect(State(state): State<AppState>, headers: HeaderMap) -> Redirect {
     let config = &state.config;
-    let redirect_uri = format!("{}/auth/google/callback", config.app_url);
+    let origin = origin_from_headers(&headers, config);
+    let redirect_uri = format!("{origin}/auth/google/callback");
     let url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile",
         urlencoding(&config.google_client_id),
@@ -49,11 +69,13 @@ async fn google_redirect(State(state): State<AppState>) -> Redirect {
 /// Exchange the authorization code for tokens, fetch user info, upsert user, create session.
 async fn google_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<CallbackParams>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Redirect), (axum::http::StatusCode, String)> {
     let config = &state.config;
-    let redirect_uri = format!("{}/auth/google/callback", config.app_url);
+    let origin = origin_from_headers(&headers, config);
+    let redirect_uri = format!("{origin}/auth/google/callback");
 
     // Exchange code for tokens
     let client = reqwest::Client::new();
@@ -165,7 +187,7 @@ async fn google_callback(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let cookie = build_session_cookie(&state.config, session_token);
+    let cookie = build_session_cookie(&origin, session_token);
 
     Ok((jar.add(cookie), Redirect::to("/")))
 }
@@ -195,7 +217,7 @@ async fn test_login(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((
-        jar.add(build_session_cookie(&state.config, token)),
+        jar.add(build_session_cookie(&state.config.app_url, token)),
         Redirect::to("/"),
     ))
 }
@@ -385,11 +407,11 @@ async fn download_and_store_avatar(picture_url: &str, state: &AppState) -> Optio
     }
 }
 
-fn build_session_cookie(config: &crate::config::Config, token: String) -> Cookie<'static> {
+fn build_session_cookie(origin: &str, token: String) -> Cookie<'static> {
     Cookie::build(("session", token))
         .path("/")
         .http_only(true)
-        .secure(config.app_url.starts_with("https://"))
+        .secure(origin.starts_with("https://"))
         .same_site(axum_extra::extract::cookie::SameSite::Lax)
         .build()
 }
