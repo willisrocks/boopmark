@@ -16,6 +16,7 @@
 - Plugin marketplace name: `boopmark` (used as `@boopmark` in install commands).
 - Plugin source: relative path `"./"` since skills live at repo root alongside marketplace.json.
 - The CI workflow does NOT run `cargo test` for the server (which needs Postgres) — it only runs `cargo test -p boop` and the install script tests. The existing justfile `test` command continues to run all workspace tests locally.
+- SKILL.md assertions live inside `tests/test_install.sh` as Tests 10-11, matching devproxy's pattern exactly. No separate structural-assertion test file — devproxy doesn't have one, and we follow devproxy closely.
 
 ---
 
@@ -161,7 +162,7 @@ git commit -m "feat: add universal install script for boop CLI"
 
 **Step 1: Write test_install.sh**
 
-Adapted from devproxy's test suite, replacing all `devproxy`/`DEVPROXY` references with `boop`/`BOOP`:
+Adapted from devproxy's test suite, replacing all `devproxy`/`DEVPROXY` references with `boop`/`BOOP`. Includes Tests 10-11 for SKILL.md content assertions, matching devproxy's test structure exactly:
 
 ```sh
 #!/bin/sh
@@ -550,6 +551,29 @@ else
     fail "could not find all Darwin guard markers" \
          "darwin=$_darwin_line xattr=$_xattr_line codesign=$_codesign_line fi=$_fi_line"
 fi
+
+# ============================================================
+# Test 10: SKILL.md contains key commands
+# ============================================================
+echo "=== Test 10: SKILL.md contains key commands ==="
+
+SKILL_MD="$REPO_ROOT/skills/boop/SKILL.md"
+
+assert_file_contains "$SKILL_MD" 'boop add' "SKILL.md contains 'boop add'"
+assert_file_contains "$SKILL_MD" 'boop list' "SKILL.md contains 'boop list'"
+assert_file_contains "$SKILL_MD" 'boop search' "SKILL.md contains 'boop search'"
+assert_file_contains "$SKILL_MD" 'boop delete' "SKILL.md contains 'boop delete'"
+assert_file_contains "$SKILL_MD" 'boop config' "SKILL.md contains 'boop config'"
+assert_file_contains "$SKILL_MD" 'install.sh' "SKILL.md references install script"
+
+# ============================================================
+# Test 11: SKILL.md Gatekeeper common issue
+# ============================================================
+echo "=== Test 11: SKILL.md Gatekeeper common issue ==="
+
+assert_file_contains "$SKILL_MD" 'Gatekeeper|quarantine' "SKILL.md mentions Gatekeeper/quarantine"
+assert_file_contains "$SKILL_MD" 'xattr -cr' "SKILL.md mentions xattr -cr"
+assert_file_contains "$SKILL_MD" 'codesign' "SKILL.md mentions codesign"
 
 # ============================================================
 # Summary
@@ -1070,199 +1094,24 @@ git commit -m "docs: add boop CLI install instructions to README"
 
 ---
 
-### Task 8: Add CI/CD static assertion tests
-
-**Files:**
-- Create: `tests/test_ci_cd.sh`
-
-**Step 1: Write test_ci_cd.sh**
-
-This script performs static assertions against the workflow YAML, justfile, plugin structure, and README to ensure they stay in sync:
-
-```sh
-#!/bin/sh
-set -eu
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-PASS=0
-FAIL=0
-TOTAL=0
-
-pass() {
-    PASS=$((PASS + 1))
-    TOTAL=$((TOTAL + 1))
-    echo "  PASS: $1"
-}
-
-fail() {
-    FAIL=$((FAIL + 1))
-    TOTAL=$((TOTAL + 1))
-    echo "  FAIL: $1"
-    if [ -n "${2:-}" ]; then
-        echo "        $2"
-    fi
-}
-
-assert_file_exists() {
-    if [ -f "$1" ]; then
-        pass "$2"
-    else
-        fail "$2" "file not found: $1"
-    fi
-}
-
-assert_file_contains() {
-    _file="$1"
-    _pattern="$2"
-    _desc="$3"
-    if grep -Eq "$_pattern" "$_file"; then
-        pass "$_desc"
-    else
-        fail "$_desc" "pattern '$_pattern' not found in $_file"
-    fi
-}
-
-# ============================================================
-# Test 1: Release workflow structure
-# ============================================================
-echo "=== Test 1: Release workflow ==="
-
-RELEASE_YML="$REPO_ROOT/.github/workflows/release.yml"
-assert_file_exists "$RELEASE_YML" "release.yml exists"
-assert_file_contains "$RELEASE_YML" 'workflow_dispatch' "release.yml is workflow_dispatch"
-assert_file_contains "$RELEASE_YML" 'x86_64-apple-darwin' "release.yml has x86_64 macOS target"
-assert_file_contains "$RELEASE_YML" 'aarch64-apple-darwin' "release.yml has aarch64 macOS target"
-assert_file_contains "$RELEASE_YML" 'x86_64-unknown-linux-gnu' "release.yml has x86_64 Linux target"
-assert_file_contains "$RELEASE_YML" 'aarch64-unknown-linux-gnu' "release.yml has aarch64 Linux target"
-assert_file_contains "$RELEASE_YML" 'cargo build --release -p boop' "release.yml builds boop crate"
-assert_file_contains "$RELEASE_YML" 'cross build --release -p boop' "release.yml cross-builds boop crate"
-assert_file_contains "$RELEASE_YML" 'EXPECTED_COUNT=4' "release.yml verifies 4 binaries"
-assert_file_contains "$RELEASE_YML" 'gh release create' "release.yml creates GitHub release"
-
-# ============================================================
-# Test 2: CI workflow structure
-# ============================================================
-echo "=== Test 2: CI workflow ==="
-
-CI_YML="$REPO_ROOT/.github/workflows/ci.yml"
-assert_file_exists "$CI_YML" "ci.yml exists"
-assert_file_contains "$CI_YML" 'cargo fmt -- --check' "ci.yml runs format check"
-assert_file_contains "$CI_YML" 'cargo clippy' "ci.yml runs clippy"
-assert_file_contains "$CI_YML" 'cargo test -p boop' "ci.yml runs boop tests"
-assert_file_contains "$CI_YML" 'test_install.sh' "ci.yml runs install script tests"
-
-# ============================================================
-# Test 3: Plugin marketplace structure
-# ============================================================
-echo "=== Test 3: Plugin marketplace ==="
-
-MARKETPLACE="$REPO_ROOT/.claude-plugin/marketplace.json"
-PLUGIN="$REPO_ROOT/.claude-plugin/plugin.json"
-SKILL="$REPO_ROOT/skills/boop/SKILL.md"
-
-assert_file_exists "$MARKETPLACE" "marketplace.json exists"
-assert_file_exists "$PLUGIN" "plugin.json exists"
-assert_file_exists "$SKILL" "SKILL.md exists"
-
-assert_file_contains "$MARKETPLACE" '"name": "boopmark"' "marketplace.json has correct name"
-assert_file_contains "$MARKETPLACE" '"name": "boop"' "marketplace.json lists boop plugin"
-assert_file_contains "$PLUGIN" '"name": "boop"' "plugin.json has correct name"
-
-# ============================================================
-# Test 4: SKILL.md content
-# ============================================================
-echo "=== Test 4: SKILL.md content ==="
-
-assert_file_contains "$SKILL" 'boop add' "SKILL.md contains 'boop add'"
-assert_file_contains "$SKILL" 'boop list' "SKILL.md contains 'boop list'"
-assert_file_contains "$SKILL" 'boop search' "SKILL.md contains 'boop search'"
-assert_file_contains "$SKILL" 'boop delete' "SKILL.md contains 'boop delete'"
-assert_file_contains "$SKILL" 'boop config' "SKILL.md contains 'boop config'"
-assert_file_contains "$SKILL" 'install.sh' "SKILL.md references install script"
-assert_file_contains "$SKILL" 'Gatekeeper|quarantine' "SKILL.md mentions Gatekeeper/quarantine"
-assert_file_contains "$SKILL" 'xattr -cr' "SKILL.md mentions xattr -cr"
-assert_file_contains "$SKILL" 'codesign' "SKILL.md mentions codesign"
-
-# ============================================================
-# Test 5: Justfile commands
-# ============================================================
-echo "=== Test 5: Justfile commands ==="
-
-JUSTFILE="$REPO_ROOT/justfile"
-assert_file_contains "$JUSTFILE" 'test-install' "justfile has test-install command"
-assert_file_contains "$JUSTFILE" 'test_install.sh' "justfile references test_install.sh"
-
-# ============================================================
-# Test 6: README content
-# ============================================================
-echo "=== Test 6: README content ==="
-
-README="$REPO_ROOT/README.md"
-assert_file_contains "$README" 'install.sh' "README references install script"
-assert_file_contains "$README" 'boop config set-server' "README has config instructions"
-assert_file_contains "$README" 'boop add' "README shows boop add usage"
-
-# ============================================================
-# Test 7: install.sh references correct repo
-# ============================================================
-echo "=== Test 7: install.sh repo reference ==="
-
-INSTALL="$REPO_ROOT/install.sh"
-assert_file_contains "$INSTALL" 'foundra-build/boopmark' "install.sh references correct GitHub repo"
-assert_file_contains "$INSTALL" '__BOOP_INSTALL_MAIN__' "install.sh has sentinel marker"
-
-# ============================================================
-# Summary
-# ============================================================
-echo ""
-echo "============================================================"
-echo "Results: $PASS passed, $FAIL failed, $TOTAL total"
-echo "============================================================"
-
-if [ "$FAIL" -gt 0 ]; then
-    exit 1
-fi
-```
-
-**Step 2: Run the CI/CD tests**
-
-Run: `sh tests/test_ci_cd.sh`
-Expected: All tests pass
-
-**Step 3: Commit**
-
-```bash
-git add tests/test_ci_cd.sh
-git commit -m "test: add CI/CD and plugin structure static assertions"
-```
-
----
-
-### Task 9: Final verification
+### Task 8: Final verification
 
 **Step 1: Run all install script tests**
 
 Run: `just test-install`
 Expected: All tests pass (0 failures)
 
-**Step 2: Run CI/CD static tests**
-
-Run: `sh tests/test_ci_cd.sh`
-Expected: All tests pass (0 failures)
-
-**Step 3: Run cargo tests for boop crate**
+**Step 2: Run cargo tests for boop crate**
 
 Run: `cargo test -p boop`
 Expected: All tests pass
 
-**Step 4: Verify justfile commands**
+**Step 3: Verify justfile commands**
 
 Run: `just --list`
 Expected: Shows `test-install`, `fmt-check`, `check` among the available commands
 
-**Step 5: Verify all files are committed**
+**Step 4: Verify all files are committed**
 
 Run: `git status`
 Expected: Clean working tree
@@ -1274,8 +1123,7 @@ Expected: Clean working tree
 | File | Action | Description |
 |------|--------|-------------|
 | `install.sh` | Create | Universal installer with platform detection, macOS Gatekeeper handling |
-| `tests/test_install.sh` | Create | Comprehensive install script tests (9 test groups) |
-| `tests/test_ci_cd.sh` | Create | Static assertions for CI/CD, plugin, README content |
+| `tests/test_install.sh` | Create | Comprehensive install script tests (11 test groups, including SKILL.md assertions) |
 | `.github/workflows/release.yml` | Create | Manual release workflow, 4 platform builds |
 | `.github/workflows/ci.yml` | Create | PR/push CI: fmt, clippy, test, install tests |
 | `.claude-plugin/marketplace.json` | Create | Plugin marketplace catalog |
