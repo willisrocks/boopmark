@@ -9,6 +9,7 @@ done
 
 export DATABASE_URL=postgres://boopmark:devpassword@127.0.0.1:5434/boopmark
 export ENABLE_E2E_AUTH=1
+export ENABLE_LOCAL_AUTH=1
 export APP_URL=http://127.0.0.1:4010
 export PORT=4010
 export SESSION_SECRET=e2e-session-secret
