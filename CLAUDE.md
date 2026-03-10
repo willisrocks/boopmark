@@ -17,6 +17,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - The E2E bootstrap script sets its own env inline, including `ENABLE_E2E_AUTH=1` and `STORAGE_BACKEND=local`, then waits for Postgres readiness before starting the server.
 - Use Playwright MCP or agent-browser for ad-hoc verification against the same local server, but keep the committed regression in `tests/e2e/suggest.spec.js` as the source of truth.
 
+## Local HTTPS (devproxy)
+
+This project uses [devproxy](https://github.com/foundra-build/devproxy) for local HTTPS dev subdomains.
+
+```bash
+devproxy up      # start and get an HTTPS URL
+devproxy ls      # list running projects (* = current dir)
+devproxy get-url # get current project's proxy URL
+devproxy down    # stop this project
+devproxy status  # check daemon health
+```
+
+URLs follow the format `https://{slug}-{app-name}.mysite.dev`.
+
+Use the `/devproxy:url` skill to get the current proxy URL on demand.
+
+## Worktree Setup
+
+When using trycycle or git worktrees, copy the root `.env` file to the worktree before running:
+
+```bash
+cp /path/to/main/repo/.env /path/to/worktree/.env
+```
+
+This is required for Docker Compose services that depend on environment variables.
+
 ## Architecture
 
 Boopmark is a full-stack bookmark management app using Rust with Axum, SQLx, HTMX, and Askama templates. Hexagonal (ports-and-adapters) architecture.
