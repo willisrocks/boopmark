@@ -63,13 +63,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Set CLI version from release input
-        env:
-          RELEASE_VERSION: ${{ github.event.inputs.version }}
-        run: |
-          sed -i.bak '0,/^version = ".*"/{s/^version = ".*"/version = "'"${RELEASE_VERSION}"'"/}' cli/Cargo.toml && rm -f cli/Cargo.toml.bak
-          cargo update -p boop
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -77,6 +70,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      - name: Set CLI version from release input
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          sed -i.bak '1,/^version = ".*"/{s/^version = ".*"/version = "'"${RELEASE_VERSION}"'"/;}' cli/Cargo.toml && rm -f cli/Cargo.toml.bak
+          cargo update -p boop
 
       - name: Run tests
         if: matrix.target != 'aarch64-unknown-linux-gnu'
