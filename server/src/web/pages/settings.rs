@@ -1,15 +1,50 @@
 use askama::Template;
 use axum::Form;
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect};
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::llm_settings::ANTHROPIC_MODEL_OPTIONS;
 use crate::web::extractors::AuthUser;
 use crate::web::pages::shared::UserView;
 use crate::web::state::AppState;
+
+struct ApiKeyView {
+    id: String,
+    name: String,
+    created_at_display: String,
+}
+
+impl From<crate::domain::ports::api_key_repo::ApiKey> for ApiKeyView {
+    fn from(k: crate::domain::ports::api_key_repo::ApiKey) -> Self {
+        Self {
+            id: k.id.to_string(),
+            name: k.name,
+            created_at_display: k.created_at.format("%b %d, %Y").to_string(),
+        }
+    }
+}
+
+#[derive(Template)]
+#[template(path = "settings/api_keys_list.html")]
+struct ApiKeysListFragment {
+    api_keys: Vec<ApiKeyView>,
+}
+
+#[derive(Template)]
+#[template(path = "settings/api_keys_created.html")]
+struct ApiKeysCreatedFragment {
+    raw_key: String,
+    api_keys: Vec<ApiKeyView>,
+}
+
+#[derive(Deserialize)]
+struct CreateApiKeyForm {
+    name: String,
+}
 
 struct ModelOptionView {
     label: String,
@@ -27,6 +62,7 @@ struct SettingsPage {
     has_anthropic_api_key: bool,
     anthropic_model_options: Vec<ModelOptionView>,
     success_message: Option<String>,
+    api_keys: Vec<ApiKeyView>,
 }
 
 fn render(t: &impl Template) -> axum::response::Response {
@@ -81,10 +117,14 @@ async fn settings_page(
     AuthUser(user): AuthUser,
     Query(query): Query<SettingsQuery>,
 ) -> axum::response::Response {
-    match state.settings.load(user.id).await {
-        Ok(settings) => {
+    let settings_result = state.settings.load(user.id).await;
+    let keys_result = state.auth.list_api_keys(user.id).await;
+
+    match (settings_result, keys_result) {
+        (Ok(settings), Ok(keys)) => {
             let email = user.email.clone();
             let anthropic_model = settings.anthropic_model;
+            let api_keys: Vec<ApiKeyView> = keys.into_iter().map(Into::into).collect();
 
             render(&SettingsPage {
                 user: Some(user.into()),
@@ -97,9 +137,10 @@ async fn settings_page(
                     .saved
                     .filter(|value| value == "1")
                     .map(|_| "Settings saved".to_string()),
+                api_keys,
             })
         }
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -139,8 +180,39 @@ async fn save_settings(
     }
 }
 
-async fn legacy_api_keys_redirect(AuthUser(_user): AuthUser) -> Redirect {
-    Redirect::to("/settings")
+async fn create_api_key_htmx(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Form(form): Form<CreateApiKeyForm>,
+) -> axum::response::Response {
+    let name = form.name.trim().to_string();
+    if name.is_empty() {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    }
+
+    match state.auth.create_api_key(user.id, &name).await {
+        Ok(raw_key) => {
+            let keys = state.auth.list_api_keys(user.id).await.unwrap_or_default();
+            let api_keys: Vec<ApiKeyView> = keys.into_iter().map(Into::into).collect();
+            render(&ApiKeysCreatedFragment { raw_key, api_keys })
+        }
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn delete_api_key_htmx(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    match state.auth.delete_api_key(id, user.id).await {
+        Ok(()) => {
+            let keys = state.auth.list_api_keys(user.id).await.unwrap_or_default();
+            let api_keys: Vec<ApiKeyView> = keys.into_iter().map(Into::into).collect();
+            render(&ApiKeysListFragment { api_keys })
+        }
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 pub fn routes() -> Router<AppState> {
@@ -151,7 +223,11 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/settings/api-keys",
-            axum::routing::get(legacy_api_keys_redirect),
+            axum::routing::post(create_api_key_htmx),
+        )
+        .route(
+            "/settings/api-keys/{id}",
+            axum::routing::delete(delete_api_key_htmx),
         )
 }
 

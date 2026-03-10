@@ -71,6 +71,31 @@
                 </button>
             </form>
         </section>
+
+        <section class="space-y-5">
+            <div>
+                <h2 class="text-lg font-semibold">API Keys</h2>
+                <p class="text-sm text-gray-400">Create keys to use the Boopmark API and CLI.</p>
+            </div>
+
+            <form hx-post="/settings/api-keys" hx-target="#api-keys-result" hx-swap="innerHTML" class="flex gap-3" data-testid="create-api-key-form">
+                <input
+                    type="text"
+                    name="name"
+                    placeholder="Key name (e.g. laptop, ci)"
+                    required
+                    class="flex-1 px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500 text-sm"
+                    data-testid="api-key-name-input"
+                >
+                <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium" data-testid="create-api-key-button">
+                    Create key
+                </button>
+            </form>
+
+            <div id="api-keys-result">
+                {% include "settings/api_keys_list.html" %}
+            </div>
+        </section>
     </div>
 </main>
 {% endblock %}
