@@ -96,12 +96,19 @@ async fn google_callback(
 
     // Download and cache avatar image
     let stored_image = if let Some(ref picture_url) = userinfo.picture {
-        download_and_store_avatar(picture_url, &state).await
+        download_and_store_avatar(picture_url, &client, &state).await
     } else {
         None
     };
 
-    // Look up the user's current avatar so we can clean up the old one after upsert
+    // Look up the user's current avatar so we can clean up the old one after upsert.
+    //
+    // NOTE: There is a known race condition here. If two concurrent Google logins
+    // for the same email happen simultaneously, both will see the same old avatar URL,
+    // both will store a new avatar, and one upsert will overwrite the other. The
+    // "losing" avatar file becomes an orphan in storage. This is accepted as the
+    // probability is extremely low (same user logging in concurrently) and the cost
+    // is a small orphaned image file.
     let old_avatar_url = state
         .auth
         .find_user_by_email(&userinfo.email)
@@ -110,7 +117,15 @@ async fn google_callback(
         .flatten()
         .and_then(|u| u.image);
 
-    // Upsert user and create session
+    // Upsert user and create session.
+    //
+    // NOTE: The upsert SQL uses `COALESCE($3, users.image)`, meaning if `stored_image`
+    // is `None` (avatar download failed), the existing `users.image` value is preserved.
+    // If a user's first login occurred before this feature was deployed, their `image`
+    // column may contain a raw Google URL (lh3.googleusercontent.com). A failed avatar
+    // download on subsequent logins will preserve that stale Google URL rather than
+    // clearing it. This is acceptable as a transitional state — the next successful
+    // login will replace it with a locally-stored avatar.
     let user = state
         .auth
         .upsert_user(userinfo.email, userinfo.name, stored_image.clone())
@@ -210,41 +225,63 @@ const MAX_AVATAR_BYTES: u64 = 5 * 1024 * 1024;
 /// Download timeout for avatar fetch.
 const AVATAR_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// JPEG, PNG, GIF, and WebP magic bytes for content validation.
-fn looks_like_image(bytes: &[u8]) -> bool {
-    if bytes.len() < 4 {
-        return false;
+/// Recognized image formats with their magic bytes.
+/// Returns the format name (used as file extension) if bytes match a known image format.
+fn detect_image_format(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() < 6 {
+        return None;
     }
     // JPEG: FF D8 FF
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return true;
+        return Some("jpg");
     }
     // PNG: 89 50 4E 47
     if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        return true;
+        return Some("png");
     }
-    // GIF: GIF87a or GIF89a
-    if bytes.starts_with(b"GIF8") {
-        return true;
+    // GIF: GIF87a or GIF89a (must check full 6-byte signature)
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("gif");
     }
     // WebP: RIFF....WEBP
     if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        return true;
+        return Some("webp");
     }
-    false
+    None
 }
 
 /// Download a Google avatar image, validate it, and store it in the images bucket.
 /// Returns `None` on any failure (graceful degradation — the Google URL is not stored
 /// as a fallback because we want to avoid hotlinking).
-async fn download_and_store_avatar(picture_url: &str, state: &AppState) -> Option<String> {
-    let client = reqwest::Client::builder()
-        .timeout(AVATAR_DOWNLOAD_TIMEOUT)
-        .build()
-        .ok()?;
+///
+/// Reuses the caller's `reqwest::Client` (which handles Google API calls) but applies
+/// a per-request timeout and HTTPS-only restriction to mitigate SSRF risks.
+async fn download_and_store_avatar(
+    picture_url: &str,
+    client: &reqwest::Client,
+    state: &AppState,
+) -> Option<String> {
+    // Only allow HTTPS URLs to prevent SSRF via redirects to internal HTTP endpoints
+    if !picture_url.starts_with("https://") {
+        tracing::warn!("Rejecting non-HTTPS avatar URL: {picture_url}");
+        return None;
+    }
 
-    let resp = match client.get(picture_url).send().await {
-        Ok(r) if r.status().is_success() => r,
+    let resp = match client
+        .get(picture_url)
+        .timeout(AVATAR_DOWNLOAD_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            // After following redirects, verify we're still on HTTPS
+            let final_url = r.url().as_str();
+            if !final_url.starts_with("https://") {
+                tracing::warn!("Avatar redirect landed on non-HTTPS URL: {final_url}");
+                return None;
+            }
+            r
+        }
         Ok(r) => {
             tracing::warn!("Avatar download returned status {}", r.status());
             return None;
@@ -284,18 +321,16 @@ async fn download_and_store_avatar(picture_url: &str, state: &AppState) -> Optio
         return None;
     }
 
-    // Validate magic bytes to confirm the response is actually an image
-    if !looks_like_image(&bytes) {
-        tracing::warn!("Avatar response does not look like a valid image, skipping");
-        return None;
-    }
-
-    let ext = match content_type.split(';').next().unwrap_or("").trim() {
-        "image/png" => "png",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        _ => "jpg",
+    // Validate magic bytes and derive the file extension from actual content,
+    // not the Content-Type header (which could be wrong or misleading)
+    let ext = match detect_image_format(&bytes) {
+        Some(fmt) => fmt,
+        None => {
+            tracing::warn!("Avatar response does not look like a valid image, skipping");
+            return None;
+        }
     };
+
     let key = format!("avatars/{}.{}", uuid::Uuid::new_v4(), ext);
 
     match state
@@ -325,39 +360,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn looks_like_image_detects_jpeg() {
+    fn detect_image_format_identifies_jpeg() {
         let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
-        assert!(looks_like_image(&jpeg));
+        assert_eq!(detect_image_format(&jpeg), Some("jpg"));
     }
 
     #[test]
-    fn looks_like_image_detects_png() {
+    fn detect_image_format_identifies_png() {
         let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-        assert!(looks_like_image(&png));
+        assert_eq!(detect_image_format(&png), Some("png"));
     }
 
     #[test]
-    fn looks_like_image_detects_gif() {
-        assert!(looks_like_image(b"GIF89a..."));
-        assert!(looks_like_image(b"GIF87a..."));
+    fn detect_image_format_identifies_gif() {
+        assert_eq!(detect_image_format(b"GIF89a..."), Some("gif"));
+        assert_eq!(detect_image_format(b"GIF87a..."), Some("gif"));
     }
 
     #[test]
-    fn looks_like_image_detects_webp() {
+    fn detect_image_format_rejects_invalid_gif_version() {
+        // GIF80a is not a valid GIF version
+        assert_eq!(detect_image_format(b"GIF80a..."), None);
+    }
+
+    #[test]
+    fn detect_image_format_identifies_webp() {
         let mut webp = vec![0u8; 12];
         webp[..4].copy_from_slice(b"RIFF");
         webp[8..12].copy_from_slice(b"WEBP");
-        assert!(looks_like_image(&webp));
+        assert_eq!(detect_image_format(&webp), Some("webp"));
     }
 
     #[test]
-    fn looks_like_image_rejects_html() {
-        assert!(!looks_like_image(b"<html>"));
+    fn detect_image_format_rejects_html() {
+        assert_eq!(detect_image_format(b"<html>.."), None);
     }
 
     #[test]
-    fn looks_like_image_rejects_short_input() {
-        assert!(!looks_like_image(&[0xFF, 0xD8]));
-        assert!(!looks_like_image(&[]));
+    fn detect_image_format_rejects_short_input() {
+        assert_eq!(detect_image_format(&[0xFF, 0xD8, 0xFF]), None);
+        assert_eq!(detect_image_format(&[]), None);
     }
 }
