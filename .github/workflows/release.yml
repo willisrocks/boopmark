@@ -67,7 +67,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ github.event.inputs.version }}
         run: |
-          sed -i.bak "s/^version = \".*\"/version = \"${RELEASE_VERSION}\"/" cli/Cargo.toml && rm -f cli/Cargo.toml.bak
+          sed -i.bak '0,/^version = ".*"/{s/^version = ".*"/version = "'"${RELEASE_VERSION}"'"/}' cli/Cargo.toml && rm -f cli/Cargo.toml.bak
           cargo update -p boop
 
       - uses: dtolnay/rust-toolchain@stable
