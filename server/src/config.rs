@@ -11,6 +11,7 @@ pub struct Config {
     pub google_client_id: String,
     pub google_client_secret: String,
     pub enable_e2e_auth: bool,
+    pub enable_local_auth: bool,
     pub storage_backend: StorageBackend,
     pub s3_endpoint: Option<String>,
     pub s3_bucket: String,
@@ -44,6 +45,9 @@ impl Config {
             google_client_secret: env::var("GOOGLE_CLIENT_SECRET")
                 .expect("GOOGLE_CLIENT_SECRET required"),
             enable_e2e_auth: env::var("ENABLE_E2E_AUTH")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+                .unwrap_or(false),
+            enable_local_auth: env::var("ENABLE_LOCAL_AUTH")
                 .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
                 .unwrap_or(false),
             storage_backend: match env::var("STORAGE_BACKEND")

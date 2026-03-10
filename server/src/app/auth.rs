@@ -1,3 +1,4 @@
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use crate::domain::error::DomainError;
 use crate::domain::ports::api_key_repo::{ApiKey, ApiKeyRepository};
 use crate::domain::ports::session_repo::SessionRepository;
@@ -31,6 +32,33 @@ where
 
     pub async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, DomainError> {
         self.users.find_by_email(email).await
+    }
+
+    pub async fn local_login(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<(User, String), DomainError> {
+        let user = self
+            .users
+            .find_by_email(email)
+            .await?
+            .ok_or(DomainError::Unauthorized)?;
+
+        let hash = user
+            .password_hash
+            .as_deref()
+            .ok_or(DomainError::Unauthorized)?;
+
+        let parsed_hash =
+            PasswordHash::new(hash).map_err(|_| DomainError::Internal("invalid hash".into()))?;
+
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .map_err(|_| DomainError::Unauthorized)?;
+
+        let token = self.create_session(user.id).await?;
+        Ok((user, token))
     }
 
     pub async fn upsert_user(

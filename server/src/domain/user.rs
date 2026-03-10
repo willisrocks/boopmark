@@ -8,6 +8,7 @@ pub struct User {
     pub email: String,
     pub name: Option<String>,
     pub image: Option<String>,
+    pub password_hash: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
