@@ -339,6 +339,17 @@ assert_file_contains() {
     fi
 }
 
+assert_file_not_contains() {
+    _file="$1"
+    _pattern="$2"
+    _desc="$3"
+    if grep -Eq -- "$_pattern" "$_file"; then
+        fail "$_desc" "pattern '$_pattern' unexpectedly found in $_file"
+    else
+        pass "$_desc"
+    fi
+}
+
 assert_line_before() {
     _file="$1"
     _first="$2"
@@ -403,6 +414,9 @@ assert_file_contains "$SKILL_MD" 'boop config' "SKILL.md contains 'boop config'"
 assert_file_contains "$SKILL_MD" '--description' "SKILL.md contains '--description'"
 assert_file_contains "$SKILL_MD" '--suggest' "SKILL.md contains '--suggest'"
 assert_file_contains "$SKILL_MD" 'LLM' "SKILL.md mentions LLM usage"
+assert_file_not_contains "$SKILL_MD" 'boop edit 123' "SKILL.md does not use invalid numeric edit examples"
+assert_file_contains "$SKILL_MD" 'boop edit <bookmark-uuid> --description "Updated summary"' "SKILL.md uses UUID placeholder in edit description example"
+assert_file_contains "$SKILL_MD" 'boop edit <bookmark-uuid> --suggest' "SKILL.md uses UUID placeholder in edit suggest example"
 assert_file_contains "$SKILL_MD" 'install.sh' "SKILL.md references install script"
 
 # ============================================================

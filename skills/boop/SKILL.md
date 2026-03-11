@@ -89,12 +89,12 @@ boop add https://example.com --suggest
 
 Edit an existing bookmark description:
 ```bash
-boop edit 123 --description "Updated summary"
+boop edit <bookmark-uuid> --description "Updated summary"
 ```
 
 Ask the server to suggest metadata for an existing bookmark:
 ```bash
-boop edit 123 --suggest
+boop edit <bookmark-uuid> --suggest
 ```
 
 Preview suggestions without saving:
