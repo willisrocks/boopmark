@@ -195,12 +195,12 @@ struct SuggestRequest {
     url: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct SuggestResponse {
     title: Option<String>,
     description: Option<String>,
     tags: Vec<String>,
+    #[allow(dead_code)]
     image_url: Option<String>,
     domain: Option<String>,
 }
@@ -281,6 +281,13 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
 
         Commands::Edit { id, title, description, tags, suggest } => {
+            // Validate id is a valid UUID
+            uuid::Uuid::parse_str(&id)
+                .map_err(|_| format!("Invalid bookmark ID: '{id}' is not a valid UUID"))?;
+            if !suggest && title.is_none() && description.is_none() && tags.is_none() {
+                eprintln!("Nothing to update. Provide --title, --description, --tags, or --suggest.");
+                return Ok(());
+            }
             let client = AppConfig::load().client()?;
             let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
             let body = UpdateBookmarkRequest { title, description, tags };
@@ -558,5 +565,17 @@ mod tests {
     fn test_cli_add_with_suggest() {
         let cli = Cli::try_parse_from(["boop", "add", "https://example.com", "--suggest"]).unwrap();
         assert!(matches!(cli.command, Commands::Add { suggest: true, .. }));
+    }
+
+    #[test]
+    fn test_cli_edit_with_description() {
+        let cli = Cli::try_parse_from(["boop", "edit", "some-id", "--description", "A desc"]).unwrap();
+        assert!(matches!(cli.command, Commands::Edit { suggest: false, .. }));
+    }
+
+    #[test]
+    fn test_cli_edit_with_tags() {
+        let cli = Cli::try_parse_from(["boop", "edit", "some-id", "--tags", "a,b"]).unwrap();
+        assert!(matches!(cli.command, Commands::Edit { suggest: false, .. }));
     }
 }

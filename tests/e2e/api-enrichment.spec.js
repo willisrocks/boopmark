@@ -226,24 +226,6 @@ test("updating a bookmark with suggest=true fills missing fields", async ({
   await freshContext.close();
 });
 
-// Clean up API keys created by this spec to avoid polluting other specs
-test("cleanup: delete API keys created by enrichment tests", async ({
-  page,
-}) => {
-  await signIn(page);
-  await page.goto("/settings");
-  // Delete all keys via the REST API (faster and avoids HTMX timing issues)
-  const keys = await page.evaluate(async () => {
-    const response = await fetch("/api/v1/auth/keys");
-    return response.json();
-  });
-  for (const key of keys) {
-    await page.evaluate(async (id) => {
-      await fetch(`/api/v1/auth/keys/${id}`, { method: "DELETE" });
-    }, key.id);
-  }
-});
-
 // Test 6: All enrichment endpoints return 401 without auth
 test("unauthenticated requests to enrichment endpoints are rejected", async ({
   request,
@@ -290,4 +272,21 @@ test("client-provided fields are not overwritten by enrichment with suggest=true
   expect(resp.body.tags).toContain("custom");
 
   await freshContext.close();
+});
+
+// Clean up API keys created by this spec to avoid polluting other specs
+test.afterAll(async ({ browser }) => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await signIn(page);
+  const keys = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/auth/keys");
+    return response.json();
+  });
+  for (const key of keys) {
+    await page.evaluate(async (id) => {
+      await fetch(`/api/v1/auth/keys/${id}`, { method: "DELETE" });
+    }, key.id);
+  }
+  await context.close();
 });

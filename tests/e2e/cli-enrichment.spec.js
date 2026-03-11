@@ -163,9 +163,10 @@ test.describe("CLI enrichment", () => {
   });
 
   // Clean up API keys created by this spec to avoid polluting other specs
-  test("cleanup: delete API keys created by CLI tests", async ({ page }) => {
+  test.afterAll(async ({ browser }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
     await signIn(page);
-    // Delete all keys via the REST API (faster and avoids HTMX timing issues)
     const keys = await page.evaluate(async () => {
       const response = await fetch("/api/v1/auth/keys");
       return response.json();
@@ -175,5 +176,6 @@ test.describe("CLI enrichment", () => {
         await fetch(`/api/v1/auth/keys/${id}`, { method: "DELETE" });
       }, key.id);
     }
+    await context.close();
   });
 });
