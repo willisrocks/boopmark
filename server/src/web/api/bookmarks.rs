@@ -11,6 +11,17 @@ use crate::domain::error::DomainError;
 use crate::web::extractors::AuthUser;
 use crate::web::state::{AppState, Bookmarks};
 
+#[derive(Debug, Default, Deserialize)]
+struct EnrichParams {
+    #[serde(default)]
+    suggest: bool,
+}
+
+#[derive(Deserialize)]
+struct SuggestRequest {
+    url: String,
+}
+
 /// Map DomainError to HTTP status + JSON body.
 fn error_response(err: DomainError) -> impl IntoResponse {
     let (status, message) = match &err {
@@ -94,11 +105,40 @@ async fn list_bookmarks(
     }
 }
 
+async fn suggest(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Json(input): Json<SuggestRequest>,
+) -> impl IntoResponse {
+    let result = state.enrichment.suggest(user.id, &input.url, None).await;
+    Json(result)
+}
+
 async fn create_bookmark(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
-    Json(input): Json<CreateBookmark>,
+    Query(params): Query<EnrichParams>,
+    Json(mut input): Json<CreateBookmark>,
 ) -> impl IntoResponse {
+    if params.suggest {
+        let suggestions = state.enrichment.suggest(user.id, &input.url, None).await;
+        if input.title.is_none() {
+            input.title = suggestions.title;
+        }
+        if input.description.is_none() {
+            input.description = suggestions.description;
+        }
+        if input.tags.as_ref().map_or(true, |t| t.is_empty()) && !suggestions.tags.is_empty() {
+            input.tags = Some(suggestions.tags);
+        }
+        if input.image_url.is_none() {
+            input.image_url = suggestions.image_url;
+        }
+        if input.domain.is_none() {
+            input.domain = suggestions.domain;
+        }
+    }
+
     let result = with_bookmarks!(&state.bookmarks, svc => svc.create(user.id, input).await);
     match result {
         Ok(bookmark) => Ok((StatusCode::CREATED, Json(bookmark))),
@@ -122,8 +162,31 @@ async fn update_bookmark(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(input): Json<UpdateBookmark>,
+    Query(params): Query<EnrichParams>,
+    Json(mut input): Json<UpdateBookmark>,
 ) -> impl IntoResponse {
+    if params.suggest {
+        let bookmark = with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await);
+        match bookmark {
+            Ok(bm) => {
+                let existing_tags = with_bookmarks!(&state.bookmarks, svc =>
+                    svc.tags_with_counts(user.id).await
+                ).ok();
+                let suggestions = state.enrichment.suggest(user.id, &bm.url, existing_tags).await;
+                if input.title.is_none() {
+                    input.title = suggestions.title;
+                }
+                if input.description.is_none() {
+                    input.description = suggestions.description;
+                }
+                if input.tags.as_ref().map_or(true, |t| t.is_empty()) && !suggestions.tags.is_empty() {
+                    input.tags = Some(suggestions.tags);
+                }
+            }
+            Err(e) => return Err(error_response(e)),
+        }
+    }
+
     let result = with_bookmarks!(&state.bookmarks, svc => svc.update(id, user.id, input).await);
     match result {
         Ok(bookmark) => Ok(Json(bookmark)),
@@ -165,4 +228,5 @@ pub fn routes() -> Router<AppState> {
                 .delete(delete_bookmark),
         )
         .route("/metadata", post(extract_metadata))
+        .route("/suggest", post(suggest))
 }

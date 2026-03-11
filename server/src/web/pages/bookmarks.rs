@@ -6,9 +6,8 @@ use axum::response::{Html, IntoResponse};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UpdateBookmark, UrlMetadata};
+use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UpdateBookmark};
 use crate::domain::error::DomainError;
-use crate::domain::ports::llm_enricher::{EnrichmentInput, EnrichmentOutput};
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
 use crate::web::pages::shared::UserView;
@@ -263,74 +262,24 @@ pub async fn suggest(
     AuthUser(user): AuthUser,
     Form(form): Form<SuggestForm>,
 ) -> axum::response::Response {
-    let metadata = if form.url.trim().is_empty() {
-        None
-    } else {
-        with_bookmarks!(&state.bookmarks, svc => svc.extract_metadata(&form.url).await).ok()
-    };
+    let result = state.enrichment.suggest(user.id, &form.url, None).await;
 
-    // Attempt LLM enrichment if user has it configured
-    let enrichment = try_llm_enrich(&state, user.id, &form.url, &metadata, None).await;
-
-    // Preserve user-typed tags; only use LLM tags if user hasn't typed any
+    // Preserve user-typed tags; only use enrichment tags if user hasn't typed any
     let user_tags = form.tags_input.and_then(non_empty);
     let suggest_tags = user_tags.unwrap_or_else(|| {
-        enrichment
-            .as_ref()
-            .map(|e| e.tags.join(", "))
-            .unwrap_or_default()
+        if result.tags.is_empty() {
+            String::new()
+        } else {
+            result.tags.join(", ")
+        }
     });
 
     render(&SuggestFields {
-        suggest_title: fill_if_blank(
-            form.title,
-            enrichment
-                .as_ref()
-                .and_then(|e| e.title.clone())
-                .or_else(|| metadata.as_ref().and_then(|m| m.title.clone())),
-        ),
-        suggest_description: fill_if_blank(
-            form.description,
-            enrichment
-                .as_ref()
-                .and_then(|e| e.description.clone())
-                .or_else(|| metadata.as_ref().and_then(|m| m.description.clone())),
-        ),
-        suggest_preview_image_url: metadata.and_then(|meta| meta.image_url),
+        suggest_title: fill_if_blank(form.title, result.title),
+        suggest_description: fill_if_blank(form.description, result.description),
+        suggest_preview_image_url: result.image_url,
         suggest_tags,
     })
-}
-
-async fn try_llm_enrich(
-    state: &AppState,
-    user_id: Uuid,
-    url: &str,
-    metadata: &Option<UrlMetadata>,
-    existing_tags: Option<Vec<(String, i64)>>,
-) -> Option<EnrichmentOutput> {
-    let (api_key, model) = match state.settings.get_decrypted_api_key(user_id).await {
-        Ok(Some(pair)) => pair,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::warn!(user_id = %user_id, error = %e, "failed to load LLM settings for enrichment");
-            return None;
-        }
-    };
-
-    let input = EnrichmentInput {
-        url: url.to_string(),
-        scraped_title: metadata.as_ref().and_then(|m| m.title.clone()),
-        scraped_description: metadata.as_ref().and_then(|m| m.description.clone()),
-        existing_tags,
-    };
-
-    match state.enricher.enrich(&api_key, &model, input).await {
-        Ok(output) => Some(output),
-        Err(e) => {
-            tracing::warn!(user_id = %user_id, url = %url, error = %e, "LLM enrichment failed, falling back to scrape-only");
-            None
-        }
-    }
 }
 
 pub async fn delete(
@@ -441,39 +390,28 @@ pub async fn edit_suggest(
         Err(e) => return error_response(e),
     };
 
-    let metadata = with_bookmarks!(&state.bookmarks, svc =>
-        svc.extract_metadata(&bookmark.url).await
-    )
-    .ok();
-
     // Get existing tags with counts for LLM context
     let existing_tags = with_bookmarks!(&state.bookmarks, svc =>
         svc.tags_with_counts(user.id).await
     )
     .ok();
 
-    let enrichment = try_llm_enrich(&state, user.id, &bookmark.url, &metadata, existing_tags).await;
+    let result = state.enrichment.suggest(user.id, &bookmark.url, existing_tags).await;
 
-    // For edit suggest, always prefer LLM/scraped suggestions over current
+    // For edit suggest, always prefer enrichment suggestions over current
     // form values. The user explicitly asked for suggestions, so we replace
     // all fields. Fall back to current form values only if no suggestion exists.
-    let suggest_tags = enrichment
-        .as_ref()
-        .map(|e| e.tags.join(", "))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| form.tags_input.and_then(non_empty).unwrap_or_default());
+    let suggest_tags = if !result.tags.is_empty() {
+        result.tags.join(", ")
+    } else {
+        form.tags_input.and_then(non_empty).unwrap_or_default()
+    };
 
-    let suggest_title = enrichment
-        .as_ref()
-        .and_then(|e| e.title.clone())
-        .or_else(|| metadata.as_ref().and_then(|m| m.title.clone()))
+    let suggest_title = result.title
         .and_then(non_empty)
         .unwrap_or_else(|| form.title.and_then(non_empty).unwrap_or_default());
 
-    let suggest_description = enrichment
-        .as_ref()
-        .and_then(|e| e.description.clone())
-        .or_else(|| metadata.as_ref().and_then(|m| m.description.clone()))
+    let suggest_description = result.description
         .and_then(non_empty)
         .unwrap_or_else(|| form.description.and_then(non_empty).unwrap_or_default());
 

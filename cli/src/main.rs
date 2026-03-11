@@ -17,7 +17,12 @@ enum Commands {
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
         tags: Option<String>,
+        /// Use LLM to suggest missing title, description, and tags
+        #[arg(long)]
+        suggest: bool,
     },
     /// List bookmarks
     List {
@@ -30,6 +35,23 @@ enum Commands {
     },
     /// Search bookmarks
     Search { query: String },
+    /// Edit a bookmark
+    Edit {
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        tags: Option<String>,
+        /// Use LLM to suggest title, description, and tags
+        #[arg(long)]
+        suggest: bool,
+    },
+    /// Get LLM suggestions for a URL without saving
+    Suggest {
+        url: String,
+    },
     /// Delete a bookmark
     Delete { id: String },
     /// Upgrade boop to the latest version
@@ -129,6 +151,20 @@ impl ApiClient {
             .map_err(|e| e.to_string())
     }
 
+    async fn put_json(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Result<reqwest::Response, String> {
+        self.client
+            .put(self.url(path))
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn delete(&self, path: &str) -> Result<reqwest::Response, String> {
         self.client
             .delete(self.url(path))
@@ -143,7 +179,30 @@ impl ApiClient {
 struct CreateBookmarkRequest {
     url: String,
     title: Option<String>,
+    description: Option<String>,
     tags: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct UpdateBookmarkRequest {
+    title: Option<String>,
+    description: Option<String>,
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct SuggestRequest {
+    url: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct SuggestResponse {
+    title: Option<String>,
+    description: Option<String>,
+    tags: Vec<String>,
+    image_url: Option<String>,
+    domain: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -200,14 +259,70 @@ async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
 
-        Commands::Add { url, title, tags } => {
+        Commands::Add { url, title, description, tags, suggest } => {
             let client = AppConfig::load().client()?;
             let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
-            let body = CreateBookmarkRequest { url, title, tags };
-            let resp = client.post_json("/bookmarks", &body).await?;
+            let body = CreateBookmarkRequest { url, title, description, tags };
+            let path = if suggest { "/bookmarks?suggest=true" } else { "/bookmarks" };
+            let resp = client.post_json(path, &body).await?;
             if resp.status().is_success() {
                 let bm: Bookmark = resp.json().await.map_err(|e| e.to_string())?;
                 println!("Added: {} ({})", bm.title.unwrap_or(bm.url), bm.id);
+                if let Some(desc) = &bm.description {
+                    println!("  {desc}");
+                }
+                if !bm.tags.is_empty() {
+                    println!("  [{}]", bm.tags.join(", "));
+                }
+            } else {
+                eprintln!("Failed: {}", resp.status());
+            }
+            Ok(())
+        }
+
+        Commands::Edit { id, title, description, tags, suggest } => {
+            let client = AppConfig::load().client()?;
+            let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
+            let body = UpdateBookmarkRequest { title, description, tags };
+            let path = if suggest {
+                format!("/bookmarks/{id}?suggest=true")
+            } else {
+                format!("/bookmarks/{id}")
+            };
+            let resp = client.put_json(&path, &body).await?;
+            if resp.status().is_success() {
+                let bm: Bookmark = resp.json().await.map_err(|e| e.to_string())?;
+                println!("Updated: {} ({})", bm.title.unwrap_or(bm.url), bm.id);
+                if let Some(desc) = &bm.description {
+                    println!("  {desc}");
+                }
+                if !bm.tags.is_empty() {
+                    println!("  [{}]", bm.tags.join(", "));
+                }
+            } else {
+                eprintln!("Failed: {}", resp.status());
+            }
+            Ok(())
+        }
+
+        Commands::Suggest { url } => {
+            let client = AppConfig::load().client()?;
+            let body = SuggestRequest { url };
+            let resp = client.post_json("/bookmarks/suggest", &body).await?;
+            if resp.status().is_success() {
+                let s: SuggestResponse = resp.json().await.map_err(|e| e.to_string())?;
+                if let Some(title) = &s.title {
+                    println!("Title: {title}");
+                }
+                if let Some(desc) = &s.description {
+                    println!("Description: {desc}");
+                }
+                if !s.tags.is_empty() {
+                    println!("Tags: {}", s.tags.join(", "));
+                }
+                if let Some(domain) = &s.domain {
+                    println!("Domain: {domain}");
+                }
             } else {
                 eprintln!("Failed: {}", resp.status());
             }
@@ -413,5 +528,35 @@ mod tests {
         assert!(result.is_ok());
         let target = result.unwrap();
         assert!(target.contains(std::env::consts::ARCH));
+    }
+
+    #[test]
+    fn test_cli_edit_recognized() {
+        let cli = Cli::try_parse_from(["boop", "edit", "some-id", "--suggest"]).unwrap();
+        assert!(matches!(cli.command, Commands::Edit { suggest: true, .. }));
+    }
+
+    #[test]
+    fn test_cli_edit_without_suggest() {
+        let cli = Cli::try_parse_from(["boop", "edit", "some-id", "--title", "New Title"]).unwrap();
+        assert!(matches!(cli.command, Commands::Edit { suggest: false, .. }));
+    }
+
+    #[test]
+    fn test_cli_suggest_recognized() {
+        let cli = Cli::try_parse_from(["boop", "suggest", "https://example.com"]).unwrap();
+        assert!(matches!(cli.command, Commands::Suggest { .. }));
+    }
+
+    #[test]
+    fn test_cli_add_with_description() {
+        let cli = Cli::try_parse_from(["boop", "add", "https://example.com", "--description", "A test"]).unwrap();
+        assert!(matches!(cli.command, Commands::Add { .. }));
+    }
+
+    #[test]
+    fn test_cli_add_with_suggest() {
+        let cli = Cli::try_parse_from(["boop", "add", "https://example.com", "--suggest"]).unwrap();
+        assert!(matches!(cli.command, Commands::Add { suggest: true, .. }));
     }
 }
