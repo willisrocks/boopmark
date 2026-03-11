@@ -332,10 +332,32 @@ assert_file_contains() {
     _file="$1"
     _pattern="$2"
     _desc="$3"
-    if grep -Eq "$_pattern" "$_file"; then
+    if grep -Eq -- "$_pattern" "$_file"; then
         pass "$_desc"
     else
         fail "$_desc" "pattern '$_pattern' not found in $_file"
+    fi
+}
+
+assert_file_not_contains() {
+    _file="$1"
+    _pattern="$2"
+    _desc="$3"
+    if grep -Eq -- "$_pattern" "$_file"; then
+        fail "$_desc" "pattern '$_pattern' unexpectedly found in $_file"
+    else
+        pass "$_desc"
+    fi
+}
+
+assert_output_contains() {
+    _output="$1"
+    _pattern="$2"
+    _desc="$3"
+    if printf '%s' "$_output" | grep -Eq -- "$_pattern"; then
+        pass "$_desc"
+    else
+        fail "$_desc" "pattern '$_pattern' not found in command output"
     fi
 }
 
@@ -391,12 +413,41 @@ fi
 echo "=== Test 10: SKILL.md contains key commands ==="
 
 SKILL_MD="$REPO_ROOT/skills/boop/SKILL.md"
+BOOP_HELP="$(cargo run -q -p boop -- --help)"
+BOOP_ADD_HELP="$(cargo run -q -p boop -- help add)"
+BOOP_EDIT_HELP="$(cargo run -q -p boop -- help edit)"
+BOOP_SUGGEST_HELP="$(cargo run -q -p boop -- help suggest)"
+BOOP_UPGRADE_HELP="$(cargo run -q -p boop -- help upgrade)"
+
+assert_output_contains "$BOOP_HELP" '^[[:space:]]+add([[:space:]]|$)' "CLI help contains 'add'"
+assert_output_contains "$BOOP_HELP" '^[[:space:]]+list([[:space:]]|$)' "CLI help contains 'list'"
+assert_output_contains "$BOOP_HELP" '^[[:space:]]+search([[:space:]]|$)' "CLI help contains 'search'"
+assert_output_contains "$BOOP_HELP" '^[[:space:]]+edit([[:space:]]|$)' "CLI help contains 'edit'"
+assert_output_contains "$BOOP_HELP" '^[[:space:]]+suggest([[:space:]]|$)' "CLI help contains 'suggest'"
+assert_output_contains "$BOOP_HELP" '^[[:space:]]+delete([[:space:]]|$)' "CLI help contains 'delete'"
+assert_output_contains "$BOOP_HELP" '^[[:space:]]+upgrade([[:space:]]|$)' "CLI help contains 'upgrade'"
+assert_output_contains "$BOOP_HELP" '^[[:space:]]+config([[:space:]]|$)' "CLI help contains 'config'"
+assert_output_contains "$BOOP_ADD_HELP" '--description <DESCRIPTION>' "CLI add help contains '--description'"
+assert_output_contains "$BOOP_ADD_HELP" '--suggest' "CLI add help contains '--suggest'"
+assert_output_contains "$BOOP_EDIT_HELP" '--description <DESCRIPTION>' "CLI edit help contains '--description'"
+assert_output_contains "$BOOP_EDIT_HELP" '--suggest' "CLI edit help contains '--suggest'"
+assert_output_contains "$BOOP_SUGGEST_HELP" 'Usage: boop suggest <URL>' "CLI suggest help contains suggest usage"
+assert_output_contains "$BOOP_UPGRADE_HELP" 'Usage: boop upgrade' "CLI upgrade help contains upgrade usage"
 
 assert_file_contains "$SKILL_MD" 'boop add' "SKILL.md contains 'boop add'"
 assert_file_contains "$SKILL_MD" 'boop list' "SKILL.md contains 'boop list'"
 assert_file_contains "$SKILL_MD" 'boop search' "SKILL.md contains 'boop search'"
+assert_file_contains "$SKILL_MD" 'boop edit' "SKILL.md contains 'boop edit'"
+assert_file_contains "$SKILL_MD" 'boop suggest' "SKILL.md contains 'boop suggest'"
 assert_file_contains "$SKILL_MD" 'boop delete' "SKILL.md contains 'boop delete'"
+assert_file_contains "$SKILL_MD" 'boop upgrade' "SKILL.md contains 'boop upgrade'"
 assert_file_contains "$SKILL_MD" 'boop config' "SKILL.md contains 'boop config'"
+assert_file_contains "$SKILL_MD" '--description' "SKILL.md contains '--description'"
+assert_file_contains "$SKILL_MD" '--suggest' "SKILL.md contains '--suggest'"
+assert_file_contains "$SKILL_MD" 'LLM' "SKILL.md mentions LLM usage"
+assert_file_contains "$SKILL_MD" 'boop edit <id>' "SKILL.md matches CLI edit placeholder"
+assert_file_contains "$SKILL_MD" 'boop delete <id>' "SKILL.md matches CLI delete placeholder"
+assert_file_contains "$SKILL_MD" 'boop edit <bookmark-uuid>' "SKILL.md shows UUID-shaped edit example"
 assert_file_contains "$SKILL_MD" 'install.sh' "SKILL.md references install script"
 
 # ============================================================
