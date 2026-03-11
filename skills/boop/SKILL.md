@@ -23,12 +23,12 @@ Command-line interface for managing bookmarks on Boopmark. Single Rust binary.
 | `boop list --tags "tag1,tag2"`             | List bookmarks with specific tags                      |
 | `boop list --sort oldest`                  | List bookmarks sorted oldest first                     |
 | `boop search <query>`                      | Search bookmarks                                       |
-| `boop edit <bookmark-uuid> --title "New Title"`       | Edit an existing bookmark title                        |
-| `boop edit <bookmark-uuid> --description "Summary"`   | Edit an existing bookmark description                  |
-| `boop edit <bookmark-uuid> --tags "a,b,c"`            | Edit an existing bookmark's tags                       |
-| `boop edit <bookmark-uuid> --suggest`                 | Ask the server to suggest title, description, and tags |
+| `boop edit <id> --title "New Title"`       | Edit an existing bookmark title                        |
+| `boop edit <id> --description "Summary"`   | Edit an existing bookmark description                  |
+| `boop edit <id> --tags "a,b,c"`            | Edit an existing bookmark's tags                       |
+| `boop edit <id> --suggest`                 | Ask the server to suggest title, description, and tags |
 | `boop suggest <url>`                       | Preview LLM suggestions without saving                 |
-| `boop delete <bookmark-uuid>`              | Delete a bookmark by ID                                |
+| `boop delete <id>`                         | Delete a bookmark by ID                                |
 | `boop upgrade`                             | Upgrade `boop` to the latest version                   |
 | `boop config set-server <url>`             | Set the Boopmark server URL                            |
 | `boop config set-key <key>`                | Set your API key                                       |
