@@ -332,7 +332,7 @@ assert_file_contains() {
     _file="$1"
     _pattern="$2"
     _desc="$3"
-    if grep -Eq "$_pattern" "$_file"; then
+    if grep -Eq -- "$_pattern" "$_file"; then
         pass "$_desc"
     else
         fail "$_desc" "pattern '$_pattern' not found in $_file"
@@ -395,8 +395,14 @@ SKILL_MD="$REPO_ROOT/skills/boop/SKILL.md"
 assert_file_contains "$SKILL_MD" 'boop add' "SKILL.md contains 'boop add'"
 assert_file_contains "$SKILL_MD" 'boop list' "SKILL.md contains 'boop list'"
 assert_file_contains "$SKILL_MD" 'boop search' "SKILL.md contains 'boop search'"
+assert_file_contains "$SKILL_MD" 'boop edit' "SKILL.md contains 'boop edit'"
+assert_file_contains "$SKILL_MD" 'boop suggest' "SKILL.md contains 'boop suggest'"
 assert_file_contains "$SKILL_MD" 'boop delete' "SKILL.md contains 'boop delete'"
+assert_file_contains "$SKILL_MD" 'boop upgrade' "SKILL.md contains 'boop upgrade'"
 assert_file_contains "$SKILL_MD" 'boop config' "SKILL.md contains 'boop config'"
+assert_file_contains "$SKILL_MD" '--description' "SKILL.md contains '--description'"
+assert_file_contains "$SKILL_MD" '--suggest' "SKILL.md contains '--suggest'"
+assert_file_contains "$SKILL_MD" 'LLM' "SKILL.md mentions LLM usage"
 assert_file_contains "$SKILL_MD" 'install.sh' "SKILL.md references install script"
 
 # ============================================================
