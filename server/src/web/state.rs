@@ -4,10 +4,10 @@ use crate::adapters::storage::local::LocalStorage;
 use crate::adapters::storage::s3::S3Storage;
 use crate::app::auth::AuthService;
 use crate::app::bookmarks::BookmarkService;
+use crate::app::enrichment::EnrichmentService;
 use crate::app::settings::SettingsService;
 use crate::config::Config;
 use crate::domain::error::DomainError;
-use crate::domain::ports::llm_enricher::LlmEnricher;
 use crate::domain::ports::storage::ObjectStorage;
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ pub struct AppState {
     pub auth: Arc<AuthService<PostgresPool, PostgresPool, PostgresPool>>,
     pub settings: Arc<SettingsService<PostgresPool>>,
     pub config: Arc<Config>,
-    pub enricher: Arc<dyn LlmEnricher>,
+    pub enrichment: Arc<EnrichmentService<HtmlMetadataExtractor, PostgresPool>>,
     pub images_storage: ImageStorage,
 }
 

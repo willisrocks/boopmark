@@ -11,6 +11,7 @@ use adapters::storage::local::LocalStorage;
 use adapters::storage::s3::S3Storage;
 use app::auth::AuthService;
 use app::bookmarks::BookmarkService;
+use app::enrichment::EnrichmentService;
 use app::secrets::SecretBox;
 use app::settings::SettingsService;
 use config::{Config, StorageBackend};
@@ -41,6 +42,7 @@ async fn main() {
     let db = Arc::new(PostgresPool::new(pool));
 
     let metadata = Arc::new(HtmlMetadataExtractor::new());
+    let metadata_for_enrichment = metadata.clone();
 
     let (bookmarks, images_storage) = match config.storage_backend {
         StorageBackend::Local => {
@@ -99,13 +101,18 @@ async fn main() {
     let secret_box = Arc::new(SecretBox::new(&config.llm_settings_encryption_key));
     let settings_service = Arc::new(SettingsService::new(db.clone(), secret_box));
     let enricher: Arc<dyn LlmEnricher> = Arc::new(AnthropicEnricher::new());
+    let enrichment_service = Arc::new(EnrichmentService::new(
+        metadata_for_enrichment,
+        enricher,
+        settings_service.clone(),
+    ));
 
     let state = AppState {
         bookmarks,
         auth: auth_service,
         settings: settings_service,
         config: Arc::new(config.clone()),
-        enricher,
+        enrichment: enrichment_service,
         images_storage,
     };
 
