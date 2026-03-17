@@ -157,40 +157,24 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 
 // --- CSV helpers ---
 
-/// Version marker written as the first line of every boopmark-generated CSV.
-///
-/// `parse_csv` looks for this line to decide whether to unescape formula
-/// prefixes. Third-party or manually created CSVs that lack the marker are
-/// imported verbatim — no fields are mutated.
-const CSV_VERSION_MARKER: &str = "# boopmark-csv-v1";
-
-/// The escape sentinel prepended to formula-trigger cells on export.
-///
-/// U+0001 (SOH) is self-escaping: a value starting with `\x01` is also
-/// prefixed, so the round-trip is lossless for all boopmark-generated CSVs.
-/// Unescaping is **only** applied when the file contains the version marker,
-/// so third-party CSVs are never mutated regardless of their content.
-const CSV_ESCAPE_SENTINEL: char = '\x01';
-
 /// Prefix-escape a cell value so spreadsheet apps don't execute it as a formula.
 ///
-/// Values starting with `=`, `+`, `-`, `@`, or `\x01` are prefixed with `\x01`.
-/// The `\x01` case is self-escaping: `\x01foo` → `\x01\x01foo` on export,
-/// `\x01\x01foo` → `\x01foo` on import (when the version marker is present).
+/// The OWASP CSV injection recommendation is to prefix formula-trigger chars
+/// (`=`, `+`, `-`, `@`) with a single quote `'`. Spreadsheet apps (Excel,
+/// Google Sheets, LibreOffice) display the `'` as a string prefix that is not
+/// included in the cell value, so the original text is shown without the quote.
+///
+/// This escaping is intentionally one-way: it is purely a display-safety
+/// measure for users who open the exported CSV in a spreadsheet. When the CSV
+/// is imported back into boopmark, the raw cell value is used directly without
+/// any unescaping. Users who need a lossless round-trip should use JSONL backup
+/// instead of CSV export.
 fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
-    if value.starts_with(['=', '+', '-', '@', CSV_ESCAPE_SENTINEL]) {
-        std::borrow::Cow::Owned(format!("{CSV_ESCAPE_SENTINEL}{value}"))
+    if value.starts_with(['=', '+', '-', '@']) {
+        std::borrow::Cow::Owned(format!("'{value}"))
     } else {
         std::borrow::Cow::Borrowed(value)
     }
-}
-
-/// Reverse `csv_safe`: strip the leading `\x01` sentinel.
-/// Only called by `parse_csv` when the CSV version marker is present.
-fn csv_unescape(s: &str) -> String {
-    s.strip_prefix(CSV_ESCAPE_SENTINEL)
-        .unwrap_or(s)
-        .to_string()
 }
 
 /// Encode tags as a JSON array so that tags containing `|` survive a roundtrip.
@@ -232,9 +216,8 @@ fn bookmarks_to_csv_export(bookmarks: &[Bookmark]) -> Result<String, String> {
         ])
         .map_err(|e| e.to_string())?;
     }
-    let body = String::from_utf8(wtr.into_inner().map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    Ok(format!("{CSV_VERSION_MARKER}\n{body}"))
+    String::from_utf8(wtr.into_inner().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
 }
 
 fn bookmarks_to_csv_backup(bookmarks: &[Bookmark]) -> Result<String, String> {
@@ -269,25 +252,11 @@ fn bookmarks_to_csv_backup(bookmarks: &[Bookmark]) -> Result<String, String> {
         ])
         .map_err(|e| e.to_string())?;
     }
-    let body = String::from_utf8(wtr.into_inner().map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    Ok(format!("{CSV_VERSION_MARKER}\n{body}"))
+    String::from_utf8(wtr.into_inner().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
 }
 
 fn parse_csv(text: &str) -> Result<Vec<ImportRecord>, String> {
-    // Detect whether this is a boopmark-generated CSV. Only boopmark CSVs
-    // have the \x01 sentinel scheme applied; third-party files are parsed
-    // verbatim (no unescaping) so their content is never mutated.
-    let (text, is_boopmark) = if let Some(rest) = text.strip_prefix(CSV_VERSION_MARKER) {
-        (rest.trim_start_matches('\n'), true)
-    } else {
-        (text, false)
-    };
-
-    // Select the unescape function at parse time to avoid branching per cell.
-    fn identity(s: &str) -> String { s.to_string() }
-    let unescape: fn(&str) -> String = if is_boopmark { csv_unescape } else { identity };
-
     let mut rdr = csv::Reader::from_reader(text.as_bytes());
     let headers = rdr.headers().map_err(|e| e.to_string())?.clone();
 
@@ -305,21 +274,29 @@ fn parse_csv(text: &str) -> Result<Vec<ImportRecord>, String> {
                     .unwrap_or("")
             };
             Ok(ImportRecord {
-                url: unescape(get("url")),
-                title: Some(unescape(get("title")))
-                    .filter(|s| !s.is_empty()),
-                description: Some(unescape(get("description")))
-                    .filter(|s| !s.is_empty()),
+                url: get("url").to_string(),
+                title: {
+                    let v = get("title").to_string();
+                    if v.is_empty() { None } else { Some(v) }
+                },
+                description: {
+                    let v = get("description").to_string();
+                    if v.is_empty() { None } else { Some(v) }
+                },
                 tags: tags_from_csv(get("tags")),
                 id: if has_id {
                     get("id").parse::<Uuid>().ok()
                 } else {
                     None
                 },
-                image_url: Some(unescape(get("image_url")))
-                    .filter(|s| !s.is_empty()),
-                domain: Some(unescape(get("domain")))
-                    .filter(|s| !s.is_empty()),
+                image_url: {
+                    let v = get("image_url").to_string();
+                    if v.is_empty() { None } else { Some(v) }
+                },
+                domain: {
+                    let v = get("domain").to_string();
+                    if v.is_empty() { None } else { Some(v) }
+                },
                 created_at: get("created_at").parse::<DateTime<Utc>>().ok(),
                 updated_at: get("updated_at").parse::<DateTime<Utc>>().ok(),
             })
@@ -565,30 +542,34 @@ mod tests {
 
     #[test]
     fn csv_formula_injection_cells_are_escaped() {
+        // Formula-trigger characters are prefixed with ' on export so that
+        // spreadsheet apps (Excel, Google Sheets) treat the cell as plain text.
         let mut bm = make_bookmark("https://example.com", vec![]);
         bm.title = Some("=SUM(1+1)".to_string());
         bm.description = Some("+malicious".to_string());
         let csv_text = bookmarks_to_csv_export(&[bm]).unwrap();
-        // Raw CSV must not contain an unescaped leading = or +. The sentinel
-        // \x01 is prepended so spreadsheet apps treat the cell as plain text.
-        assert!(csv_text.contains("\x01=SUM(1+1)"));
-        assert!(csv_text.contains("\x01+malicious"));
+        assert!(csv_text.contains("'=SUM(1+1)"));
+        assert!(csv_text.contains("'+malicious"));
     }
 
     #[test]
-    fn csv_formula_injection_survives_roundtrip() {
+    fn csv_formula_injection_is_one_way() {
+        // Formula-injection escaping is intentionally one-way: the ' prefix
+        // is added on export for spreadsheet safety but is NOT stripped on
+        // import. Users who need lossless CSV round-trips for formula-starting
+        // values should use JSONL backup instead.
         let mut bm = make_bookmark("https://example.com", vec![]);
         bm.title = Some("=HYPERLINK(\"evil\")".to_string());
-        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        let csv_text = bookmarks_to_csv_export(&[bm]).unwrap();
         let records = parse_csv(&csv_text).unwrap();
-        // After roundtrip the original title is restored (sentinel stripped).
-        assert_eq!(records[0].title, bm.title);
+        // The imported title has the escape prefix; original value is not restored.
+        assert_eq!(records[0].title.as_deref(), Some("'=HYPERLINK(\"evil\")"));
     }
 
     #[test]
     fn csv_tags_with_pipe_characters_roundtrip() {
-        // Tags containing `|` must survive CSV export/import unchanged because
-        // we now use JSON encoding instead of a pipe separator.
+        // Tags containing `|` survive CSV export/import unchanged because
+        // we use JSON encoding instead of a pipe separator.
         let bm = make_bookmark("https://example.com", vec!["a|b", "c|d"]);
         let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
         let records = parse_csv(&csv_text).unwrap();
@@ -596,22 +577,9 @@ mod tests {
     }
 
     #[test]
-    fn csv_apostrophe_formula_char_roundtrip() {
-        // User data starting with '= is NOT a formula trigger (the ' is the
-        // first char, not =), so csv_safe leaves it unchanged and csv_unescape
-        // also leaves it unchanged (no \x01 sentinel present).
-        let mut bm = make_bookmark("https://example.com", vec![]);
-        bm.title = Some("'=not-a-formula".to_string());
-        bm.description = Some("'+positive".to_string());
-        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
-        let records = parse_csv(&csv_text).unwrap();
-        assert_eq!(records[0].title, bm.title);
-        assert_eq!(records[0].description, bm.description);
-    }
-
-    #[test]
-    fn csv_genuine_apostrophe_not_stripped() {
-        // User data starting with ' followed by any char is left intact.
+    fn csv_apostrophe_prefix_preserved_on_import() {
+        // Values starting with ' (apostrophe) are not formula triggers and
+        // are exported unchanged; they are also imported unchanged.
         let mut bm = make_bookmark("https://example.com", vec![]);
         bm.title = Some("'90s nostalgia".to_string());
         let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
@@ -620,53 +588,11 @@ mod tests {
     }
 
     #[test]
-    fn csv_import_third_party_apostrophe_formula_preserved() {
-        // Third-party CSVs with apostrophe-escaped formula cells (e.g. from
-        // Excel export) are imported as-is; the \x01 sentinel is never present
-        // so csv_unescape never strips anything.
+    fn csv_import_all_field_values_verbatim() {
+        // parse_csv imports every field exactly as-is, including values that
+        // start with special characters like \x01, apostrophes, or formulas.
         let csv_text = "url,title\nhttps://example.com,'''=literal\n";
         let records = parse_csv(csv_text).unwrap();
-        // All three apostrophes and the formula char are preserved unchanged.
         assert_eq!(records[0].title.as_deref(), Some("'''=literal"));
-    }
-
-    #[test]
-    fn csv_sentinel_self_escaping_roundtrip() {
-        // A bookmark whose field starts with a literal \x01 survives CSV
-        // export+import via the self-escaping rule: \x01foo -> \x01\x01foo on
-        // export, back to \x01foo on import.
-        let mut bm = make_bookmark("https://example.com", vec![]);
-        bm.title = Some("\x01data".to_string());
-        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
-        assert!(csv_text.contains("\x01\x01data"));
-        let records = parse_csv(&csv_text).unwrap();
-        assert_eq!(records[0].title, bm.title);
-    }
-
-    #[test]
-    fn csv_legacy_apostrophe_escape_imports_as_literal() {
-        // A CSV produced by an earlier (pre-sentinel) version of this app used
-        // a leading apostrophe as a formula-injection escape, e.g. '=formula.
-        // The \x01 sentinel scheme cannot distinguish that escape from user
-        // data starting with '=, so the apostrophe is preserved on import
-        // rather than stripped. This is the correct trade-off: data integrity
-        // for current users takes precedence over lossless round-trip of
-        // apostrophe-escaped files that were never in production.
-        let csv_text = "url,title\nhttps://example.com,'=HYPERLINK(\"evil\")\n";
-        let records = parse_csv(csv_text).unwrap();
-        assert_eq!(
-            records[0].title.as_deref(),
-            Some("'=HYPERLINK(\"evil\")")
-        );
-    }
-
-    #[test]
-    fn csv_import_third_party_literal_sentinel_preserved() {
-        // Third-party CSVs that lack the boopmark version marker are imported
-        // verbatim: no unescaping is applied, so a field starting with a
-        // literal \x01 character is preserved unchanged.
-        let csv_text = "url,title\nhttps://example.com,\x01literal-data\n";
-        let records = parse_csv(csv_text).unwrap();
-        assert_eq!(records[0].title.as_deref(), Some("\x01literal-data"));
     }
 }
