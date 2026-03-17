@@ -1,7 +1,7 @@
 use crate::domain::error::DomainError;
 
-#[trait_variant::make(Send)]
 #[allow(dead_code)]
+#[trait_variant::make(Send)]
 pub trait ObjectStorage: Send + Sync {
     async fn put(
         &self,

@@ -2,7 +2,6 @@ use base64::Engine;
 use std::env;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Config {
     pub database_url: String,
     pub app_url: String,

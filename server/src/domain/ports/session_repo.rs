@@ -3,7 +3,6 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 #[derive(sqlx::FromRow)]
-#[allow(dead_code)]
 pub struct Session {
     pub id: Uuid,
     pub user_id: Uuid,

@@ -18,19 +18,23 @@ pub struct MaybeUser(pub Option<User>);
 
 async fn resolve_user(parts: &mut Parts, state: &AppState) -> Option<User> {
     // 1. Check Authorization header for API key
-    if let Some(auth_header) = parts.headers.get("authorization")
-        && let Ok(value) = auth_header.to_str()
-            && let Some(token) = value.strip_prefix("Bearer ")
-                && let Ok(user) = state.auth.validate_api_key(token).await {
+    if let Some(auth_header) = parts.headers.get("authorization") {
+        if let Ok(value) = auth_header.to_str() {
+            if let Some(token) = value.strip_prefix("Bearer ") {
+                if let Ok(user) = state.auth.validate_api_key(token).await {
                     return Some(user);
                 }
+            }
+        }
+    }
 
     // 2. Fall back to session cookie
     let jar = CookieJar::from_headers(&parts.headers);
-    if let Some(cookie) = jar.get("session")
-        && let Ok(user) = state.auth.validate_session(cookie.value()).await {
+    if let Some(cookie) = jar.get("session") {
+        if let Ok(user) = state.auth.validate_session(cookie.value()).await {
             return Some(user);
         }
+    }
 
     None
 }

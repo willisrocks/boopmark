@@ -4,7 +4,7 @@ mod settings;
 pub(crate) mod shared;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 
 use crate::web::extractors::MaybeUser;
 use crate::web::state::AppState;

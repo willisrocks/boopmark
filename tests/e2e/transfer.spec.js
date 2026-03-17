@@ -129,10 +129,12 @@ test("export CSV returns a file with url, title, description, tags columns", asy
 
   const lines = resp.body.split("\n").filter((l) => l.trim());
   expect(lines[0]).toBe("url,title,description,tags");
-  const hasOurRow = lines.some((l) =>
+  const ourRow = lines.find((l) =>
     l.includes("https://example.com/export-csv-test")
   );
-  expect(hasOurRow).toBe(true);
+  expect(ourRow).toBeDefined();
+  // Tags must be pipe-separated (csv|test), not JSON-encoded
+  expect(ourRow).toContain("csv|test");
 
   await freshContext.close();
 });
@@ -729,10 +731,7 @@ test("settings page import form shows result after uploading a JSONL file", asyn
   await page.getByRole("button", { name: "Import" }).click();
 
   const resultEl = page.locator("#import-result");
-  await expect(resultEl).not.toBeEmpty({ timeout: 10000 });
-  const text = await resultEl.textContent();
-  // Expect either a success summary or an error message (form submitted)
-  expect(text.length).toBeGreaterThan(0);
+  await expect(resultEl).toContainText("Created: 1", { timeout: 10000 });
 });
 
 // Test 16: Backup-mode export and restore-mode import roundtrip preserves IDs

@@ -179,25 +179,17 @@ fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Encode tags as a JSON array so that tags containing `|` survive a roundtrip.
+/// Encode tags as a pipe-separated string for CSV export (e.g. `a|b|c`).
+///
+/// Tags containing `|` will be split on re-import — this is an accepted
+/// limitation of pipe-separated CSV. For lossless round-trips, use JSONL
+/// backup instead.
 fn tags_to_csv(tags: &[String]) -> String {
-    serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string())
+    tags.join("|")
 }
 
-/// Decode tags from a CSV cell. Accepts both the current JSON-array format
-/// (written by `tags_to_csv`) and the legacy pipe-delimited format, so that
-/// CSV files exported before this change can still be imported.
-///
-/// Known limitation: a single legacy tag whose text is a valid JSON string
-/// array (e.g. `["a"]`) will be misread as a JSON-encoded tag list and
-/// imported as tag `a`. This case is considered theoretical and not worth
-/// the complexity of a versioned format marker.
+/// Decode tags from a pipe-separated CSV cell (e.g. `a|b|c`).
 fn tags_from_csv(cell: &str) -> Vec<String> {
-    // JSON array format (current): ["a","b"]
-    if let Ok(tags) = serde_json::from_str::<Vec<String>>(cell) {
-        return tags;
-    }
-    // Legacy pipe-delimited format: a|b|c
     cell.split('|')
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -594,11 +586,14 @@ mod tests {
     }
 
     #[test]
-    fn csv_tags_with_pipe_characters_roundtrip() {
-        // Tags containing `|` survive CSV export/import unchanged because
-        // we use JSON encoding instead of a pipe separator.
-        let bm = make_bookmark("https://example.com", vec!["a|b", "c|d"]);
+    fn csv_tags_pipe_separated_export_and_import() {
+        // Tags are exported as pipe-separated (e.g. rust|web) and imported
+        // by splitting on `|`. Tags containing `|` themselves will be split
+        // on re-import — this is an accepted limitation of the pipe format.
+        // For lossless round-trips use JSONL backup.
+        let bm = make_bookmark("https://example.com", vec!["rust", "web"]);
         let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        assert!(csv_text.contains("rust|web"), "tags must be pipe-separated in CSV");
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records[0].tags, bm.tags);
     }

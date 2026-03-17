@@ -171,10 +171,11 @@ async fn google_callback(
         Err(e) => {
             // Clean up the newly stored avatar since the upsert failed —
             // no user record will reference it, so it would be orphaned.
-            if let Some(ref new_url) = stored_image
-                && let Some(key) = state.images_storage.key_from_url(new_url) {
+            if let Some(ref new_url) = stored_image {
+                if let Some(key) = state.images_storage.key_from_url(new_url) {
                     let _ = state.images_storage.delete(&key).await;
                 }
+            }
             return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
         }
     };
@@ -182,13 +183,17 @@ async fn google_callback(
     // Clean up old avatar from storage only when a new one was successfully stored.
     // When stored_image is None (download failed), the upsert preserves the old URL
     // via COALESCE, so we must NOT delete the old file — the DB still references it.
-    if let Some(ref new_url) = stored_image
-        && let Some(ref old_url) = old_avatar_url
-            && new_url != old_url
-                && let Some(old_key) = state.images_storage.key_from_url(old_url)
-                    && let Err(e) = state.images_storage.delete(&old_key).await {
+    if let Some(ref new_url) = stored_image {
+        if let Some(ref old_url) = old_avatar_url {
+            if new_url != old_url {
+                if let Some(old_key) = state.images_storage.key_from_url(old_url) {
+                    if let Err(e) = state.images_storage.delete(&old_key).await {
                         tracing::warn!("Failed to delete old avatar {old_key}: {e}");
                     }
+                }
+            }
+        }
+    }
 
     let session_token = state
         .auth
@@ -395,11 +400,12 @@ async fn download_and_store_avatar(picture_url: &str, state: &AppState) -> Optio
     };
 
     // Check Content-Length before reading the body
-    if let Some(len) = resp.content_length()
-        && len > MAX_AVATAR_BYTES {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_AVATAR_BYTES {
             tracing::warn!("Avatar too large ({len} bytes), skipping");
             return None;
         }
+    }
 
     // Stream the body in chunks with a hard size cap to prevent memory exhaustion
     // if Content-Length is absent or lies
