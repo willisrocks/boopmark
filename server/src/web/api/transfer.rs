@@ -188,8 +188,17 @@ fn tags_to_csv(tags: &[String]) -> String {
     tags.join("|")
 }
 
-/// Decode tags from a pipe-separated CSV cell (e.g. `a|b|c`).
+/// Decode tags from a CSV cell.
+///
+/// Accepts both pipe-separated (current format, e.g. `a|b|c`) and JSON-array
+/// format (e.g. `["a","b"]`) for backward compatibility with files exported
+/// by earlier versions of this implementation.
 fn tags_from_csv(cell: &str) -> Vec<String> {
+    // JSON-array format (written by earlier versions): ["a","b"]
+    if let Ok(tags) = serde_json::from_str::<Vec<String>>(cell) {
+        return tags;
+    }
+    // Current pipe-separated format: a|b|c
     cell.split('|')
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -596,6 +605,17 @@ mod tests {
         assert!(csv_text.contains("rust|web"), "tags must be pipe-separated in CSV");
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records[0].tags, bm.tags);
+    }
+
+    #[test]
+    fn csv_tags_json_array_format_imports_correctly_for_backward_compat() {
+        // CSV files exported by older versions used JSON-array encoding for
+        // tags. Import must still handle those files correctly.
+        // The CSV writer would have quoted the JSON array and doubled internal
+        // quotes: "[""rust"",""web""]"
+        let csv_text = "url,title,description,tags\nhttps://example.com,T,D,\"[\"\"rust\"\",\"\"web\"\"]\"\n";
+        let records = parse_csv(csv_text).unwrap();
+        assert_eq!(records[0].tags, vec!["rust", "web"]);
     }
 
     #[test]

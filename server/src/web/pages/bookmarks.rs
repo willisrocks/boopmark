@@ -88,6 +88,7 @@ struct GridPage {
     sort: String,
     suggest_title: String,
     suggest_description: String,
+    #[allow(dead_code)]
     suggest_preview_image_url: Option<String>,
     suggest_tags: String,
 }
@@ -111,6 +112,7 @@ struct BookmarkCard {
 struct SuggestFields {
     suggest_title: String,
     suggest_description: String,
+    #[allow(dead_code)]
     suggest_preview_image_url: Option<String>,
     suggest_tags: String,
 }
