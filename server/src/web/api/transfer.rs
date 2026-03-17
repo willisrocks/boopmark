@@ -159,22 +159,29 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 
 /// The escape sentinel prepended to formula-trigger cells on export.
 ///
-/// U+0001 (SOH, Start of Heading) is a control character that cannot appear in
-/// user-entered text, so it is unambiguous as an escape prefix. Using it lets
-/// `csv_unescape` strip it unconditionally — no apostrophe-counting or
-/// look-ahead heuristics needed — which means third-party CSV values are never
-/// accidentally mutated and the round-trip is fully lossless for all inputs.
+/// U+0001 (SOH, Start of Heading) is used as the escape sentinel:
+/// - `csv_safe` prefixes formula-trigger values (`=`, `+`, `-`, `@`) with `\x01`.
+/// - `csv_safe` also prefixes any value already starting with `\x01`, so that
+///   bookmark data containing a literal leading `\x01` survives the round-trip
+///   unchanged (self-escaping: `\x01foo` → `\x01\x01foo` → `\x01foo`).
+/// - `csv_unescape` strips exactly one leading `\x01` when present.
 ///
-/// Spreadsheet apps (Excel, Google Sheets, LibreOffice) treat a cell starting
-/// with \x01 as plain text and do not execute the rest as a formula, so the
-/// injection-prevention goal is achieved without relying on the `'` prefix.
+/// Because the sentinel is self-escaping, third-party CSV values are only
+/// mutated when they genuinely start with `\x01` (an extremely rare control
+/// character that no browser, web app, or human would place in a bookmark).
+///
+/// Spreadsheet apps treat a cell starting with `\x01` as plain text and do not
+/// execute it as a formula, achieving the injection-prevention goal without
+/// relying on the apostrophe convention.
 const CSV_ESCAPE_SENTINEL: char = '\x01';
 
 /// Prefix-escape a cell value so spreadsheet apps don't execute it as a formula.
-/// Values starting with `=`, `+`, `-`, or `@` are prefixed with `\x01` (SOH).
+///
+/// Values starting with `=`, `+`, `-`, or `@` are prefixed with `\x01`.
+/// Values already starting with `\x01` are also prefixed (self-escaping).
 /// All other values are returned unchanged.
 fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
-    if value.starts_with(['=', '+', '-', '@']) {
+    if value.starts_with(['=', '+', '-', '@', CSV_ESCAPE_SENTINEL]) {
         std::borrow::Cow::Owned(format!("{CSV_ESCAPE_SENTINEL}{value}"))
     } else {
         std::borrow::Cow::Borrowed(value)
@@ -182,9 +189,7 @@ fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Reverse `csv_safe`: strip the leading `\x01` sentinel when present.
-/// Any other value, including those starting with apostrophes, is returned
-/// unchanged. This is an unconditional strip, so round-trips are always
-/// lossless and third-party CSV values are never affected.
+/// All other values are returned unchanged.
 fn csv_unescape(s: &str) -> String {
     s.strip_prefix(CSV_ESCAPE_SENTINEL)
         .unwrap_or(s)
@@ -611,5 +616,35 @@ mod tests {
         let records = parse_csv(csv_text).unwrap();
         // All three apostrophes and the formula char are preserved unchanged.
         assert_eq!(records[0].title.as_deref(), Some("'''=literal"));
+    }
+
+    #[test]
+    fn csv_sentinel_self_escaping_roundtrip() {
+        // A bookmark whose field starts with a literal \x01 survives CSV
+        // export+import via the self-escaping rule: \x01foo -> \x01\x01foo on
+        // export, back to \x01foo on import.
+        let mut bm = make_bookmark("https://example.com", vec![]);
+        bm.title = Some("\x01data".to_string());
+        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        assert!(csv_text.contains("\x01\x01data"));
+        let records = parse_csv(&csv_text).unwrap();
+        assert_eq!(records[0].title, bm.title);
+    }
+
+    #[test]
+    fn csv_legacy_apostrophe_escape_imports_as_literal() {
+        // A CSV produced by an earlier (pre-sentinel) version of this app used
+        // a leading apostrophe as a formula-injection escape, e.g. '=formula.
+        // The \x01 sentinel scheme cannot distinguish that escape from user
+        // data starting with '=, so the apostrophe is preserved on import
+        // rather than stripped. This is the correct trade-off: data integrity
+        // for current users takes precedence over lossless round-trip of
+        // apostrophe-escaped files that were never in production.
+        let csv_text = "url,title\nhttps://example.com,'=HYPERLINK(\"evil\")\n";
+        let records = parse_csv(csv_text).unwrap();
+        assert_eq!(
+            records[0].title.as_deref(),
+            Some("'=HYPERLINK(\"evil\")")
+        );
     }
 }
