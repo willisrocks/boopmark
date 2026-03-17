@@ -174,7 +174,7 @@ impl BookmarkRepository for PostgresPool {
     ) -> Result<Option<Bookmark>, DomainError> {
         sqlx::query_as::<_, Bookmark>(
             "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at
-             FROM bookmarks WHERE user_id = $1 AND url = $2 ORDER BY created_at ASC LIMIT 1",
+             FROM bookmarks WHERE user_id = $1 AND url = $2 ORDER BY created_at ASC, id ASC LIMIT 1",
         )
         .bind(user_id)
         .bind(url)

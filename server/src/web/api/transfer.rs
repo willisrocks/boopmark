@@ -158,8 +158,9 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 // --- CSV helpers ---
 
 /// Prefix-escape a cell value so spreadsheet apps don't execute it as a formula.
-/// Cells starting with =, +, -, @ are prefixed with a single quote, which is the
-/// standard defence against CSV injection (RFC-4180 / OWASP recommendation).
+/// Only cells starting with =, +, -, @ are escaped; the prefix quote is
+/// distinguished from a genuine leading apostrophe by the formula char that
+/// follows, so the roundtrip is lossless for values like `'90s`.
 fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
     if value.starts_with(['=', '+', '-', '@']) {
         std::borrow::Cow::Owned(format!("'{value}"))
@@ -168,14 +169,35 @@ fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Reverse `csv_safe`: strip the escape prefix only when the pattern is
+/// `'` followed immediately by a formula-trigger character. A genuine leading
+/// apostrophe (e.g. `'90s`, `'draft`) is left intact.
+fn csv_unescape(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix('\'')
+        && rest.starts_with(['=', '+', '-', '@']) {
+            return rest.to_string();
+        }
+    s.to_string()
+}
+
 /// Encode tags as a JSON array so that tags containing `|` survive a roundtrip.
 fn tags_to_csv(tags: &[String]) -> String {
     serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Decode tags from the JSON array written by `tags_to_csv`.
+/// Decode tags from a CSV cell. Accepts both the current JSON-array format
+/// (written by `tags_to_csv`) and the legacy pipe-delimited format, so that
+/// CSV files exported before this change can still be imported.
 fn tags_from_csv(cell: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(cell).unwrap_or_default()
+    // JSON array format (current): ["a","b"]
+    if let Ok(tags) = serde_json::from_str::<Vec<String>>(cell) {
+        return tags;
+    }
+    // Legacy pipe-delimited format: a|b|c
+    cell.split('|')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn bookmarks_to_csv_export(bookmarks: &[Bookmark]) -> Result<String, String> {
@@ -249,16 +271,11 @@ fn parse_csv(text: &str) -> Result<Vec<ImportRecord>, String> {
                     .and_then(|idx| row.get(idx))
                     .unwrap_or("")
             };
-            // Strip the formula-injection prefix quote if present
-            let unescaped = |s: &str| -> String {
-                s.strip_prefix('\'').unwrap_or(s).to_string()
-            };
-            let raw_url = unescaped(get("url"));
             Ok(ImportRecord {
-                url: raw_url,
-                title: Some(unescaped(get("title")))
+                url: csv_unescape(get("url")),
+                title: Some(csv_unescape(get("title")))
                     .filter(|s| !s.is_empty()),
-                description: Some(unescaped(get("description")))
+                description: Some(csv_unescape(get("description")))
                     .filter(|s| !s.is_empty()),
                 tags: tags_from_csv(get("tags")),
                 id: if has_id {
@@ -266,9 +283,9 @@ fn parse_csv(text: &str) -> Result<Vec<ImportRecord>, String> {
                 } else {
                     None
                 },
-                image_url: Some(unescaped(get("image_url")))
+                image_url: Some(csv_unescape(get("image_url")))
                     .filter(|s| !s.is_empty()),
-                domain: Some(unescaped(get("domain")))
+                domain: Some(csv_unescape(get("domain")))
                     .filter(|s| !s.is_empty()),
                 created_at: get("created_at").parse::<DateTime<Utc>>().ok(),
                 updated_at: get("updated_at").parse::<DateTime<Utc>>().ok(),
