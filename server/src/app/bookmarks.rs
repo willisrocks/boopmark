@@ -169,10 +169,18 @@ where
                     };
 
                     let now = chrono::Utc::now();
-                    // If only one timestamp is present, use it for both to
-                    // avoid impossible metadata where created_at > updated_at.
-                    let updated_at = record.updated_at.unwrap_or(now);
-                    let created_at = record.created_at.unwrap_or(updated_at);
+                    // Derive both timestamps from whichever is present to
+                    // avoid impossible ordering (created_at > updated_at):
+                    //   - both present      → use as-is
+                    //   - only created_at   → updated_at = created_at
+                    //   - only updated_at   → created_at = updated_at
+                    //   - neither present   → both = now
+                    let (created_at, updated_at) = match (record.created_at, record.updated_at) {
+                        (Some(c), Some(u)) => (c, u),
+                        (Some(c), None) => (c, c),
+                        (None, Some(u)) => (u, u),
+                        (None, None) => (now, now),
+                    };
                     let bookmark = Bookmark {
                         id,
                         user_id,
@@ -832,19 +840,32 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn restore_cross_account_pk_collision_via_upsert_full_is_a_row_error() {
-            // Race condition: the ID appears to belong to the same user during
-            // get(), but upsert_full returns AlreadyExists because the row was
-            // transferred between the get and the upsert (or the mock enforces
-            // cross-tenant guard). Must be a row-level error.
+        async fn mock_upsert_full_rejects_cross_tenant_id_directly() {
+            // Direct unit test of MockRepo::upsert_full's cross-tenant guard.
+            // The service-level path that reaches upsert_full with a
+            // cross-tenant collision is a race condition (ID changes owner
+            // between get() and upsert_full()) not easily reproduced in an
+            // in-memory mock; this test verifies the guard at the repo level.
             let user_a = Uuid::new_v4();
             let user_b = Uuid::new_v4();
             let shared_id = Uuid::new_v4();
 
-            // Pre-populate with user_b owning shared_id (so get succeeds),
-            // but we inject user_a's user_id into the record to simulate the
-            // cross-tenant guard firing inside upsert_full.
             let existing = Bookmark {
+                id: shared_id,
+                user_id: user_a,
+                url: "https://user-a.example.com".to_string(),
+                title: None,
+                description: None,
+                image_url: None,
+                domain: None,
+                tags: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            let repo = Arc::new(MockRepo::new(vec![existing]));
+
+            // user_b tries to upsert a row whose ID belongs to user_a.
+            let intruder = Bookmark {
                 id: shared_id,
                 user_id: user_b,
                 url: "https://user-b.example.com".to_string(),
@@ -856,35 +877,30 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             };
-            let svc = make_service(vec![existing]);
-
-            // user_a tries to upsert shared_id; get(shared_id, user_a) returns
-            // NotFound so this goes via insert_with_id. Verify the error path.
-            let record = make_restore_record("https://user-a.example.com", shared_id);
-            let result = svc
-                .import_batch(
-                    user_a,
-                    vec![record],
-                    ImportStrategy::Upsert,
-                    ImportMode::Restore,
-                )
-                .await
-                .unwrap();
-            assert_eq!(result.errors.len(), 1, "cross-account collision must be a row error");
-            assert_eq!(result.created, 0);
+            let err = repo.upsert_full(intruder).await.unwrap_err();
+            assert!(
+                matches!(err, DomainError::AlreadyExists),
+                "upsert_full must return AlreadyExists for cross-tenant ID"
+            );
         }
 
         #[tokio::test]
         async fn restore_missing_updated_at_uses_created_at_to_preserve_ordering() {
-            // When updated_at is missing but created_at is present, updated_at
-            // should fall back to now (>= created_at), not to now independently.
-            // The key invariant is created_at <= updated_at after restore.
+            // When updated_at is missing but created_at is present, the stored
+            // bookmark must have updated_at == created_at (not "now"), so that
+            // created_at <= updated_at is maintained.
             let user_id = Uuid::new_v4();
-            let svc = make_service(vec![]);
+            let repo = Arc::new(MockRepo::new(vec![]));
+            let svc = BookmarkService::new(
+                Arc::clone(&repo),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+            );
             let past = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc);
-            let mut record = make_restore_record("https://example.com", Uuid::new_v4());
+            let id = Uuid::new_v4();
+            let mut record = make_restore_record("https://example.com", id);
             record.created_at = Some(past);
             record.updated_at = None;
             let result = svc
@@ -896,10 +912,72 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            // Must succeed (not error) and created_at <= updated_at is guaranteed
-            // by the implementation using created_at.unwrap_or(updated_at).
             assert_eq!(result.errors.len(), 0);
             assert_eq!(result.created, 1);
+
+            // Verify created_at <= updated_at in the persisted bookmark.
+            let stored = repo
+                .export_all(user_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|b| b.id == id)
+                .expect("bookmark should have been persisted");
+            assert_eq!(stored.created_at, past, "created_at must be preserved");
+            assert_eq!(
+                stored.updated_at, past,
+                "updated_at must fall back to created_at when absent"
+            );
+            assert!(
+                stored.created_at <= stored.updated_at,
+                "created_at must not exceed updated_at"
+            );
+        }
+
+        #[tokio::test]
+        async fn restore_missing_created_at_uses_updated_at_to_preserve_ordering() {
+            // When created_at is missing but updated_at is present, the stored
+            // bookmark must have created_at == updated_at, not "now" (which could
+            // produce future-created_at if updated_at is in the past).
+            let user_id = Uuid::new_v4();
+            let repo = Arc::new(MockRepo::new(vec![]));
+            let svc = BookmarkService::new(
+                Arc::clone(&repo),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+            );
+            let past = chrono::DateTime::parse_from_rfc3339("2021-06-15T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            let id = Uuid::new_v4();
+            let mut record = make_restore_record("https://example.com/created-missing", id);
+            record.created_at = None;
+            record.updated_at = Some(past);
+            let result = svc
+                .import_batch(
+                    user_id,
+                    vec![record],
+                    ImportStrategy::Upsert,
+                    ImportMode::Restore,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.errors.len(), 0);
+            assert_eq!(result.created, 1);
+
+            let stored = repo
+                .export_all(user_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|b| b.id == id)
+                .expect("bookmark should have been persisted");
+            assert_eq!(stored.updated_at, past, "updated_at must be preserved");
+            assert_eq!(
+                stored.created_at, past,
+                "created_at must fall back to updated_at when absent"
+            );
+            assert!(stored.created_at <= stored.updated_at);
         }
 
         #[tokio::test]
