@@ -157,35 +157,41 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 
 // --- CSV helpers ---
 
+/// Returns true when a string, after stripping all leading apostrophes, begins
+/// with a spreadsheet formula-trigger character (`=`, `+`, `-`, `@`).
+/// Used by both `csv_safe` and `csv_unescape` to keep the escape scheme
+/// symmetric.
+fn starts_with_formula_after_apostrophes(s: &str) -> bool {
+    s.trim_start_matches('\'').starts_with(['=', '+', '-', '@'])
+}
+
 /// Prefix-escape a cell value so spreadsheet apps don't execute it as a formula.
 ///
-/// Values starting with `=`, `+`, `-`, or `@` are prefixed with `'`.
-/// Values starting with `'` followed by a formula-trigger char are also
-/// prefixed with `'` (e.g. `'=foo` → `''=foo`), making the scheme fully
-/// reversible: `csv_unescape(csv_safe(s)) == s` for all inputs.
+/// Any value whose content (after stripping leading apostrophes) starts with a
+/// formula-trigger char is prefixed with one additional `'`. This makes the
+/// scheme fully reversible for all inputs, including those that already have
+/// one or more leading apostrophes before a formula char:
+///   `=foo` → `'=foo`, `'=foo` → `''=foo`, `''=foo` → `'''=foo`
+///   `'90s` → `'90s` (unchanged — not formula-trigger after apostrophes)
 fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
-    let needs_escape = value.starts_with(['=', '+', '-', '@'])
-        || (value.starts_with('\'')
-            && value[1..].starts_with(['=', '+', '-', '@']));
-    if needs_escape {
+    if starts_with_formula_after_apostrophes(value) {
         std::borrow::Cow::Owned(format!("'{value}"))
     } else {
         std::borrow::Cow::Borrowed(value)
     }
 }
 
-/// Reverse `csv_safe`: strip the leading `'` only when it is the escape prefix
-/// added by `csv_safe`. The escape prefix is always followed immediately by a
-/// formula-trigger character (`=`, `+`, `-`, `@`) or by another `'` that is
-/// itself followed by a formula-trigger character (double-apostrophe case).
-/// Genuine leading apostrophes like `'90s` or `'draft` are left intact.
+/// Reverse `csv_safe`: strip the leading `'` only when the value was escaped
+/// by `csv_safe`. A value was escaped iff stripping its leading `'` yields a
+/// string that itself starts with a formula trigger (after apostrophes), i.e.
+/// the remaining content still satisfies `starts_with_formula_after_apostrophes`.
+/// Genuine apostrophes like `'90s` or `'draft` are left intact.
 fn csv_unescape(s: &str) -> String {
     if let Some(rest) = s.strip_prefix('\'')
-        && (rest.starts_with(['=', '+', '-', '@'])
-            || (rest.starts_with('\'') && rest[1..].starts_with(['=', '+', '-', '@'])))
-        {
-            return rest.to_string();
-        }
+        && starts_with_formula_after_apostrophes(rest)
+    {
+        return rest.to_string();
+    }
     s.to_string()
 }
 
@@ -578,8 +584,8 @@ mod tests {
 
     #[test]
     fn csv_apostrophe_formula_char_roundtrip() {
-        // User data starting with '= (apostrophe then formula char) must
-        // survive export+import unchanged. csv_safe escapes it to ''=foo and
+        // User data starting with one apostrophe then a formula char must
+        // survive export+import unchanged. csv_safe escapes '=foo to ''=foo and
         // csv_unescape reverses it back to '=foo.
         let mut bm = make_bookmark("https://example.com", vec![]);
         bm.title = Some("'=not-a-formula".to_string());
@@ -591,6 +597,18 @@ mod tests {
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records[0].title, bm.title);
         assert_eq!(records[0].description, bm.description);
+    }
+
+    #[test]
+    fn csv_double_apostrophe_formula_char_roundtrip() {
+        // User data starting with two apostrophes then a formula char must
+        // also survive: ''=foo -> '''=foo on export, back to ''=foo on import.
+        let mut bm = make_bookmark("https://example.com", vec![]);
+        bm.title = Some("''=double-apostrophe".to_string());
+        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        assert!(csv_text.contains("'''=double-apostrophe"));
+        let records = parse_csv(&csv_text).unwrap();
+        assert_eq!(records[0].title, bm.title);
     }
 
     #[test]
