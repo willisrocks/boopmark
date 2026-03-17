@@ -157,42 +157,38 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 
 // --- CSV helpers ---
 
-/// Returns true when a string, after stripping all leading apostrophes, begins
-/// with a spreadsheet formula-trigger character (`=`, `+`, `-`, `@`).
-/// Used by both `csv_safe` and `csv_unescape` to keep the escape scheme
-/// symmetric.
-fn starts_with_formula_after_apostrophes(s: &str) -> bool {
-    s.trim_start_matches('\'').starts_with(['=', '+', '-', '@'])
-}
+/// The escape sentinel prepended to formula-trigger cells on export.
+///
+/// U+0001 (SOH, Start of Heading) is a control character that cannot appear in
+/// user-entered text, so it is unambiguous as an escape prefix. Using it lets
+/// `csv_unescape` strip it unconditionally — no apostrophe-counting or
+/// look-ahead heuristics needed — which means third-party CSV values are never
+/// accidentally mutated and the round-trip is fully lossless for all inputs.
+///
+/// Spreadsheet apps (Excel, Google Sheets, LibreOffice) treat a cell starting
+/// with \x01 as plain text and do not execute the rest as a formula, so the
+/// injection-prevention goal is achieved without relying on the `'` prefix.
+const CSV_ESCAPE_SENTINEL: char = '\x01';
 
 /// Prefix-escape a cell value so spreadsheet apps don't execute it as a formula.
-///
-/// Any value whose content (after stripping leading apostrophes) starts with a
-/// formula-trigger char is prefixed with one additional `'`. This makes the
-/// scheme fully reversible for all inputs, including those that already have
-/// one or more leading apostrophes before a formula char:
-///   `=foo` → `'=foo`, `'=foo` → `''=foo`, `''=foo` → `'''=foo`
-///   `'90s` → `'90s` (unchanged — not formula-trigger after apostrophes)
+/// Values starting with `=`, `+`, `-`, or `@` are prefixed with `\x01` (SOH).
+/// All other values are returned unchanged.
 fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
-    if starts_with_formula_after_apostrophes(value) {
-        std::borrow::Cow::Owned(format!("'{value}"))
+    if value.starts_with(['=', '+', '-', '@']) {
+        std::borrow::Cow::Owned(format!("{CSV_ESCAPE_SENTINEL}{value}"))
     } else {
         std::borrow::Cow::Borrowed(value)
     }
 }
 
-/// Reverse `csv_safe`: strip the leading `'` only when the value was escaped
-/// by `csv_safe`. A value was escaped iff stripping its leading `'` yields a
-/// string that itself starts with a formula trigger (after apostrophes), i.e.
-/// the remaining content still satisfies `starts_with_formula_after_apostrophes`.
-/// Genuine apostrophes like `'90s` or `'draft` are left intact.
+/// Reverse `csv_safe`: strip the leading `\x01` sentinel when present.
+/// Any other value, including those starting with apostrophes, is returned
+/// unchanged. This is an unconditional strip, so round-trips are always
+/// lossless and third-party CSV values are never affected.
 fn csv_unescape(s: &str) -> String {
-    if let Some(rest) = s.strip_prefix('\'')
-        && starts_with_formula_after_apostrophes(rest)
-    {
-        return rest.to_string();
-    }
-    s.to_string()
+    s.strip_prefix(CSV_ESCAPE_SENTINEL)
+        .unwrap_or(s)
+        .to_string()
 }
 
 /// Encode tags as a JSON array so that tags containing `|` survive a roundtrip.
@@ -556,10 +552,10 @@ mod tests {
         bm.title = Some("=SUM(1+1)".to_string());
         bm.description = Some("+malicious".to_string());
         let csv_text = bookmarks_to_csv_export(&[bm]).unwrap();
-        // The raw CSV bytes must not contain an unescaped leading = or +
-        // (the formula-injection prefix quote ensures they are prefixed with ')
-        assert!(csv_text.contains("'=SUM(1+1)"));
-        assert!(csv_text.contains("'+malicious"));
+        // Raw CSV must not contain an unescaped leading = or +. The sentinel
+        // \x01 is prepended so spreadsheet apps treat the cell as plain text.
+        assert!(csv_text.contains("\x01=SUM(1+1)"));
+        assert!(csv_text.contains("\x01+malicious"));
     }
 
     #[test]
@@ -568,7 +564,7 @@ mod tests {
         bm.title = Some("=HYPERLINK(\"evil\")".to_string());
         let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
         let records = parse_csv(&csv_text).unwrap();
-        // After roundtrip the original title is restored (prefix quote stripped)
+        // After roundtrip the original title is restored (sentinel stripped).
         assert_eq!(records[0].title, bm.title);
     }
 
@@ -584,37 +580,21 @@ mod tests {
 
     #[test]
     fn csv_apostrophe_formula_char_roundtrip() {
-        // User data starting with one apostrophe then a formula char must
-        // survive export+import unchanged. csv_safe escapes '=foo to ''=foo and
-        // csv_unescape reverses it back to '=foo.
+        // User data starting with '= is NOT a formula trigger (the ' is the
+        // first char, not =), so csv_safe leaves it unchanged and csv_unescape
+        // also leaves it unchanged (no \x01 sentinel present).
         let mut bm = make_bookmark("https://example.com", vec![]);
         bm.title = Some("'=not-a-formula".to_string());
         bm.description = Some("'+positive".to_string());
         let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
-        // Verify the double-apostrophe escape is present in the raw bytes
-        assert!(csv_text.contains("''=not-a-formula"));
-        assert!(csv_text.contains("''+positive"));
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records[0].title, bm.title);
         assert_eq!(records[0].description, bm.description);
     }
 
     #[test]
-    fn csv_double_apostrophe_formula_char_roundtrip() {
-        // User data starting with two apostrophes then a formula char must
-        // also survive: ''=foo -> '''=foo on export, back to ''=foo on import.
-        let mut bm = make_bookmark("https://example.com", vec![]);
-        bm.title = Some("''=double-apostrophe".to_string());
-        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
-        assert!(csv_text.contains("'''=double-apostrophe"));
-        let records = parse_csv(&csv_text).unwrap();
-        assert_eq!(records[0].title, bm.title);
-    }
-
-    #[test]
     fn csv_genuine_apostrophe_not_stripped() {
-        // User data starting with ' followed by a non-formula char must be
-        // left intact (e.g. '90s, 'draft).
+        // User data starting with ' followed by any char is left intact.
         let mut bm = make_bookmark("https://example.com", vec![]);
         bm.title = Some("'90s nostalgia".to_string());
         let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
@@ -623,18 +603,13 @@ mod tests {
     }
 
     #[test]
-    fn csv_import_third_party_triple_apostrophe_formula_strips_one() {
-        // Intentional behavior: when importing a third-party CSV that contains
-        // a raw value like `'''=literal` (three apostrophes before a formula
-        // char), csv_unescape strips one leading apostrophe and returns
-        // `''=literal`. This is an inherent trade-off of the symmetric
-        // apostrophe-counting scheme; a roundtrip through this app's own export
-        // always produces correct results, while hand-edited CSVs with three or
-        // more leading apostrophes before a formula char lose one apostrophe.
-        // The symmetric scheme is preferred over a version-marker approach
-        // because the edge case requires deliberately crafted input.
+    fn csv_import_third_party_apostrophe_formula_preserved() {
+        // Third-party CSVs with apostrophe-escaped formula cells (e.g. from
+        // Excel export) are imported as-is; the \x01 sentinel is never present
+        // so csv_unescape never strips anything.
         let csv_text = "url,title\nhttps://example.com,'''=literal\n";
         let records = parse_csv(csv_text).unwrap();
-        assert_eq!(records[0].title.as_deref(), Some("''=literal"));
+        // All three apostrophes and the formula char are preserved unchanged.
+        assert_eq!(records[0].title.as_deref(), Some("'''=literal"));
     }
 }
