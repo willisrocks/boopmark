@@ -174,7 +174,7 @@ impl BookmarkRepository for PostgresPool {
     ) -> Result<Option<Bookmark>, DomainError> {
         sqlx::query_as::<_, Bookmark>(
             "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at
-             FROM bookmarks WHERE user_id = $1 AND url = $2",
+             FROM bookmarks WHERE user_id = $1 AND url = $2 ORDER BY created_at ASC LIMIT 1",
         )
         .bind(user_id)
         .bind(url)
@@ -201,7 +201,14 @@ impl BookmarkRepository for PostgresPool {
         .bind(bookmark.updated_at)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| DomainError::Internal(e.to_string()))
+        .map_err(|e| {
+            // Unique constraint violation (PK collision from another user's row)
+            if let sqlx::Error::Database(ref db_err) = e
+                && db_err.code().as_deref() == Some("23505") {
+                    return DomainError::AlreadyExists;
+                }
+            DomainError::Internal(e.to_string())
+        })
     }
 
     async fn upsert_full(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {

@@ -157,16 +157,38 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 
 // --- CSV helpers ---
 
+/// Prefix-escape a cell value so spreadsheet apps don't execute it as a formula.
+/// Cells starting with =, +, -, @ are prefixed with a single quote, which is the
+/// standard defence against CSV injection (RFC-4180 / OWASP recommendation).
+fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.starts_with(['=', '+', '-', '@']) {
+        std::borrow::Cow::Owned(format!("'{value}"))
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
+/// Encode tags as a JSON array so that tags containing `|` survive a roundtrip.
+fn tags_to_csv(tags: &[String]) -> String {
+    serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Decode tags from the JSON array written by `tags_to_csv`.
+fn tags_from_csv(cell: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(cell).unwrap_or_default()
+}
+
 fn bookmarks_to_csv_export(bookmarks: &[Bookmark]) -> Result<String, String> {
     let mut wtr = csv::Writer::from_writer(vec![]);
     wtr.write_record(["url", "title", "description", "tags"])
         .map_err(|e| e.to_string())?;
     for b in bookmarks {
+        let tags = tags_to_csv(&b.tags);
         wtr.write_record([
-            b.url.as_str(),
-            b.title.as_deref().unwrap_or(""),
-            b.description.as_deref().unwrap_or(""),
-            &b.tags.join("|"),
+            csv_safe(b.url.as_str()).as_ref(),
+            csv_safe(b.title.as_deref().unwrap_or("")).as_ref(),
+            csv_safe(b.description.as_deref().unwrap_or("")).as_ref(),
+            tags.as_str(),
         ])
         .map_err(|e| e.to_string())?;
     }
@@ -192,14 +214,15 @@ fn bookmarks_to_csv_backup(bookmarks: &[Bookmark]) -> Result<String, String> {
         let id_str = b.id.to_string();
         let created_str = b.created_at.to_rfc3339();
         let updated_str = b.updated_at.to_rfc3339();
+        let tags = tags_to_csv(&b.tags);
         wtr.write_record([
             id_str.as_str(),
-            b.url.as_str(),
-            b.title.as_deref().unwrap_or(""),
-            b.description.as_deref().unwrap_or(""),
-            b.image_url.as_deref().unwrap_or(""),
-            b.domain.as_deref().unwrap_or(""),
-            &b.tags.join("|"),
+            csv_safe(b.url.as_str()).as_ref(),
+            csv_safe(b.title.as_deref().unwrap_or("")).as_ref(),
+            csv_safe(b.description.as_deref().unwrap_or("")).as_ref(),
+            csv_safe(b.image_url.as_deref().unwrap_or("")).as_ref(),
+            csv_safe(b.domain.as_deref().unwrap_or("")).as_ref(),
+            tags.as_str(),
             created_str.as_str(),
             updated_str.as_str(),
         ])
@@ -226,30 +249,27 @@ fn parse_csv(text: &str) -> Result<Vec<ImportRecord>, String> {
                     .and_then(|idx| row.get(idx))
                     .unwrap_or("")
             };
+            // Strip the formula-injection prefix quote if present
+            let unescaped = |s: &str| -> String {
+                s.strip_prefix('\'').unwrap_or(s).to_string()
+            };
+            let raw_url = unescaped(get("url"));
             Ok(ImportRecord {
-                url: get("url").to_string(),
-                title: Some(get("title"))
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string),
-                description: Some(get("description"))
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string),
-                tags: get("tags")
-                    .split('|')
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect(),
+                url: raw_url,
+                title: Some(unescaped(get("title")))
+                    .filter(|s| !s.is_empty()),
+                description: Some(unescaped(get("description")))
+                    .filter(|s| !s.is_empty()),
+                tags: tags_from_csv(get("tags")),
                 id: if has_id {
                     get("id").parse::<Uuid>().ok()
                 } else {
                     None
                 },
-                image_url: Some(get("image_url"))
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string),
-                domain: Some(get("domain"))
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string),
+                image_url: Some(unescaped(get("image_url")))
+                    .filter(|s| !s.is_empty()),
+                domain: Some(unescaped(get("domain")))
+                    .filter(|s| !s.is_empty()),
                 created_at: get("created_at").parse::<DateTime<Utc>>().ok(),
                 updated_at: get("updated_at").parse::<DateTime<Utc>>().ok(),
             })
@@ -491,5 +511,37 @@ mod tests {
         let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records[0].title, bm.title);
+    }
+
+    #[test]
+    fn csv_formula_injection_cells_are_escaped() {
+        let mut bm = make_bookmark("https://example.com", vec![]);
+        bm.title = Some("=SUM(1+1)".to_string());
+        bm.description = Some("+malicious".to_string());
+        let csv_text = bookmarks_to_csv_export(&[bm]).unwrap();
+        // The raw CSV bytes must not contain an unescaped leading = or +
+        // (the formula-injection prefix quote ensures they are prefixed with ')
+        assert!(csv_text.contains("'=SUM(1+1)"));
+        assert!(csv_text.contains("'+malicious"));
+    }
+
+    #[test]
+    fn csv_formula_injection_survives_roundtrip() {
+        let mut bm = make_bookmark("https://example.com", vec![]);
+        bm.title = Some("=HYPERLINK(\"evil\")".to_string());
+        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        let records = parse_csv(&csv_text).unwrap();
+        // After roundtrip the original title is restored (prefix quote stripped)
+        assert_eq!(records[0].title, bm.title);
+    }
+
+    #[test]
+    fn csv_tags_with_pipe_characters_roundtrip() {
+        // Tags containing `|` must survive CSV export/import unchanged because
+        // we now use JSON encoding instead of a pipe separator.
+        let bm = make_bookmark("https://example.com", vec!["a|b", "c|d"]);
+        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        let records = parse_csv(&csv_text).unwrap();
+        assert_eq!(records[0].tags, bm.tags);
     }
 }
