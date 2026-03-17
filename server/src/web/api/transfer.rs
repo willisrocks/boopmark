@@ -647,4 +647,18 @@ mod tests {
             Some("'=HYPERLINK(\"evil\")")
         );
     }
+
+    #[test]
+    fn csv_import_third_party_literal_sentinel_strips_one() {
+        // Intentional behavior: a third-party CSV whose field genuinely starts
+        // with a literal \x01 character will have that character stripped on
+        // import. This is the accepted trade-off of using \x01 as the escape
+        // sentinel: the character is a C0 control code that no browser, URL,
+        // or user input produces, so real-world bookmark data never starts
+        // with it. JSONL backup is the recommended format for fully lossless
+        // round-trips when data integrity is paramount.
+        let csv_text = "url,title\nhttps://example.com,\x01literal-data\n";
+        let records = parse_csv(csv_text).unwrap();
+        assert_eq!(records[0].title.as_deref(), Some("literal-data"));
+    }
 }
