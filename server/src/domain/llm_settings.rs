@@ -23,6 +23,7 @@ pub const ANTHROPIC_MODEL_OPTIONS: [AnthropicModelOption; 3] = [
 ];
 
 #[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)]
 pub struct LlmSettings {
     pub user_id: Uuid,
     pub enabled: bool,

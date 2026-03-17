@@ -101,7 +101,7 @@ fn apply_create_suggestions(input: &mut CreateBookmark, suggestions: SuggestionR
     if input.description.is_none() {
         input.description = suggestions.description;
     }
-    if input.tags.as_ref().map_or(true, |t| t.is_empty()) && !suggestions.tags.is_empty() {
+    if input.tags.as_ref().is_none_or(|t| t.is_empty()) && !suggestions.tags.is_empty() {
         input.tags = Some(suggestions.tags);
     }
     if input.image_url.is_none() {
@@ -120,7 +120,7 @@ fn apply_update_suggestions(input: &mut UpdateBookmark, suggestions: SuggestionR
     if input.description.is_none() {
         input.description = suggestions.description;
     }
-    if input.tags.as_ref().map_or(true, |t| t.is_empty()) && !suggestions.tags.is_empty() {
+    if input.tags.as_ref().is_none_or(|t| t.is_empty()) && !suggestions.tags.is_empty() {
         input.tags = Some(suggestions.tags);
     }
 }
@@ -172,11 +172,10 @@ async fn create_bookmark(
         let suggestions = state.enrichment.suggest(user.id, &input.url, existing_tags).await;
         apply_create_suggestions(&mut input, suggestions);
         // Ensure domain is set from URL so BookmarkService doesn't re-scrape just for domain
-        if input.domain.is_none() {
-            if let Ok(parsed) = url::Url::parse(&input.url) {
+        if input.domain.is_none()
+            && let Ok(parsed) = url::Url::parse(&input.url) {
                 input.domain = parsed.host_str().map(|h| h.to_string());
             }
-        }
     }
 
     let result = with_bookmarks!(&state.bookmarks, svc => svc.create(user.id, input).await);

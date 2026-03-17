@@ -54,6 +54,32 @@ enum Commands {
     },
     /// Delete a bookmark
     Delete { id: String },
+    /// Export bookmarks to a file
+    Export {
+        /// Output format: jsonl (default) or csv
+        #[arg(long, default_value = "jsonl")]
+        format: String,
+        /// Export mode: export (default, core fields) or backup (all fields)
+        #[arg(long, default_value = "export")]
+        mode: String,
+        /// Write output to file (default: stdout). Format auto-detected from extension.
+        #[arg(long, short)]
+        output: Option<String>,
+    },
+    /// Import bookmarks from a file
+    Import {
+        /// Path to the file to import
+        file: String,
+        /// File format: jsonl (default) or csv. Auto-detected from extension if omitted.
+        #[arg(long)]
+        format: Option<String>,
+        /// Import mode: import (default) or restore
+        #[arg(long, default_value = "import")]
+        mode: String,
+        /// Conflict strategy: upsert (default) or skip
+        #[arg(long, default_value = "upsert")]
+        strategy: String,
+    },
     /// Upgrade boop to the latest version
     Upgrade,
     /// Configure CLI
@@ -169,6 +195,27 @@ impl ApiClient {
         self.client
             .delete(self.url(path))
             .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn post_multipart(
+        &self,
+        path: &str,
+        file_bytes: Vec<u8>,
+        filename: &str,
+        mime: &str,
+    ) -> Result<reqwest::Response, String> {
+        let part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(filename.to_string())
+            .mime_str(mime)
+            .map_err(|e| e.to_string())?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        self.client
+            .post(self.url(path))
+            .bearer_auth(&self.api_key)
+            .multipart(form)
             .send()
             .await
             .map_err(|e| e.to_string())
@@ -390,6 +437,79 @@ async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
 
+        Commands::Export { format, mode, output } => {
+            let client = AppConfig::load().client()?;
+
+            let format = if let Some(ref path) = output {
+                if path.ends_with(".csv") { "csv".to_string() } else { format }
+            } else {
+                format
+            };
+
+            let url = format!("/bookmarks/export?format={format}&mode={mode}");
+            let resp = client.get(&url).await?;
+            if !resp.status().is_success() {
+                return Err(format!("export failed: HTTP {}", resp.status()));
+            }
+            let body = resp.text().await.map_err(|e| e.to_string())?;
+
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, &body).map_err(|e| e.to_string())?;
+                    eprintln!("Exported to {path}");
+                }
+                None => print!("{body}"),
+            }
+            Ok(())
+        }
+
+        Commands::Import { file, format, mode, strategy } => {
+            let client = AppConfig::load().client()?;
+
+            let format = format.unwrap_or_else(|| {
+                if file.ends_with(".csv") { "csv".to_string() } else { "jsonl".to_string() }
+            });
+            let mime = if format == "csv" { "text/csv" } else { "application/x-ndjson" };
+
+            let bytes = std::fs::read(&file).map_err(|e| format!("failed to read {file}: {e}"))?;
+            let filename = std::path::Path::new(&file)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            let url = format!("/bookmarks/import?format={format}&mode={mode}&strategy={strategy}");
+            let resp = client.post_multipart(&url, bytes, &filename, mime).await?;
+
+            #[derive(serde::Deserialize)]
+            struct ImportResult {
+                created: usize,
+                updated: usize,
+                skipped: usize,
+                errors: Vec<serde_json::Value>,
+            }
+
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(format!("import failed: {body}"));
+            }
+
+            let result: ImportResult = resp.json().await.map_err(|e| e.to_string())?;
+            println!(
+                "Created: {}, Updated: {}, Skipped: {}, Errors: {}",
+                result.created,
+                result.updated,
+                result.skipped,
+                result.errors.len()
+            );
+            if !result.errors.is_empty() {
+                for err in &result.errors {
+                    eprintln!("  error: {err}");
+                }
+            }
+            Ok(())
+        }
+
         Commands::Upgrade => upgrade().await,
     }
 }
@@ -577,5 +697,50 @@ mod tests {
     fn test_cli_edit_with_tags() {
         let cli = Cli::try_parse_from(["boop", "edit", "some-id", "--tags", "a,b"]).unwrap();
         assert!(matches!(cli.command, Commands::Edit { suggest: false, .. }));
+    }
+
+    #[test]
+    fn test_cli_export_default() {
+        let cli = Cli::try_parse_from(["boop", "export"]).unwrap();
+        assert!(matches!(cli.command, Commands::Export { .. }));
+    }
+
+    #[test]
+    fn test_cli_export_with_options() {
+        let cli =
+            Cli::try_parse_from(["boop", "export", "--format", "csv", "--mode", "backup", "-o", "out.csv"])
+                .unwrap();
+        match cli.command {
+            Commands::Export { format, mode, output } => {
+                assert_eq!(format, "csv");
+                assert_eq!(mode, "backup");
+                assert_eq!(output.as_deref(), Some("out.csv"));
+            }
+            _ => panic!("expected Export"),
+        }
+    }
+
+    #[test]
+    fn test_cli_import_with_file() {
+        let cli = Cli::try_parse_from(["boop", "import", "bookmarks.jsonl"]).unwrap();
+        assert!(matches!(cli.command, Commands::Import { .. }));
+    }
+
+    #[test]
+    fn test_cli_import_with_all_options() {
+        let cli = Cli::try_parse_from([
+            "boop", "import", "data.csv", "--format", "csv", "--mode", "restore", "--strategy",
+            "skip",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Import { file, format, mode, strategy } => {
+                assert_eq!(file, "data.csv");
+                assert_eq!(format.as_deref(), Some("csv"));
+                assert_eq!(mode, "restore");
+                assert_eq!(strategy, "skip");
+            }
+            _ => panic!("expected Import"),
+        }
     }
 }

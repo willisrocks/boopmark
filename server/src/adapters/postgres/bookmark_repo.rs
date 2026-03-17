@@ -155,4 +155,83 @@ impl BookmarkRepository for PostgresPool {
 
         Ok(rows)
     }
+
+    async fn export_all(&self, user_id: Uuid) -> Result<Vec<Bookmark>, DomainError> {
+        sqlx::query_as::<_, Bookmark>(
+            "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at
+             FROM bookmarks WHERE user_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))
+    }
+
+    async fn find_by_url(
+        &self,
+        user_id: Uuid,
+        url: &str,
+    ) -> Result<Option<Bookmark>, DomainError> {
+        sqlx::query_as::<_, Bookmark>(
+            "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at
+             FROM bookmarks WHERE user_id = $1 AND url = $2",
+        )
+        .bind(user_id)
+        .bind(url)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))
+    }
+
+    async fn insert_with_id(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {
+        sqlx::query_as::<_, Bookmark>(
+            "INSERT INTO bookmarks (id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
+        )
+        .bind(bookmark.id)
+        .bind(bookmark.user_id)
+        .bind(&bookmark.url)
+        .bind(&bookmark.title)
+        .bind(&bookmark.description)
+        .bind(&bookmark.image_url)
+        .bind(&bookmark.domain)
+        .bind(&bookmark.tags)
+        .bind(bookmark.created_at)
+        .bind(bookmark.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))
+    }
+
+    async fn upsert_full(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {
+        sqlx::query_as::<_, Bookmark>(
+            "INSERT INTO bookmarks (id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (id) DO UPDATE SET
+                url = EXCLUDED.url,
+                title = EXCLUDED.title,
+                description = EXCLUDED.description,
+                image_url = EXCLUDED.image_url,
+                domain = EXCLUDED.domain,
+                tags = EXCLUDED.tags,
+                created_at = EXCLUDED.created_at,
+                updated_at = EXCLUDED.updated_at
+             WHERE bookmarks.user_id = $2
+             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
+        )
+        .bind(bookmark.id)
+        .bind(bookmark.user_id)
+        .bind(&bookmark.url)
+        .bind(&bookmark.title)
+        .bind(&bookmark.description)
+        .bind(&bookmark.image_url)
+        .bind(&bookmark.domain)
+        .bind(&bookmark.tags)
+        .bind(bookmark.created_at)
+        .bind(bookmark.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))
+    }
 }

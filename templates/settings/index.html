@@ -96,6 +96,90 @@
                 {% include "settings/api_keys_list.html" %}
             </div>
         </section>
+
+        <section class="space-y-5">
+            <div>
+                <h2 class="text-lg font-semibold">Import &amp; Export</h2>
+                <p class="text-sm text-gray-400">Backup or migrate your bookmarks.</p>
+            </div>
+
+            <div class="space-y-3">
+                <p class="text-sm font-medium text-gray-200">Export</p>
+                <div class="flex flex-wrap gap-2">
+                    <a href="/api/v1/bookmarks/export?format=jsonl&amp;mode=export"
+                       class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium">
+                        Export JSONL
+                    </a>
+                    <a href="/api/v1/bookmarks/export?format=csv&amp;mode=export"
+                       class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium">
+                        Export CSV
+                    </a>
+                    <a href="/api/v1/bookmarks/export?format=jsonl&amp;mode=backup"
+                       class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium">
+                        Backup JSONL
+                    </a>
+                    <a href="/api/v1/bookmarks/export?format=csv&amp;mode=backup"
+                       class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium">
+                        Backup CSV
+                    </a>
+                </div>
+            </div>
+
+            <div class="space-y-3">
+                <p class="text-sm font-medium text-gray-200">Import</p>
+                <form id="import-form" class="space-y-3">
+                    <div class="flex flex-wrap gap-3">
+                        <select name="format" class="px-3 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 text-sm">
+                            <option value="jsonl">JSONL</option>
+                            <option value="csv">CSV</option>
+                        </select>
+                        <select name="mode" class="px-3 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 text-sm">
+                            <option value="import">Import</option>
+                            <option value="restore">Restore</option>
+                        </select>
+                        <select name="strategy" class="px-3 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 text-sm">
+                            <option value="upsert">Upsert</option>
+                            <option value="skip">Skip duplicates</option>
+                        </select>
+                    </div>
+                    <div class="flex gap-3 items-center">
+                        <input type="file" name="file" accept=".jsonl,.csv,.json"
+                            class="text-sm text-gray-300 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-gray-700 file:text-gray-200 hover:file:bg-gray-600">
+                        <button type="submit"
+                            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
+                            Import
+                        </button>
+                    </div>
+                </form>
+                <div id="import-result" class="text-sm"></div>
+            </div>
+
+            <script>
+                document.getElementById('import-form').addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const form = e.target;
+                    const format = form.format.value;
+                    const mode = form.mode.value;
+                    const strategy = form.strategy.value;
+                    const file = form.file.files[0];
+                    if (!file) return;
+                    const body = new FormData();
+                    body.append('file', file);
+                    const res = await fetch(`/api/v1/bookmarks/import?format=${format}&mode=${mode}&strategy=${strategy}`, {
+                        method: 'POST', body,
+                    });
+                    const data = await res.json();
+                    const el = document.getElementById('import-result');
+                    if (res.ok) {
+                        el.className = 'text-sm text-emerald-300';
+                        el.textContent = `Created: ${data.created}, Updated: ${data.updated}, Skipped: ${data.skipped}, Errors: ${data.errors.length}`;
+                    } else {
+                        el.className = 'text-sm text-red-400';
+                        el.textContent = data.error || 'Import failed';
+                    }
+                });
+            </script>
+        </section>
     </div>
 </main>
 {% endblock %}
