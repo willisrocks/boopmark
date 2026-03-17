@@ -366,11 +366,19 @@ mod tests {
 
         struct MockRepo {
             bookmarks: Mutex<Vec<Bookmark>>,
+            /// When true, `upsert_full` always returns `AlreadyExists` to
+            /// simulate the race condition where a row changes owner between
+            /// `get()` and `upsert_full()`.
+            fail_upsert: bool,
         }
 
         impl MockRepo {
             fn new(bookmarks: Vec<Bookmark>) -> Self {
-                Self { bookmarks: Mutex::new(bookmarks) }
+                Self { bookmarks: Mutex::new(bookmarks), fail_upsert: false }
+            }
+
+            fn new_with_failing_upsert(bookmarks: Vec<Bookmark>) -> Self {
+                Self { bookmarks: Mutex::new(bookmarks), fail_upsert: true }
             }
         }
 
@@ -493,6 +501,11 @@ mod tests {
                 Ok(bookmark)
             }
             async fn upsert_full(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {
+                // Simulate the race-condition path: row changed owner between
+                // get() and upsert_full().
+                if self.fail_upsert {
+                    return Err(DomainError::AlreadyExists);
+                }
                 let mut bookmarks = self.bookmarks.lock().unwrap();
                 // Simulate Postgres cross-tenant guard: only update if the
                 // existing row belongs to the same user.
@@ -549,6 +562,16 @@ mod tests {
         ) -> BookmarkService<MockRepo, NoopMetadata, NoopStorage> {
             BookmarkService::new(
                 Arc::new(MockRepo::new(bookmarks)),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+            )
+        }
+
+        fn make_service_with_failing_upsert(
+            bookmarks: Vec<Bookmark>,
+        ) -> BookmarkService<MockRepo, NoopMetadata, NoopStorage> {
+            BookmarkService::new(
+                Arc::new(MockRepo::new_with_failing_upsert(bookmarks)),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
             )
@@ -882,6 +905,37 @@ mod tests {
                 matches!(err, DomainError::AlreadyExists),
                 "upsert_full must return AlreadyExists for cross-tenant ID"
             );
+        }
+
+        #[tokio::test]
+        async fn restore_cross_account_pk_collision_via_upsert_full_is_a_row_error() {
+            // Service-level test: the ID already belongs to this user (get()
+            // succeeds), but upsert_full then returns AlreadyExists — simulating
+            // the race condition where the row was transferred between get() and
+            // upsert_full(). import_batch must record this as a row-level error.
+            let user_id = Uuid::new_v4();
+            let original_id = Uuid::new_v4();
+
+            // Pre-load the row under the same user so get() returns Ok.
+            let existing = make_bookmark(user_id, "https://original.example.com");
+            let existing_id = existing.id;
+            // Use fail_upsert=true so upsert_full fires AlreadyExists regardless.
+            let _ = original_id; // suppress unused warning; using existing_id below
+            let svc = make_service_with_failing_upsert(vec![existing]);
+
+            let record = make_restore_record("https://original.example.com", existing_id);
+            let result = svc
+                .import_batch(
+                    user_id,
+                    vec![record],
+                    ImportStrategy::Upsert,
+                    ImportMode::Restore,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.errors.len(), 1, "cross-tenant upsert_full collision must be a row error");
+            assert!(result.errors[0].message.contains("already exists"));
+            assert_eq!(result.updated, 0);
         }
 
         #[tokio::test]
