@@ -1,7 +1,6 @@
 /target
 node_modules
 .env
-.workgraph
 .worktrees
 uploads/
 playwright-report/
