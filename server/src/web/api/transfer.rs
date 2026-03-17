@@ -159,10 +159,10 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 
 /// Prefix-escape a cell value so spreadsheet apps don't execute it as a formula.
 ///
-/// The OWASP CSV injection recommendation is to prefix formula-trigger chars
-/// (`=`, `+`, `-`, `@`) with a single quote `'`. Spreadsheet apps (Excel,
-/// Google Sheets, LibreOffice) display the `'` as a string prefix that is not
-/// included in the cell value, so the original text is shown without the quote.
+/// Follows the OWASP CSV injection recommendation: prefix formula-trigger
+/// characters with `'`. The trigger set is `=`, `+`, `-`, `@`, `\t`, `\r`,
+/// and `\n` — the full set that OWASP identifies as dangerous when they appear
+/// at the start of a cell.
 ///
 /// This escaping is intentionally one-way: it is purely a display-safety
 /// measure for users who open the exported CSV in a spreadsheet. When the CSV
@@ -170,7 +170,7 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 /// any unescaping. Users who need a lossless round-trip should use JSONL backup
 /// instead of CSV export.
 fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
-    if value.starts_with(['=', '+', '-', '@']) {
+    if value.starts_with(['=', '+', '-', '@', '\t', '\r', '\n']) {
         std::borrow::Cow::Owned(format!("'{value}"))
     } else {
         std::borrow::Cow::Borrowed(value)
@@ -257,6 +257,11 @@ fn bookmarks_to_csv_backup(bookmarks: &[Bookmark]) -> Result<String, String> {
 }
 
 fn parse_csv(text: &str) -> Result<Vec<ImportRecord>, String> {
+    // All field values are imported verbatim. The csv_safe export escaping is
+    // intentionally one-way (display safety only). Earlier development commits
+    // experimented with \x01 sentinel and '# boopmark-csv-v1' marker schemes,
+    // but those builds were never deployed to production, so no backward
+    // compatibility handling is needed here.
     let mut rdr = csv::Reader::from_reader(text.as_bytes());
     let headers = rdr.headers().map_err(|e| e.to_string())?.clone();
 
@@ -542,14 +547,25 @@ mod tests {
 
     #[test]
     fn csv_formula_injection_cells_are_escaped() {
-        // Formula-trigger characters are prefixed with ' on export so that
-        // spreadsheet apps (Excel, Google Sheets) treat the cell as plain text.
+        // Formula-trigger characters (=, +, -, @, \t, \r, \n) are prefixed
+        // with ' on export so spreadsheet apps treat the cell as plain text.
         let mut bm = make_bookmark("https://example.com", vec![]);
         bm.title = Some("=SUM(1+1)".to_string());
         bm.description = Some("+malicious".to_string());
         let csv_text = bookmarks_to_csv_export(&[bm]).unwrap();
         assert!(csv_text.contains("'=SUM(1+1)"));
         assert!(csv_text.contains("'+malicious"));
+    }
+
+    #[test]
+    fn csv_formula_injection_control_chars_are_escaped() {
+        // OWASP also flags \t, \r, \n as dangerous CSV injection prefixes.
+        let mut bm = make_bookmark("https://example.com", vec![]);
+        bm.title = Some("\t=TAB".to_string());
+        bm.description = Some("\r\n=CRLF".to_string());
+        let csv_text = bookmarks_to_csv_export(&[bm]).unwrap();
+        assert!(csv_text.contains("'\t=TAB"));
+        assert!(csv_text.contains("'\r\n=CRLF"));
     }
 
     #[test]
