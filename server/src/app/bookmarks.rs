@@ -168,23 +168,7 @@ where
                         continue;
                     };
 
-                    // Reject missing timestamps in restore mode rather than silently
-                    // substituting now(), which would corrupt backup metadata.
-                    let Some(created_at) = record.created_at else {
-                        result.errors.push(ImportError {
-                            row,
-                            message: "restore mode requires created_at field".to_string(),
-                        });
-                        continue;
-                    };
-                    let Some(updated_at) = record.updated_at else {
-                        result.errors.push(ImportError {
-                            row,
-                            message: "restore mode requires updated_at field".to_string(),
-                        });
-                        continue;
-                    };
-
+                    let now = chrono::Utc::now();
                     let bookmark = Bookmark {
                         id,
                         user_id,
@@ -194,16 +178,27 @@ where
                         image_url: record.image_url,
                         domain: record.domain,
                         tags: record.tags,
-                        created_at,
-                        updated_at,
+                        created_at: record.created_at.unwrap_or(now),
+                        updated_at: record.updated_at.unwrap_or(now),
                     };
 
                     match self.repo.get(id, user_id).await {
                         Ok(_) => match strategy {
                             ImportStrategy::Skip => result.skipped += 1,
                             ImportStrategy::Upsert => {
-                                self.repo.upsert_full(bookmark).await?;
-                                result.updated += 1;
+                                match self.repo.upsert_full(bookmark).await {
+                                    Ok(_) => result.updated += 1,
+                                    // ID belongs to another user — row-level error
+                                    Err(DomainError::AlreadyExists) => {
+                                        result.errors.push(ImportError {
+                                            row,
+                                            message: format!(
+                                                "id {id} already exists (owned by another user)"
+                                            ),
+                                        });
+                                    }
+                                    Err(e) => return Err(e),
+                                }
                             }
                         },
                         Err(DomainError::NotFound) => {
@@ -759,11 +754,14 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn restore_records_error_when_created_at_is_missing() {
+        async fn restore_succeeds_when_timestamps_are_missing() {
+            // Per plan: missing timestamps in restore mode use unwrap_or(now),
+            // they are NOT rejected as errors.
             let user_id = Uuid::new_v4();
             let svc = make_service(vec![]);
             let mut record = make_restore_record("https://example.com", Uuid::new_v4());
-            record.created_at = None; // strip the required timestamp
+            record.created_at = None;
+            record.updated_at = None;
             let result = svc
                 .import_batch(
                     user_id,
@@ -773,9 +771,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(result.errors.len(), 1);
-            assert!(result.errors[0].message.contains("created_at"));
-            assert_eq!(result.created, 0);
+            assert_eq!(result.errors.len(), 0);
+            assert_eq!(result.created, 1);
         }
 
         #[tokio::test]

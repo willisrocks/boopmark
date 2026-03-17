@@ -159,10 +159,12 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 
 /// Prefix-escape a cell value so spreadsheet apps don't execute it as a formula.
 ///
-/// Follows the OWASP CSV injection recommendation: prefix formula-trigger
-/// characters with `'`. The trigger set is `=`, `+`, `-`, `@`, `\t`, `\r`,
-/// and `\n` — the full set that OWASP identifies as dangerous when they appear
-/// at the start of a cell.
+/// Prefixes formula-trigger characters with `'` so that spreadsheet apps
+/// (Excel, Google Sheets, LibreOffice) treat the cell as plain text.
+/// The trigger set is `=`, `+`, `@`, `\t`, `\r`, and `\n`. The `-` character
+/// is intentionally excluded: it is not a formula trigger in any major
+/// spreadsheet app and commonly appears at the start of legitimate text values
+/// (e.g. list items, descriptions starting with a dash).
 ///
 /// This escaping is intentionally one-way: it is purely a display-safety
 /// measure for users who open the exported CSV in a spreadsheet. When the CSV
@@ -170,7 +172,7 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 /// any unescaping. Users who need a lossless round-trip should use JSONL backup
 /// instead of CSV export.
 fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
-    if value.starts_with(['=', '+', '-', '@', '\t', '\r', '\n']) {
+    if value.starts_with(['=', '+', '@', '\t', '\r', '\n']) {
         std::borrow::Cow::Owned(format!("'{value}"))
     } else {
         std::borrow::Cow::Borrowed(value)

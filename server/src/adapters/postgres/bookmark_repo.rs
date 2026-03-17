@@ -239,6 +239,14 @@ impl BookmarkRepository for PostgresPool {
         .bind(bookmark.updated_at)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| DomainError::Internal(e.to_string()))
+        .map_err(|e| {
+            // RowNotFound means ON CONFLICT fired but the WHERE clause blocked
+            // the update — the ID belongs to another user. Treat as a PK
+            // collision to be handled as a row-level error by the caller.
+            if matches!(e, sqlx::Error::RowNotFound) {
+                return DomainError::AlreadyExists;
+            }
+            DomainError::Internal(e.to_string())
+        })
     }
 }
