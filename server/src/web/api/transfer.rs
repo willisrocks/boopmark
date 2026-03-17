@@ -621,4 +621,20 @@ mod tests {
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records[0].title, bm.title);
     }
+
+    #[test]
+    fn csv_import_third_party_triple_apostrophe_formula_strips_one() {
+        // Intentional behavior: when importing a third-party CSV that contains
+        // a raw value like `'''=literal` (three apostrophes before a formula
+        // char), csv_unescape strips one leading apostrophe and returns
+        // `''=literal`. This is an inherent trade-off of the symmetric
+        // apostrophe-counting scheme; a roundtrip through this app's own export
+        // always produces correct results, while hand-edited CSVs with three or
+        // more leading apostrophes before a formula char lose one apostrophe.
+        // The symmetric scheme is preferred over a version-marker approach
+        // because the edge case requires deliberately crafted input.
+        let csv_text = "url,title\nhttps://example.com,'''=literal\n";
+        let records = parse_csv(csv_text).unwrap();
+        assert_eq!(records[0].title.as_deref(), Some("''=literal"));
+    }
 }
