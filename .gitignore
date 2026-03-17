@@ -1,7 +1,10 @@
 /target
 node_modules
 .env
+.devproxy-project
+.workgraph/
 .worktrees
+bookmarks.jsonl
 uploads/
 playwright-report/
 test-results/
