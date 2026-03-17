@@ -559,13 +559,22 @@ mod tests {
 
     #[test]
     fn csv_formula_injection_control_chars_are_escaped() {
-        // OWASP also flags \t, \r, \n as dangerous CSV injection prefixes.
-        let mut bm = make_bookmark("https://example.com", vec![]);
-        bm.title = Some("\t=TAB".to_string());
-        bm.description = Some("\r\n=CRLF".to_string());
-        let csv_text = bookmarks_to_csv_export(&[bm]).unwrap();
-        assert!(csv_text.contains("'\t=TAB"));
-        assert!(csv_text.contains("'\r\n=CRLF"));
+        // OWASP also flags \t, \r, and \n as dangerous CSV injection prefixes.
+        // Test all three individually plus the common \r\n pair.
+        for (label, value) in [
+            ("tab",  "\t=TAB"),
+            ("cr",   "\r=CR"),
+            ("lf",   "\n=LF"),
+            ("crlf", "\r\n=CRLF"),
+        ] {
+            let mut bm = make_bookmark("https://example.com", vec![]);
+            bm.title = Some(value.to_string());
+            let csv_text = bookmarks_to_csv_export(&[bm]).unwrap();
+            assert!(
+                csv_text.contains(&format!("'{value}")),
+                "{label}: expected escaped prefix in CSV output"
+            );
+        }
     }
 
     #[test]
