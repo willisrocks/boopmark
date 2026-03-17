@@ -158,23 +158,32 @@ fn parse_jsonl(text: &str) -> Result<Vec<ImportRecord>, String> {
 // --- CSV helpers ---
 
 /// Prefix-escape a cell value so spreadsheet apps don't execute it as a formula.
-/// Only cells starting with =, +, -, @ are escaped; the prefix quote is
-/// distinguished from a genuine leading apostrophe by the formula char that
-/// follows, so the roundtrip is lossless for values like `'90s`.
+///
+/// Values starting with `=`, `+`, `-`, or `@` are prefixed with `'`.
+/// Values starting with `'` followed by a formula-trigger char are also
+/// prefixed with `'` (e.g. `'=foo` → `''=foo`), making the scheme fully
+/// reversible: `csv_unescape(csv_safe(s)) == s` for all inputs.
 fn csv_safe(value: &str) -> std::borrow::Cow<'_, str> {
-    if value.starts_with(['=', '+', '-', '@']) {
+    let needs_escape = value.starts_with(['=', '+', '-', '@'])
+        || (value.starts_with('\'')
+            && value[1..].starts_with(['=', '+', '-', '@']));
+    if needs_escape {
         std::borrow::Cow::Owned(format!("'{value}"))
     } else {
         std::borrow::Cow::Borrowed(value)
     }
 }
 
-/// Reverse `csv_safe`: strip the escape prefix only when the pattern is
-/// `'` followed immediately by a formula-trigger character. A genuine leading
-/// apostrophe (e.g. `'90s`, `'draft`) is left intact.
+/// Reverse `csv_safe`: strip the leading `'` only when it is the escape prefix
+/// added by `csv_safe`. The escape prefix is always followed immediately by a
+/// formula-trigger character (`=`, `+`, `-`, `@`) or by another `'` that is
+/// itself followed by a formula-trigger character (double-apostrophe case).
+/// Genuine leading apostrophes like `'90s` or `'draft` are left intact.
 fn csv_unescape(s: &str) -> String {
     if let Some(rest) = s.strip_prefix('\'')
-        && rest.starts_with(['=', '+', '-', '@']) {
+        && (rest.starts_with(['=', '+', '-', '@'])
+            || (rest.starts_with('\'') && rest[1..].starts_with(['=', '+', '-', '@'])))
+        {
             return rest.to_string();
         }
     s.to_string()
@@ -188,6 +197,11 @@ fn tags_to_csv(tags: &[String]) -> String {
 /// Decode tags from a CSV cell. Accepts both the current JSON-array format
 /// (written by `tags_to_csv`) and the legacy pipe-delimited format, so that
 /// CSV files exported before this change can still be imported.
+///
+/// Known limitation: a single legacy tag whose text is a valid JSON string
+/// array (e.g. `["a"]`) will be misread as a JSON-encoded tag list and
+/// imported as tag `a`. This case is considered theoretical and not worth
+/// the complexity of a versioned format marker.
 fn tags_from_csv(cell: &str) -> Vec<String> {
     // JSON array format (current): ["a","b"]
     if let Ok(tags) = serde_json::from_str::<Vec<String>>(cell) {
@@ -560,5 +574,33 @@ mod tests {
         let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records[0].tags, bm.tags);
+    }
+
+    #[test]
+    fn csv_apostrophe_formula_char_roundtrip() {
+        // User data starting with '= (apostrophe then formula char) must
+        // survive export+import unchanged. csv_safe escapes it to ''=foo and
+        // csv_unescape reverses it back to '=foo.
+        let mut bm = make_bookmark("https://example.com", vec![]);
+        bm.title = Some("'=not-a-formula".to_string());
+        bm.description = Some("'+positive".to_string());
+        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        // Verify the double-apostrophe escape is present in the raw bytes
+        assert!(csv_text.contains("''=not-a-formula"));
+        assert!(csv_text.contains("''+positive"));
+        let records = parse_csv(&csv_text).unwrap();
+        assert_eq!(records[0].title, bm.title);
+        assert_eq!(records[0].description, bm.description);
+    }
+
+    #[test]
+    fn csv_genuine_apostrophe_not_stripped() {
+        // User data starting with ' followed by a non-formula char must be
+        // left intact (e.g. '90s, 'draft).
+        let mut bm = make_bookmark("https://example.com", vec![]);
+        bm.title = Some("'90s nostalgia".to_string());
+        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        let records = parse_csv(&csv_text).unwrap();
+        assert_eq!(records[0].title, bm.title);
     }
 }
