@@ -1,0 +1,12 @@
+{
+  "name": "screenshot-svc",
+  "version": "1.0.0",
+  "description": "Playwright screenshot microservice for Boopmark",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.50.0"
+  }
+}

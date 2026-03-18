@@ -25,6 +25,13 @@ services:
       - "9000:9000"
       - "9001:9001"
 
+  screenshot-svc:
+    build: ./screenshot-svc
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+
   server:
     build: .
     env_file:
@@ -34,6 +41,7 @@ services:
       DATABASE_URL: postgres://boopmark:devpassword@db:5432/boopmark
       S3_ENDPOINT: http://minio:9000
       ENABLE_LOCAL_AUTH: "1"
+      SCREENSHOT_SERVICE_URL: http://screenshot-svc:3001
     ports:
       - "4000:4000"
     labels:
@@ -42,6 +50,8 @@ services:
       db:
         condition: service_healthy
       minio:
+        condition: service_started
+      screenshot-svc:
         condition: service_started
     volumes:
       - ./uploads:/app/uploads
