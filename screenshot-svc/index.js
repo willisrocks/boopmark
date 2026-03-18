@@ -34,6 +34,30 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // SSRF guard: only allow public HTTP/HTTPS URLs
+    let parsed;
+    try { parsed = new URL(url); } catch {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: 'invalid url' }));
+      return;
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: 'only http/https allowed' }));
+      return;
+    }
+    const h = parsed.hostname.toLowerCase();
+    const isPrivate =
+      h === 'localhost' || h.endsWith('.local') ||
+      /^127\./.test(h) || /^10\./.test(h) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+      /^192\.168\./.test(h) || /^::1$/.test(h);
+    if (isPrivate) {
+      res.writeHead(403);
+      res.end(JSON.stringify({ error: 'private urls not allowed' }));
+      return;
+    }
+
     let page;
     try {
       page = await browser.newPage();

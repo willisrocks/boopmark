@@ -256,7 +256,7 @@ impl BookmarkRepository for PostgresPool {
         user_id: Uuid,
         image_url: &str,
     ) -> Result<(), DomainError> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE bookmarks SET image_url = $1, updated_at = now() \
              WHERE id = $2 AND user_id = $3",
         )
@@ -265,7 +265,12 @@ impl BookmarkRepository for PostgresPool {
         .bind(user_id)
         .execute(&self.pool)
         .await
-        .map(|_| ())
-        .map_err(|e| DomainError::Internal(e.to_string()))
+        .map_err(|e| DomainError::Internal(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            Err(DomainError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 }
