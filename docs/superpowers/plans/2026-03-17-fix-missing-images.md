@@ -1176,14 +1176,15 @@
   ```rust
   Commands::Images { command } => match command {
       ImagesCommands::Fix => {
-          let api = AppConfig::load()?.client()?;
+          let api = AppConfig::load().client()?;
 
           let response = api.client
               .post(api.url("/bookmarks/fix-images"))
               .bearer_auth(&api.api_key)
               .header("Accept", "text/event-stream")
               .send()
-              .await?;
+              .await
+              .map_err(|e| e.to_string())?;
 
           if response.status() == reqwest::StatusCode::CONFLICT {
               eprintln!("A fix-images job is already running for your account.");
@@ -1200,7 +1201,7 @@
           let mut buf = String::new();
 
           while let Some(chunk) = stream.next().await {
-              let chunk = chunk?;
+              let chunk = chunk.map_err(|e| e.to_string())?;
               buf.push_str(&String::from_utf8_lossy(&chunk));
 
               loop {
@@ -1303,18 +1304,22 @@
 
   const BASE_URL = 'http://127.0.0.1:4010';
 
-  // Adapt the auth setup to match the pattern from suggest.spec.js
-  // (E2E_AUTH=1 likely sets a test session cookie or uses a test user)
+  // Auth helper — mirrors the pattern in suggest.spec.js.
+  // ENABLE_E2E_AUTH=1 creates a test user; the login page accepts any credentials
+  // or provides a bypass. Read suggest.spec.js and adapt this helper to match exactly.
+  async function signIn(page) {
+    // TODO: mirror the exact auth setup from suggest.spec.js
+    // e.g. await page.goto(`${BASE_URL}/auth/e2e-login`);
+    // or fill the local login form, etc.
+  }
+
+  // ─── API tests (use page.request so session cookies are carried automatically) ──
 
   test.describe('fix-images API', () => {
-    test('POST /api/v1/bookmarks/fix-images streams SSE progress events', async ({ request }) => {
-      // Use the E2E API key from the test environment
-      const apiKey = process.env.E2E_API_KEY ?? 'test-api-key';
-      const response = await request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Accept': 'text/event-stream',
-        },
+    test('POST /api/v1/bookmarks/fix-images streams SSE progress events', async ({ page }) => {
+      await signIn(page);
+      const response = await page.request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, {
+        headers: { 'Accept': 'text/event-stream' },
       });
       expect(response.status()).toBe(200);
       const body = await response.text();
@@ -1322,16 +1327,12 @@
       expect(body).toContain('"done"');
     });
 
-    test('POST /api/v1/bookmarks/fix-images completes with done:true', async ({ request }) => {
-      const apiKey = process.env.E2E_API_KEY ?? 'test-api-key';
-      const response = await request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Accept': 'text/event-stream',
-        },
+    test('POST /api/v1/bookmarks/fix-images completes with done:true', async ({ page }) => {
+      await signIn(page);
+      const response = await page.request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, {
+        headers: { 'Accept': 'text/event-stream' },
       });
       const body = await response.text();
-      // Find the last data: line and parse it
       const lines = body.split('\n').filter(l => l.startsWith('data: '));
       expect(lines.length).toBeGreaterThan(0);
       const last = JSON.parse(lines[lines.length - 1].slice(6));
@@ -1341,40 +1342,38 @@
     });
 
     test('POST /api/v1/bookmarks/fix-images returns 401 when unauthenticated', async ({ request }) => {
+      // Use the bare `request` fixture (no session cookies) to test unauthenticated access
       const response = await request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, {
         headers: { 'Accept': 'text/event-stream' },
       });
       expect(response.status()).toBe(401);
     });
 
-    test('POST /api/v1/bookmarks/fix-images returns 409 on concurrent job', async ({ request }) => {
-      const apiKey = process.env.E2E_API_KEY ?? 'test-api-key';
-      const headers = {
-        'Authorization': `Bearer ${apiKey}`,
-        'Accept': 'text/event-stream',
-      };
-      // Fire the first request (don't await the body — let it stream)
-      const first = request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, { headers });
-      // Immediately fire the second
-      const second = await request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, { headers });
+    test('POST /api/v1/bookmarks/fix-images returns 409 on concurrent job', async ({ page }) => {
+      await signIn(page);
+      const headers = { 'Accept': 'text/event-stream' };
+      // Fire the first request without awaiting the body — let it stream
+      const first = page.request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, { headers });
+      // Immediately fire the second; it should hit the dedup guard
+      const second = await page.request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, { headers });
       expect(second.status()).toBe(409);
-      // Clean up first request
       await first;
     });
   });
 
+  // ─── Web UI tests ─────────────────────────────────────────────────────────────
+
   test.describe('fix-images settings UI', () => {
     test('Settings page has Image Repair section', async ({ page }) => {
-      // Sign in using E2E auth bypass — adapt to match suggest.spec.js pattern
+      await signIn(page);
       await page.goto(`${BASE_URL}/settings`);
-      // If redirected to login, handle auth here (mirror suggest.spec.js setup)
       await expect(page.getByText('Image Repair')).toBeVisible();
       await expect(page.getByRole('button', { name: 'Fix Missing Images' })).toBeVisible();
     });
 
     test('Clicking Fix Missing Images shows progress and completes', async ({ page }) => {
+      await signIn(page);
       await page.goto(`${BASE_URL}/settings`);
-      // Handle auth if needed
 
       const btn = page.getByRole('button', { name: 'Fix Missing Images' });
       const progressSection = page.locator('#fix-images-progress');
@@ -1390,6 +1389,8 @@
     });
   });
 
+  // ─── CLI tests ────────────────────────────────────────────────────────────────
+
   test.describe('fix-images CLI', () => {
     test('boop images fix --help shows expected output', async () => {
       const { execSync } = require('child_process');
@@ -1403,7 +1404,7 @@
   });
   ```
 
-  > Note: Read `tests/e2e/suggest.spec.js` first and adapt the auth setup exactly — the E2E auth pattern (test user, API key, session bypass) must be consistent across specs.
+  > **Important:** Read `tests/e2e/suggest.spec.js` first and fill in the `signIn(page)` helper to mirror its exact auth pattern. The E2E server starts with `ENABLE_E2E_AUTH=1`; the `signIn` helper must drive whatever authentication flow that enables. Using `page.request` (not the bare `request` fixture) carries session cookies to the API endpoints, avoiding the need for a Bearer API key entirely.
 
 - [ ] **Step 3: Run the E2E spec against the E2E server**
 
