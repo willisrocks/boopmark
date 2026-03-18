@@ -180,6 +180,100 @@
                 });
             </script>
         </section>
+
+        <section class="space-y-5">
+            <div>
+                <h2 class="text-lg font-semibold">Image Repair</h2>
+                <p class="text-sm text-gray-400">Fetch missing or broken bookmark images.</p>
+            </div>
+
+            <div id="fix-images-section" class="space-y-3">
+                <button
+                    id="fix-images-btn"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    Fix Missing Images
+                </button>
+
+                <div id="fix-images-progress" class="hidden space-y-2">
+                    <div class="w-full bg-gray-700 rounded-full h-2">
+                        <div
+                            id="fix-images-fill"
+                            class="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                            style="width: 0%"
+                        ></div>
+                    </div>
+                    <p id="fix-images-label" class="text-sm text-gray-400"></p>
+                </div>
+            </div>
+
+            <script>
+                document.getElementById('fix-images-btn').addEventListener('click', async () => {
+                    const btn = document.getElementById('fix-images-btn');
+                    const progress = document.getElementById('fix-images-progress');
+                    const fill = document.getElementById('fix-images-fill');
+                    const label = document.getElementById('fix-images-label');
+
+                    btn.disabled = true;
+                    progress.classList.remove('hidden');
+                    label.textContent = 'Starting\u2026';
+
+                    let response;
+                    try {
+                        response = await fetch('/settings/fix-images/stream');
+                    } catch {
+                        label.textContent = 'Connection error.';
+                        btn.disabled = false;
+                        return;
+                    }
+
+                    if (response.status === 409) {
+                        label.textContent = 'A fix-images job is already running.';
+                        btn.disabled = false;
+                        return;
+                    }
+
+                    if (!response.ok) {
+                        label.textContent = 'Server error. Please try again.';
+                        btn.disabled = false;
+                        return;
+                    }
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buf = '';
+
+                    try {
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            buf += decoder.decode(value, { stream: true });
+                            const lines = buf.split('\n');
+                            buf = lines.pop();
+                            for (const line of lines) {
+                                if (!line.startsWith('data: ')) continue;
+                                let data;
+                                try { data = JSON.parse(line.slice(6)); } catch { continue; }
+                                const pct = data.total > 0
+                                    ? ((data.checked / data.total) * 100).toFixed(0)
+                                    : 0;
+                                fill.style.width = `${pct}%`;
+                                if (data.done) {
+                                    label.textContent = `Done. Fixed ${data.fixed} images. ${data.failed} failed.`;
+                                    btn.disabled = false;
+                                } else {
+                                    label.textContent =
+                                        `Checking images: ${data.checked} / ${data.total} \u2014 Fixed: ${data.fixed} \u2014 Failed: ${data.failed}`;
+                                }
+                            }
+                        }
+                    } catch {
+                        label.textContent = 'Stream interrupted.';
+                        btn.disabled = false;
+                    }
+                });
+            </script>
+        </section>
     </div>
 </main>
 {% endblock %}

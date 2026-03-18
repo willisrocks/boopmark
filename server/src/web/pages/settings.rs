@@ -2,15 +2,22 @@ use askama::Template;
 use axum::Form;
 use axum::Router;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Redirect};
 use serde::Deserialize;
+use std::convert::Infallible;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use crate::app::bookmarks::ProgressEvent;
 use crate::domain::error::DomainError;
 use crate::domain::llm_settings::ANTHROPIC_MODEL_OPTIONS;
 use crate::web::extractors::AuthUser;
 use crate::web::pages::shared::UserView;
-use crate::web::state::AppState;
+use crate::web::state::{AppState, Bookmarks};
 
 struct ApiKeyView {
     id: String,
@@ -68,7 +75,7 @@ struct SettingsPage {
 fn render(t: &impl Template) -> axum::response::Response {
     match t.render() {
         Ok(body) => Html(body).into_response(),
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -140,7 +147,7 @@ async fn settings_page(
                 api_keys,
             })
         }
-        _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -175,8 +182,8 @@ async fn save_settings(
         .await
     {
         Ok(_) => Redirect::to("/settings?saved=1").into_response(),
-        Err(DomainError::InvalidInput(_)) => axum::http::StatusCode::BAD_REQUEST.into_response(),
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(DomainError::InvalidInput(_)) => StatusCode::BAD_REQUEST.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -187,7 +194,7 @@ async fn create_api_key_htmx(
 ) -> axum::response::Response {
     let name = form.name.trim().to_string();
     if name.is_empty() {
-        return axum::http::StatusCode::BAD_REQUEST.into_response();
+        return StatusCode::BAD_REQUEST.into_response();
     }
 
     match state.auth.create_api_key(user.id, &name).await {
@@ -196,7 +203,7 @@ async fn create_api_key_htmx(
             let api_keys: Vec<ApiKeyView> = keys.into_iter().map(Into::into).collect();
             render(&ApiKeysCreatedFragment { raw_key, api_keys })
         }
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -211,8 +218,46 @@ async fn delete_api_key_htmx(
             let api_keys: Vec<ApiKeyView> = keys.into_iter().map(Into::into).collect();
             render(&ApiKeysListFragment { api_keys })
         }
-        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+async fn fix_images_stream(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+) -> axum::response::Response {
+    let user_id = user.id;
+
+    {
+        let mut jobs = state.active_image_fix_jobs.lock().unwrap();
+        if jobs.contains(&user_id) {
+            return StatusCode::CONFLICT.into_response();
+        }
+        jobs.insert(user_id);
+    }
+
+    let (tx, rx) = mpsc::channel::<ProgressEvent>(32);
+    let jobs = state.active_image_fix_jobs.clone();
+    let screenshot_url = state.config.screenshot_service_url.clone();
+
+    tokio::spawn(async move {
+        match &state.bookmarks {
+            Bookmarks::Local(svc) => {
+                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx).await
+            }
+            Bookmarks::S3(svc) => {
+                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx).await
+            }
+        }
+        jobs.lock().unwrap().remove(&user_id);
+    });
+
+    let stream = ReceiverStream::new(rx).map(|event| {
+        let json = serde_json::to_string(&event).unwrap_or_default();
+        Ok::<_, Infallible>(Event::default().data(json))
+    });
+
+    Sse::new(stream).into_response()
 }
 
 pub fn routes() -> Router<AppState> {
@@ -228,6 +273,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/settings/api-keys/{id}",
             axum::routing::delete(delete_api_key_htmx),
+        )
+        .route(
+            "/settings/fix-images/stream",
+            axum::routing::get(fix_images_stream),
         )
 }
 
