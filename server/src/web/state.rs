@@ -25,7 +25,6 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub enrichment: Arc<EnrichmentService<HtmlMetadataExtractor, PostgresPool>>,
     pub images_storage: ImageStorage,
-    #[allow(dead_code)]
     pub active_image_fix_jobs: Arc<Mutex<HashSet<Uuid>>>,
 }
 

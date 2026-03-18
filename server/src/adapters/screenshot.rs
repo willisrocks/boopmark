@@ -1,12 +1,10 @@
 use crate::domain::error::DomainError;
 
-#[allow(dead_code)]
 pub struct ScreenshotClient {
     http: reqwest::Client,
     base_url: String,
 }
 
-#[allow(dead_code)]
 impl ScreenshotClient {
     pub fn new(base_url: String) -> Self {
         let http = reqwest::Client::builder()

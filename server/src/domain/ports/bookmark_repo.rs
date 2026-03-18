@@ -28,7 +28,6 @@ pub trait BookmarkRepository: Send + Sync {
     ) -> Result<Option<Bookmark>, DomainError>;
     async fn insert_with_id(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError>;
     async fn upsert_full(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError>;
-    #[allow(dead_code)]
     async fn update_image_url(
         &self,
         id: Uuid,

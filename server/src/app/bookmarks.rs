@@ -6,7 +6,6 @@ use crate::domain::ports::storage::ObjectStorage;
 use std::sync::Arc;
 use uuid::Uuid;
 
-#[allow(dead_code)]
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct ProgressEvent {
     pub checked: usize,
@@ -283,7 +282,6 @@ where
     }
 }
 
-#[allow(dead_code)]
 impl<R, M, S> BookmarkService<R, M, S>
 where
     R: BookmarkRepository + Send + Sync,
