@@ -94,11 +94,16 @@ test.describe("fix-images API", () => {
   }) => {
     await signIn(page);
 
-    // Fire two requests concurrently via page.evaluate so they truly overlap
+    // Start the first request and wait for its response headers (which arrive
+    // before the SSE body is drained). This guarantees the job lock is held
+    // before the second request is sent, making the 409 check deterministic.
     const statuses = await page.evaluate(async () => {
       const url = "/api/v1/bookmarks/fix-images";
       const opts = { method: "POST", headers: { Accept: "text/event-stream" } };
-      const [r1, r2] = await Promise.all([fetch(url, opts), fetch(url, opts)]);
+      // r1 headers arrive while the job is still running (holding the lock)
+      const r1 = await fetch(url, opts);
+      // send r2 only after r1 headers are received — lock is held
+      const r2 = await fetch(url, opts);
       return [r1.status, r2.status];
     });
 
@@ -165,16 +170,11 @@ test.describe("fix-images CLI", () => {
     await page.getByTestId("api-key-name-input").fill("fix-images-e2e");
     await page.getByTestId("create-api-key-button").click();
 
-    // The key appears somewhere on the page after creation — find it
-    // by looking for a monospace/code element with the boop_ prefix
-    await page.waitForTimeout(500);
-    const pageText = await page.content();
-    const match = pageText.match(/boop_[a-zA-Z0-9_-]+/);
-    if (!match) {
-      test.skip(true, "Could not extract API key from settings page");
-      return;
-    }
-    const apiKey = match[0];
+    // The raw key is shown in the created notice — use the stable testid
+    const rawKeyEl = page.getByTestId("api-key-raw-value");
+    await expect(rawKeyEl).toBeVisible();
+    const apiKey = (await rawKeyEl.textContent()) ?? "";
+    expect(apiKey).toMatch(/^boop_/);
 
     const output = runBoop("images fix", apiKey);
     expect(output).toContain("Done.");
