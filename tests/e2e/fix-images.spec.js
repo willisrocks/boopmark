@@ -94,16 +94,21 @@ test.describe("fix-images API", () => {
   }) => {
     await signIn(page);
 
-    // Start the first request and wait for its response headers (which arrive
-    // before the SSE body is drained). This guarantees the job lock is held
-    // before the second request is sent, making the 409 check deterministic.
+    // Seed several bookmarks so the repair job has real work to do and cannot
+    // complete before the second concurrent request arrives.
+    for (let i = 0; i < 5; i++) {
+      await page.request.post("/api/v1/bookmarks", {
+        headers: { "Content-Type": "application/json" },
+        data: JSON.stringify({ url: `https://example.com/concurrent-test-${i}` }),
+      });
+    }
+
+    // Fire two requests simultaneously; the second should see the job lock held
+    // by the first.
     const statuses = await page.evaluate(async () => {
       const url = "/api/v1/bookmarks/fix-images";
       const opts = { method: "POST", headers: { Accept: "text/event-stream" } };
-      // r1 headers arrive while the job is still running (holding the lock)
-      const r1 = await fetch(url, opts);
-      // send r2 only after r1 headers are received — lock is held
-      const r2 = await fetch(url, opts);
+      const [r1, r2] = await Promise.all([fetch(url, opts), fetch(url, opts)]);
       return [r1.status, r2.status];
     });
 
