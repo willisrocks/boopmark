@@ -45,6 +45,11 @@
   git commit -m "feat: update bookmark card image to aspect-[40/21] (og:image standard)"
   ```
 
+- [ ] **Step 4: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
+
 ---
 
 ### Task 2: Screenshot sidecar (Node.js + Playwright)
@@ -192,6 +197,11 @@
   git commit -m "feat: add Playwright screenshot sidecar service"
   ```
 
+- [ ] **Step 7: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
+
 ---
 
 ### Task 3: Rust screenshot adapter
@@ -264,7 +274,7 @@
           let app = Router::new().route("/screenshot", post(fake_screenshot));
           let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
           let addr = listener.local_addr().unwrap();
-          tokio::spawn(axum::serve(listener, app).into_future());
+          tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
           let client = ScreenshotClient::new(format!("http://{}", addr));
           let result = client.capture("https://example.com").await;
@@ -282,7 +292,7 @@
           );
           let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
           let addr = listener.local_addr().unwrap();
-          tokio::spawn(axum::serve(listener, app).into_future());
+          tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
           let client = ScreenshotClient::new(format!("http://{}", addr));
           let result = client.capture("https://example.com").await;
@@ -291,6 +301,8 @@
       }
   }
   ```
+
+  > Note: `tokio::spawn(async move { axum::serve(listener, app).await.unwrap() })` — do NOT use `.into_future()` here; the `async move` block is the correct approach for Axum 0.8 in tests.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -307,29 +319,23 @@
   pub mod storage;
   ```
 
-- [ ] **Step 4: Add `futures` to server dev-dependencies for `into_future()` in tests**
-
-  In `server/Cargo.toml`, update `[dev-dependencies]` to:
-  ```toml
-  [dev-dependencies]
-  tokio = { workspace = true, features = ["test-util"] }
-  futures = "0.3"
-  ```
-
-  This is a dev-only dep — do NOT add `futures` to workspace `[dependencies]`.
-
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 4: Run tests to verify they pass**
 
   Run: `cargo test -p boopmark-server screenshot`
   Expected: 2 tests pass.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
   ```bash
   git add server/src/adapters/screenshot.rs server/src/adapters/mod.rs \
     server/Cargo.toml Cargo.toml
   git commit -m "feat: add ScreenshotClient adapter for Playwright sidecar"
   ```
+
+- [ ] **Step 6: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
 
 ---
 
@@ -391,19 +397,21 @@
       user_id: Uuid,
       image_url: &str,
   ) -> Result<(), DomainError> {
-      sqlx::query!(
+      sqlx::query(
           "UPDATE bookmarks SET image_url = $1, updated_at = now() \
            WHERE id = $2 AND user_id = $3",
-          image_url,
-          id,
-          user_id
       )
+      .bind(image_url)
+      .bind(id)
+      .bind(user_id)
       .execute(&self.pool)
       .await
       .map(|_| ())
       .map_err(|e| DomainError::Internal(e.to_string()))
   }
   ```
+
+  > Note: Use `sqlx::query` (runtime, with `.bind()` calls) — NOT `sqlx::query!` (compile-time macro). This is consistent with the rest of the codebase pattern.
 
 - [ ] **Step 4: Build to confirm it compiles**
 
@@ -418,6 +426,11 @@
     server/src/app/bookmarks.rs
   git commit -m "feat: add update_image_url to BookmarkRepository"
   ```
+
+- [ ] **Step 6: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
 
 ---
 
@@ -577,11 +590,180 @@
   git commit -m "feat: add fix_missing_images service method with dedup and screenshot fallback"
   ```
 
+- [ ] **Step 6: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
+
+---
+
+### Task 6: Unit tests for `fix_missing_images`
+
+**Files:**
+- Modify: `server/src/app/bookmarks.rs` (add tests to existing test module)
+
+- [ ] **Step 1: Write failing tests for `fix_missing_images`**
+
+  Add a new `mod fix_images_tests` inside `server/src/app/bookmarks.rs` (alongside `mod import_tests`).
+  The tests use a local Axum server to fake the og:image HTML page, image HEAD checks, and (where needed) the screenshot sidecar.
+  Adapt the `BookmarkService` constructor call to match the actual signature in the file.
+
+  ```rust
+  #[cfg(test)]
+  mod fix_images_tests {
+      use super::*;
+      use axum::{Router, routing::{get, head as head_route}};
+      use tokio::sync::mpsc;
+      use uuid::Uuid;
+
+      // Helper: spin up a minimal HTTP server that returns the given HTML for GET /
+      // and returns the given status for HEAD /image.jpg
+      async fn start_fake_site(html: &'static str, image_status: u16) -> std::net::SocketAddr {
+          let html = html.to_string();
+          let app = Router::new()
+              .route(
+                  "/",
+                  get(move || {
+                      let html = html.clone();
+                      async move {
+                          (
+                              axum::http::StatusCode::OK,
+                              [("Content-Type", "text/html")],
+                              html,
+                          )
+                      }
+                  }),
+              )
+              .route(
+                  "/image.jpg",
+                  head_route(move || async move {
+                      axum::http::StatusCode::from_u16(image_status).unwrap()
+                  }),
+              );
+          let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+          let addr = listener.local_addr().unwrap();
+          tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+          addr
+      }
+
+      // Helper: collect all progress events from the channel
+      async fn collect_events(mut rx: mpsc::Receiver<ProgressEvent>) -> Vec<ProgressEvent> {
+          let mut events = Vec::new();
+          while let Some(event) = rx.recv().await {
+              let done = event.done;
+              events.push(event);
+              if done { break; }
+          }
+          events
+      }
+
+      #[tokio::test]
+      async fn skips_bookmarks_with_valid_images() {
+          // Arrange: one bookmark with a working image URL (HEAD returns 200)
+          let addr = start_fake_site("", 200).await;
+          let image_url = format!("http://{}/image.jpg", addr);
+
+          // TODO: adapt this constructor call to match the actual BookmarkService::new signature
+          // Use the same MockRepo pattern from mod import_tests above
+          let user_id = Uuid::new_v4();
+          let bookmark_id = Uuid::new_v4();
+          // Insert a bookmark with image_url set to the working URL
+          // ... (mirror MockRepo setup from import_tests)
+          // let svc = make_test_service(repo);
+
+          // let (tx, rx) = mpsc::channel(32);
+          // svc.fix_missing_images(user_id, None, tx).await;
+          // let events = collect_events(rx).await;
+          // let last = events.last().unwrap();
+          // assert_eq!(last.fixed, 0, "should not fix an already-working image");
+          // assert_eq!(last.failed, 0);
+          // assert!(last.done);
+          let _ = (addr, image_url, user_id, bookmark_id); // suppress unused warnings until impl
+          todo!("implement once BookmarkService constructor is visible")
+      }
+
+      #[tokio::test]
+      async fn fixes_bookmark_with_null_image() {
+          // Arrange: one bookmark with image_url = None
+          // og:image meta tag present on the page
+          // Expected: fixed=1, failed=0, done=true
+
+          // TODO: adapt to actual constructor
+          // let user_id = Uuid::new_v4();
+          // let addr = start_fake_page_with_og_image().await;
+          // let svc = make_test_service_with_bookmark(user_id, None, addr);
+          // let (tx, rx) = mpsc::channel(32);
+          // svc.fix_missing_images(user_id, None, tx).await;
+          // let events = collect_events(rx).await;
+          // let last = events.last().unwrap();
+          // assert_eq!(last.fixed, 1);
+          // assert_eq!(last.failed, 0);
+          // assert!(last.done);
+          todo!("implement once BookmarkService constructor is visible")
+      }
+
+      #[tokio::test]
+      async fn fixes_bookmark_with_broken_image() {
+          // Arrange: one bookmark with image_url = Some("http://.../image.jpg")
+          // HEAD /image.jpg returns 404 (broken)
+          // og:image is available on the page
+          // Expected: fixed=1, failed=0
+
+          // TODO: adapt to actual constructor
+          todo!("implement once BookmarkService constructor is visible")
+      }
+
+      #[tokio::test]
+      async fn records_failure_when_no_image_available_and_no_screenshot_svc() {
+          // Arrange: one bookmark with image_url = None
+          // No og:image meta tag
+          // screenshot_service_url = None
+          // Expected: failed=1, fixed=0
+
+          // TODO: adapt to actual constructor
+          todo!("implement once BookmarkService constructor is visible")
+      }
+  }
+  ```
+
+  > **Implementation note:** Replace each `todo!()` with real test code once you've read the actual `BookmarkService::new` constructor signature in `server/src/app/bookmarks.rs`. Reuse the same `MockRepo` and `MockStorage` patterns from `mod import_tests` in that file. The `todo!()` stubs ensure the test file compiles and the test names are registered, so you can see them pass/fail as you implement each one.
+
+- [ ] **Step 2: Run tests to confirm they compile (todos count as "running")**
+
+  Run: `cargo test -p boopmark-server fix_images`
+  Expected: All 4 tests run and show as "panicked at 'not yet implemented'" — this is correct; they will be replaced with real assertions in later steps.
+
+- [ ] **Step 3: Implement each test by replacing `todo!()`**
+
+  For each of the 4 tests:
+  1. Read the `BookmarkService::new` signature and `MockRepo` setup in the file.
+  2. Construct a test service instance with a `MockRepo` seeded with the right bookmark.
+  3. Spin up local HTTP servers as needed (for the page HTML, for image HEAD checks, optionally for screenshot sidecar).
+  4. Call `svc.fix_missing_images(user_id, screenshot_url, tx).await`.
+  5. Assert on the final `ProgressEvent` (`done`, `fixed`, `failed` counts).
+
+- [ ] **Step 4: Run tests to confirm they all pass**
+
+  Run: `cargo test -p boopmark-server fix_images`
+  Expected: 4 tests pass.
+
+- [ ] **Step 5: Commit**
+
+  ```bash
+  git add server/src/app/bookmarks.rs
+  git commit -m "test: add unit tests for fix_missing_images service method"
+  ```
+
+- [ ] **Step 6: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
+
 ---
 
 ## Chunk 3: API & Web Endpoints
 
-### Task 6: API SSE endpoint
+### Task 7: API SSE endpoint
 
 **Files:**
 - Modify: `Cargo.toml` (workspace — add `tokio-stream`)
@@ -665,7 +847,9 @@
   }
   ```
 
-- [ ] **Step 3: Replace the entire contents of `server/src/web/api/mod.rs`**
+- [ ] **Step 3: Update `server/src/web/api/mod.rs`**
+
+  Read the current `mod.rs` and add the `image_fix` module and merge its routes. The merged routes block should look like:
 
   ```rust
   pub mod auth;
@@ -684,6 +868,8 @@
           .nest("/auth", auth::routes())
   }
   ```
+
+  > Note: Read the actual file first and follow its exact existing structure. Only add the `image_fix` module declaration and merge call.
 
 - [ ] **Step 4: Build to confirm it compiles**
 
@@ -721,9 +907,14 @@
   git commit -m "feat: add POST /api/v1/bookmarks/fix-images SSE endpoint"
   ```
 
+- [ ] **Step 7: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
+
 ---
 
-### Task 7: Web SSE endpoint + settings UI
+### Task 8: Web SSE endpoint + settings UI
 
 **Files:**
 - Modify: `server/src/web/pages/settings.rs`
@@ -911,11 +1102,16 @@
   git commit -m "feat: add fix-images web UI with SSE progress bar to settings page"
   ```
 
+- [ ] **Step 6: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
+
 ---
 
 ## Chunk 4: CLI
 
-### Task 8: CLI `boop images fix` subcommand
+### Task 9: CLI `boop images fix` subcommand
 
 **Files:**
 - Modify: `Cargo.toml` (workspace — add `stream` feature to reqwest)
@@ -931,7 +1127,7 @@
 
 - [ ] **Step 2: Add `futures` directly to `cli/Cargo.toml`**
 
-  > Note: `futures` was added as a server **dev-dependency** in Chunk 1 Task 3 Step 4 — it is NOT in the workspace `[dependencies]`, so it cannot be referenced via `{ workspace = true }` here.
+  > Note: `futures` is NOT in workspace `[dependencies]` (it's a server dev-dep only), so it cannot be referenced via `{ workspace = true }` here.
 
   In `cli/Cargo.toml` dependencies, add:
   ```toml
@@ -974,14 +1170,17 @@
 
 - [ ] **Step 5: Implement the `Images { Fix }` arm in the command match**
 
+  > **Important:** The CLI uses `AppConfig::load()` which returns an `AppConfig` that has a `.client()?` method returning `ApiClient { base_url, api_key, client }`. The `ApiClient` has a `.url(path)` method: `format!("{}/api/v1{}", self.base_url, path)`. Do NOT use `config.server` or `config.api_key` directly — use the `ApiClient` pattern.
+
   In the main match block handling commands, add:
   ```rust
   Commands::Images { command } => match command {
       ImagesCommands::Fix => {
-          let client = reqwest::Client::new();
-          let response = client
-              .post(format!("{}/api/v1/bookmarks/fix-images", config.server))
-              .bearer_auth(&config.api_key)
+          let api = AppConfig::load()?.client()?;
+
+          let response = api.client
+              .post(api.url("/bookmarks/fix-images"))
+              .bearer_auth(&api.api_key)
               .header("Accept", "text/event-stream")
               .send()
               .await?;
@@ -1073,11 +1272,162 @@
   git commit -m "feat: add boop images fix CLI command with live SSE progress"
   ```
 
+- [ ] **Step 10: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
+
+---
+
+## Chunk 5: E2E Tests
+
+### Task 10: Playwright E2E spec for fix-images feature
+
+**Files:**
+- Create: `tests/e2e/fix-images.spec.js`
+
+**E2E server:** The committed harness starts its own server via `scripts/e2e/start-server.sh` on `http://127.0.0.1:4010` with `ENABLE_E2E_AUTH=1` and `STORAGE_BACKEND=local`. Do NOT point tests at the dev server on port 4000. Follow the same patterns as `tests/e2e/suggest.spec.js`.
+
+- [ ] **Step 1: Read `tests/e2e/suggest.spec.js` to understand the auth/setup pattern**
+
+  Read: `tests/e2e/suggest.spec.js`
+  Note: how the test authenticates (likely using the E2E auth bypass), how it constructs URLs, and how it handles any shared setup.
+
+- [ ] **Step 2: Write the E2E spec**
+
+  Create `tests/e2e/fix-images.spec.js`:
+
+  ```js
+  // @ts-check
+  const { test, expect } = require('@playwright/test');
+
+  const BASE_URL = 'http://127.0.0.1:4010';
+
+  // Adapt the auth setup to match the pattern from suggest.spec.js
+  // (E2E_AUTH=1 likely sets a test session cookie or uses a test user)
+
+  test.describe('fix-images API', () => {
+    test('POST /api/v1/bookmarks/fix-images streams SSE progress events', async ({ request }) => {
+      // Use the E2E API key from the test environment
+      const apiKey = process.env.E2E_API_KEY ?? 'test-api-key';
+      const response = await request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Accept': 'text/event-stream',
+        },
+      });
+      expect(response.status()).toBe(200);
+      const body = await response.text();
+      expect(body).toContain('data:');
+      expect(body).toContain('"done"');
+    });
+
+    test('POST /api/v1/bookmarks/fix-images completes with done:true', async ({ request }) => {
+      const apiKey = process.env.E2E_API_KEY ?? 'test-api-key';
+      const response = await request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Accept': 'text/event-stream',
+        },
+      });
+      const body = await response.text();
+      // Find the last data: line and parse it
+      const lines = body.split('\n').filter(l => l.startsWith('data: '));
+      expect(lines.length).toBeGreaterThan(0);
+      const last = JSON.parse(lines[lines.length - 1].slice(6));
+      expect(last.done).toBe(true);
+      expect(typeof last.fixed).toBe('number');
+      expect(typeof last.failed).toBe('number');
+    });
+
+    test('POST /api/v1/bookmarks/fix-images returns 401 when unauthenticated', async ({ request }) => {
+      const response = await request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, {
+        headers: { 'Accept': 'text/event-stream' },
+      });
+      expect(response.status()).toBe(401);
+    });
+
+    test('POST /api/v1/bookmarks/fix-images returns 409 on concurrent job', async ({ request }) => {
+      const apiKey = process.env.E2E_API_KEY ?? 'test-api-key';
+      const headers = {
+        'Authorization': `Bearer ${apiKey}`,
+        'Accept': 'text/event-stream',
+      };
+      // Fire the first request (don't await the body — let it stream)
+      const first = request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, { headers });
+      // Immediately fire the second
+      const second = await request.post(`${BASE_URL}/api/v1/bookmarks/fix-images`, { headers });
+      expect(second.status()).toBe(409);
+      // Clean up first request
+      await first;
+    });
+  });
+
+  test.describe('fix-images settings UI', () => {
+    test('Settings page has Image Repair section', async ({ page }) => {
+      // Sign in using E2E auth bypass — adapt to match suggest.spec.js pattern
+      await page.goto(`${BASE_URL}/settings`);
+      // If redirected to login, handle auth here (mirror suggest.spec.js setup)
+      await expect(page.getByText('Image Repair')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Fix Missing Images' })).toBeVisible();
+    });
+
+    test('Clicking Fix Missing Images shows progress and completes', async ({ page }) => {
+      await page.goto(`${BASE_URL}/settings`);
+      // Handle auth if needed
+
+      const btn = page.getByRole('button', { name: 'Fix Missing Images' });
+      const progressSection = page.locator('#fix-images-progress');
+      const label = page.locator('#fix-images-label');
+
+      await expect(progressSection).toHaveClass(/hidden/);
+      await btn.click();
+      await expect(progressSection).not.toHaveClass(/hidden/);
+
+      // Wait for completion (done state)
+      await expect(label).toContainText('Done.', { timeout: 30000 });
+      await expect(btn).toBeEnabled();
+    });
+  });
+
+  test.describe('fix-images CLI', () => {
+    test('boop images fix --help shows expected output', async () => {
+      const { execSync } = require('child_process');
+      const output = execSync('cargo run -p boop -- images fix --help', {
+        encoding: 'utf8',
+        cwd: process.cwd(),
+      });
+      expect(output).toContain('fix');
+      expect(output).toContain('image');
+    });
+  });
+  ```
+
+  > Note: Read `tests/e2e/suggest.spec.js` first and adapt the auth setup exactly — the E2E auth pattern (test user, API key, session bypass) must be consistent across specs.
+
+- [ ] **Step 3: Run the E2E spec against the E2E server**
+
+  Run: `npx playwright test tests/e2e/fix-images.spec.js`
+  Expected: All 7 tests pass. If auth setup needs adjustment, fix to mirror `suggest.spec.js`.
+
+- [ ] **Step 4: Commit**
+
+  ```bash
+  git add tests/e2e/fix-images.spec.js
+  git commit -m "test: add E2E spec for fix-images API, web UI, and CLI"
+  ```
+
+- [ ] **Step 5: Run roborev code review**
+
+  Run the `roborev-review` skill to review the commit for code quality and security issues.
+  Address any critical or major issues before proceeding.
+
 ---
 
 ## Final verification
 
 - [ ] Run full test suite: `cargo test`
-- [ ] Run E2E: `npx playwright test tests/e2e/suggest.spec.js`
+- [ ] Run existing E2E: `npx playwright test tests/e2e/suggest.spec.js`
+- [ ] Run new E2E: `npx playwright test tests/e2e/fix-images.spec.js`
 - [ ] Verify via devproxy: `devproxy up`, open settings page, click "Fix Missing Images"
 - [ ] Verify CLI against prod: `cargo run -p boop -- images fix`
