@@ -619,6 +619,20 @@ mod tests {
     }
 
     #[test]
+    fn csv_tags_json_array_ambiguity_is_documented_limitation() {
+        // Known limitation: a single tag whose text is valid JSON-array syntax
+        // (e.g. the literal tag named `["rust","web"]`) will be decoded as two
+        // separate tags by the backward-compat JSON-array fallback in
+        // tags_from_csv. This case is considered theoretical in practice — real
+        // tags are short words, not JSON arrays — and not worth a versioned
+        // format marker. Use JSONL backup for lossless tag round-trips.
+        let ambiguous_cell = r#"["rust","web"]"#;
+        let parsed = super::tags_from_csv(ambiguous_cell);
+        // Decoded as JSON array (backward-compat path), not as one literal tag
+        assert_eq!(parsed, vec!["rust", "web"]);
+    }
+
+    #[test]
     fn csv_apostrophe_prefix_preserved_on_import() {
         // Values starting with ' (apostrophe) are not formula triggers and
         // are exported unchanged; they are also imported unchanged.
