@@ -522,6 +522,20 @@ mod tests {
                     Ok(bookmark)
                 }
             }
+            async fn update_image_url(
+                &self,
+                id: Uuid,
+                user_id: Uuid,
+                image_url: &str,
+            ) -> Result<(), DomainError> {
+                let mut bookmarks = self.bookmarks.lock().unwrap();
+                if let Some(b) = bookmarks.iter_mut().find(|b| b.id == id && b.user_id == user_id) {
+                    b.image_url = Some(image_url.to_string());
+                    Ok(())
+                } else {
+                    Err(DomainError::NotFound)
+                }
+            }
         }
 
         struct NoopMetadata;

@@ -249,4 +249,23 @@ impl BookmarkRepository for PostgresPool {
             DomainError::Internal(e.to_string())
         })
     }
+
+    async fn update_image_url(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        image_url: &str,
+    ) -> Result<(), DomainError> {
+        sqlx::query(
+            "UPDATE bookmarks SET image_url = $1, updated_at = now() \
+             WHERE id = $2 AND user_id = $3",
+        )
+        .bind(image_url)
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| DomainError::Internal(e.to_string()))
+    }
 }
