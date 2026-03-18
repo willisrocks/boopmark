@@ -14,5 +14,3 @@ toml.workspace = true
 dirs.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
-csv.workspace = true
-chrono.workspace = true
