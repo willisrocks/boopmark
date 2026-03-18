@@ -87,6 +87,26 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Manage bookmark images
+    Images {
+        #[command(subcommand)]
+        command: ImagesCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ImagesCommands {
+    /// Fetch missing or broken bookmark images
+    Fix,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct FixProgress {
+    checked: usize,
+    total: usize,
+    fixed: usize,
+    failed: usize,
+    done: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -511,6 +531,74 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
 
         Commands::Upgrade => upgrade().await,
+
+        Commands::Images { command } => match command {
+            ImagesCommands::Fix => {
+                let api = AppConfig::load().client()?;
+
+                let response = api
+                    .client
+                    .post(api.url("/bookmarks/fix-images"))
+                    .bearer_auth(&api.api_key)
+                    .header("Accept", "text/event-stream")
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                if response.status() == reqwest::StatusCode::CONFLICT {
+                    eprintln!("A fix-images job is already running for your account.");
+                    std::process::exit(1);
+                }
+
+                if !response.status().is_success() {
+                    eprintln!("Error: server returned {}", response.status());
+                    std::process::exit(1);
+                }
+
+                use futures::StreamExt;
+                let mut stream = response.bytes_stream();
+                let mut buf = String::new();
+
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| e.to_string())?;
+                    buf.push_str(&String::from_utf8_lossy(&chunk));
+
+                    loop {
+                        match buf.find('\n') {
+                            None => break,
+                            Some(pos) => {
+                                let line = buf[..pos].trim().to_string();
+                                buf.drain(..=pos);
+
+                                if let Some(json_str) = line.strip_prefix("data: ")
+                                    && let Ok(event) =
+                                        serde_json::from_str::<FixProgress>(json_str)
+                                    {
+                                        if event.done {
+                                            println!(
+                                                "\nDone. Fixed {} images. {} failed (no image found).",
+                                                event.fixed, event.failed
+                                            );
+                                            return Ok(());
+                                        } else {
+                                            print!(
+                                                "\rChecking images: {} / {} — Fixed: {} — Failed: {}   ",
+                                                event.checked,
+                                                event.total,
+                                                event.fixed,
+                                                event.failed
+                                            );
+                                            use std::io::Write;
+                                            std::io::stdout().flush().ok();
+                                        }
+                                    }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+        },
     }
 }
 
