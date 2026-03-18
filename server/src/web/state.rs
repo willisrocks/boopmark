@@ -9,7 +9,9 @@ use crate::app::settings::SettingsService;
 use crate::config::Config;
 use crate::domain::error::DomainError;
 use crate::domain::ports::storage::ObjectStorage;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use uuid::Uuid;
 
 /// Application state shared across all request handlers.
 ///
@@ -23,6 +25,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub enrichment: Arc<EnrichmentService<HtmlMetadataExtractor, PostgresPool>>,
     pub images_storage: ImageStorage,
+    #[allow(dead_code)]
+    pub active_image_fix_jobs: Arc<Mutex<HashSet<Uuid>>>,
 }
 
 #[derive(Clone)]

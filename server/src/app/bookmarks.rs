@@ -6,6 +6,16 @@ use crate::domain::ports::storage::ObjectStorage;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[allow(dead_code)]
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct ProgressEvent {
+    pub checked: usize,
+    pub total: usize,
+    pub fixed: usize,
+    pub failed: usize,
+    pub done: bool,
+}
+
 pub struct BookmarkService<R, M, S> {
     repo: Arc<R>,
     metadata: Arc<M>,
@@ -270,6 +280,100 @@ where
             extension_from_content_type(&content_type)
         );
         self.storage.put(&key, bytes.to_vec(), &content_type).await
+    }
+}
+
+#[allow(dead_code)]
+impl<R, M, S> BookmarkService<R, M, S>
+where
+    R: BookmarkRepository + Send + Sync,
+    M: MetadataExtractor + Send + Sync,
+    S: ObjectStorage + Send + Sync,
+{
+    pub async fn fix_missing_images(
+        &self,
+        user_id: Uuid,
+        screenshot_service_url: Option<&str>,
+        tx: tokio::sync::mpsc::Sender<ProgressEvent>,
+    ) {
+        let bookmarks = match self.repo.export_all(user_id).await {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+        let total = bookmarks.len();
+        let mut checked = 0;
+        let mut fixed = 0;
+        let mut failed = 0;
+
+        for bookmark in bookmarks {
+            let needs_fix = match &bookmark.image_url {
+                None => true,
+                Some(url) => self
+                    .http_client
+                    .head(url)
+                    .send()
+                    .await
+                    .map(|r| !r.status().is_success())
+                    .unwrap_or(true),
+            };
+
+            if needs_fix {
+                match self
+                    .fetch_and_store_image(&bookmark.url, screenshot_service_url)
+                    .await
+                {
+                    Ok(new_url) => {
+                        if self
+                            .repo
+                            .update_image_url(bookmark.id, user_id, &new_url)
+                            .await
+                            .is_ok()
+                        {
+                            fixed += 1;
+                        } else {
+                            failed += 1;
+                        }
+                    }
+                    Err(_) => failed += 1,
+                }
+            }
+
+            checked += 1;
+            let _ = tx
+                .send(ProgressEvent { checked, total, fixed, failed, done: false })
+                .await;
+        }
+
+        let _ = tx
+            .send(ProgressEvent { checked, total, fixed, failed, done: true })
+            .await;
+    }
+
+    /// Try og:image scrape first; fall back to screenshot sidecar.
+    async fn fetch_and_store_image(
+        &self,
+        page_url: &str,
+        screenshot_service_url: Option<&str>,
+    ) -> Result<String, DomainError> {
+        // 1. Try og:image
+        if let Ok(meta) = self.metadata.extract(page_url).await
+            && let Some(image_url) = meta.image_url
+                && let Ok(stored) = self.download_and_store_image(&image_url).await {
+                    return Ok(stored);
+                }
+
+        // 2. Fall back to screenshot sidecar via ScreenshotClient adapter
+        let svc_url = screenshot_service_url.ok_or_else(|| {
+            DomainError::Internal("no screenshot svc".into())
+        })?;
+
+        let screenshot_client =
+            crate::adapters::screenshot::ScreenshotClient::new(svc_url.to_string());
+        let bytes = screenshot_client.capture(page_url).await?;
+
+        let key = format!("images/{}.jpg", Uuid::new_v4());
+        self.storage.put(&key, bytes, "image/jpeg").await
     }
 }
 

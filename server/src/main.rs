@@ -114,6 +114,7 @@ async fn main() {
         config: Arc::new(config.clone()),
         enrichment: enrichment_service,
         images_storage,
+        active_image_fix_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     };
 
     let app = web::router::create_router(state);
