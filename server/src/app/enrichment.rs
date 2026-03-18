@@ -64,7 +64,9 @@ where
         };
 
         // Attempt LLM enrichment
-        let enrichment = self.try_llm_enrich(user_id, url, &metadata, existing_tags).await;
+        let enrichment = self
+            .try_llm_enrich(user_id, url, &metadata, existing_tags)
+            .await;
 
         // Merge: LLM takes priority over scrape for title/description/tags
         SuggestionResult {

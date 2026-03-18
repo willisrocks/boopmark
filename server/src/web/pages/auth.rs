@@ -172,9 +172,10 @@ async fn google_callback(
             // Clean up the newly stored avatar since the upsert failed —
             // no user record will reference it, so it would be orphaned.
             if let Some(ref new_url) = stored_image
-                && let Some(key) = state.images_storage.key_from_url(new_url) {
-                    let _ = state.images_storage.delete(&key).await;
-                }
+                && let Some(key) = state.images_storage.key_from_url(new_url)
+            {
+                let _ = state.images_storage.delete(&key).await;
+            }
             return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
         }
     };
@@ -184,11 +185,12 @@ async fn google_callback(
     // via COALESCE, so we must NOT delete the old file — the DB still references it.
     if let Some(ref new_url) = stored_image
         && let Some(ref old_url) = old_avatar_url
-            && new_url != old_url
-                && let Some(old_key) = state.images_storage.key_from_url(old_url)
-                    && let Err(e) = state.images_storage.delete(&old_key).await {
-                        tracing::warn!("Failed to delete old avatar {old_key}: {e}");
-                    }
+        && new_url != old_url
+        && let Some(old_key) = state.images_storage.key_from_url(old_url)
+        && let Err(e) = state.images_storage.delete(&old_key).await
+    {
+        tracing::warn!("Failed to delete old avatar {old_key}: {e}");
+    }
 
     let session_token = state
         .auth
@@ -377,9 +379,7 @@ async fn download_and_store_avatar(picture_url: &str, state: &AppState) -> Optio
                 return None;
             }
             if !is_allowed_avatar_host(final_url) {
-                tracing::warn!(
-                    "Avatar redirect landed on non-Google domain: {final_url}"
-                );
+                tracing::warn!("Avatar redirect landed on non-Google domain: {final_url}");
                 return None;
             }
             r
@@ -396,10 +396,11 @@ async fn download_and_store_avatar(picture_url: &str, state: &AppState) -> Optio
 
     // Check Content-Length before reading the body
     if let Some(len) = resp.content_length()
-        && len > MAX_AVATAR_BYTES {
-            tracing::warn!("Avatar too large ({len} bytes), skipping");
-            return None;
-        }
+        && len > MAX_AVATAR_BYTES
+    {
+        tracing::warn!("Avatar too large ({len} bytes), skipping");
+        return None;
+    }
 
     // Stream the body in chunks with a hard size cap to prevent memory exhaustion
     // if Content-Length is absent or lies
@@ -430,11 +431,7 @@ async fn download_and_store_avatar(picture_url: &str, state: &AppState) -> Optio
 
     let key = format!("avatars/{}.{}", uuid::Uuid::new_v4(), ext);
 
-    match state
-        .images_storage
-        .put(&key, body, content_type)
-        .await
-    {
+    match state.images_storage.put(&key, body, content_type).await {
         Ok(url) => Some(url),
         Err(e) => {
             tracing::warn!("Failed to store avatar: {e}");

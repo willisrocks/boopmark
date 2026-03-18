@@ -22,7 +22,8 @@ impl AnthropicEnricher {
     fn build_prompt(input: &EnrichmentInput) -> String {
         let existing_tags_instruction = match &input.existing_tags {
             Some(tags) if !tags.is_empty() => {
-                let tag_list: Vec<String> = tags.iter().map(|(t, c)| format!("{t} ({c})")).collect();
+                let tag_list: Vec<String> =
+                    tags.iter().map(|(t, c)| format!("{t} ({c})")).collect();
                 format!(
                     "\n\nThe user already has these tags (listed most-popular first): {}. \
                      Prefer reusing these existing tags. Only create new tags if none of these fit.",
@@ -154,8 +155,9 @@ impl AnthropicEnricher {
 
         // Extract the JSON object from the response, handling markdown fences
         // or any leading/trailing text the LLM may have added
-        let json_str = extract_json_object(&text)
-            .ok_or_else(|| DomainError::Internal("LLM response contained no JSON object".to_string()))?;
+        let json_str = extract_json_object(&text).ok_or_else(|| {
+            DomainError::Internal("LLM response contained no JSON object".to_string())
+        })?;
 
         let parsed: EnrichmentJson = serde_json::from_str(json_str)
             .map_err(|e| DomainError::Internal(format!("LLM JSON parse error: {e}")))?;
@@ -205,10 +207,7 @@ mod tests {
             url: "https://example.com".to_string(),
             scraped_title: Some("Example".to_string()),
             scraped_description: None,
-            existing_tags: Some(vec![
-                ("rust".to_string(), 5),
-                ("web".to_string(), 3),
-            ]),
+            existing_tags: Some(vec![("rust".to_string(), 5), ("web".to_string(), 3)]),
         };
         let prompt = AnthropicEnricher::build_prompt(&input);
         assert!(prompt.contains("rust (5)"));
@@ -248,7 +247,8 @@ mod tests {
 
     #[test]
     fn parse_enrichment_json_with_leading_text() {
-        let text = "Here is the JSON:\n{\"title\": \"T\", \"description\": \"D\", \"tags\": [\"a\"]}";
+        let text =
+            "Here is the JSON:\n{\"title\": \"T\", \"description\": \"D\", \"tags\": [\"a\"]}";
         let json_str = extract_json_object(text).unwrap();
         let parsed: EnrichmentJson = serde_json::from_str(json_str).unwrap();
         assert_eq!(parsed.title.as_deref(), Some("T"));

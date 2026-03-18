@@ -49,16 +49,18 @@ where
     ) -> Result<Bookmark, DomainError> {
         if needs_metadata(&input)
             && let Ok(meta) = self.metadata.extract(&input.url).await
-                && let Some(image_url) = merge_metadata(&mut input, meta)
-                    && let Ok(stored_url) = self.download_and_store_image(&image_url).await {
-                        input.image_url = Some(stored_url);
-                    }
+            && let Some(image_url) = merge_metadata(&mut input, meta)
+            && let Ok(stored_url) = self.download_and_store_image(&image_url).await
+        {
+            input.image_url = Some(stored_url);
+        }
 
         // Extract domain from URL if not set
         if input.domain.is_none()
-            && let Ok(parsed) = url::Url::parse(&input.url) {
-                input.domain = parsed.host_str().map(|h| h.to_string());
-            }
+            && let Ok(parsed) = url::Url::parse(&input.url)
+        {
+            input.domain = parsed.host_str().map(|h| h.to_string());
+        }
 
         self.repo.create(user_id, input).await
     }
@@ -131,43 +133,41 @@ where
             }
 
             match mode {
-                ImportMode::Import => {
-                    match self.repo.find_by_url(user_id, &record.url).await? {
-                        Some(existing) => match strategy {
-                            ImportStrategy::Skip => result.skipped += 1,
-                            ImportStrategy::Upsert => {
-                                self.repo
-                                    .update(
-                                        existing.id,
-                                        user_id,
-                                        UpdateBookmark {
-                                            title: record.title,
-                                            description: record.description,
-                                            tags: Some(record.tags),
-                                        },
-                                    )
-                                    .await?;
-                                result.updated += 1;
-                            }
-                        },
-                        None => {
+                ImportMode::Import => match self.repo.find_by_url(user_id, &record.url).await? {
+                    Some(existing) => match strategy {
+                        ImportStrategy::Skip => result.skipped += 1,
+                        ImportStrategy::Upsert => {
                             self.repo
-                                .create(
+                                .update(
+                                    existing.id,
                                     user_id,
-                                    CreateBookmark {
-                                        url: record.url,
+                                    UpdateBookmark {
                                         title: record.title,
                                         description: record.description,
-                                        image_url: None,
-                                        domain: None,
                                         tags: Some(record.tags),
                                     },
                                 )
                                 .await?;
-                            result.created += 1;
+                            result.updated += 1;
                         }
+                    },
+                    None => {
+                        self.repo
+                            .create(
+                                user_id,
+                                CreateBookmark {
+                                    url: record.url,
+                                    title: record.title,
+                                    description: record.description,
+                                    image_url: None,
+                                    domain: None,
+                                    tags: Some(record.tags),
+                                },
+                            )
+                            .await?;
+                        result.created += 1;
                     }
-                }
+                },
                 ImportMode::Restore => {
                     let Some(id) = record.id else {
                         result.errors.push(ImportError {
@@ -339,12 +339,24 @@ where
 
             checked += 1;
             let _ = tx
-                .send(ProgressEvent { checked, total, fixed, failed, done: false })
+                .send(ProgressEvent {
+                    checked,
+                    total,
+                    fixed,
+                    failed,
+                    done: false,
+                })
                 .await;
         }
 
         let _ = tx
-            .send(ProgressEvent { checked, total, fixed, failed, done: true })
+            .send(ProgressEvent {
+                checked,
+                total,
+                fixed,
+                failed,
+                done: true,
+            })
             .await;
     }
 
@@ -357,14 +369,14 @@ where
         // 1. Try og:image
         if let Ok(meta) = self.metadata.extract(page_url).await
             && let Some(image_url) = meta.image_url
-                && let Ok(stored) = self.download_and_store_image(&image_url).await {
-                    return Ok(stored);
-                }
+            && let Ok(stored) = self.download_and_store_image(&image_url).await
+        {
+            return Ok(stored);
+        }
 
         // 2. Fall back to screenshot sidecar via ScreenshotClient adapter
-        let svc_url = screenshot_service_url.ok_or_else(|| {
-            DomainError::Internal("no screenshot svc".into())
-        })?;
+        let svc_url = screenshot_service_url
+            .ok_or_else(|| DomainError::Internal("no screenshot svc".into()))?;
 
         let screenshot_client =
             crate::adapters::screenshot::ScreenshotClient::new(svc_url.to_string());
@@ -476,11 +488,17 @@ mod tests {
 
         impl MockRepo {
             fn new(bookmarks: Vec<Bookmark>) -> Self {
-                Self { bookmarks: Mutex::new(bookmarks), fail_upsert: false }
+                Self {
+                    bookmarks: Mutex::new(bookmarks),
+                    fail_upsert: false,
+                }
             }
 
             fn new_with_failing_upsert(bookmarks: Vec<Bookmark>) -> Self {
-                Self { bookmarks: Mutex::new(bookmarks), fail_upsert: true }
+                Self {
+                    bookmarks: Mutex::new(bookmarks),
+                    fail_upsert: true,
+                }
             }
         }
 
@@ -631,7 +649,10 @@ mod tests {
                 image_url: &str,
             ) -> Result<(), DomainError> {
                 let mut bookmarks = self.bookmarks.lock().unwrap();
-                if let Some(b) = bookmarks.iter_mut().find(|b| b.id == id && b.user_id == user_id) {
+                if let Some(b) = bookmarks
+                    .iter_mut()
+                    .find(|b| b.id == id && b.user_id == user_id)
+                {
                     b.image_url = Some(image_url.to_string());
                     Ok(())
                 } else {
@@ -973,7 +994,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(result.errors.len(), 1, "cross-account collision must be a row error");
+            assert_eq!(
+                result.errors.len(),
+                1,
+                "cross-account collision must be a row error"
+            );
             assert!(result.errors[0].message.contains("already exists"));
             assert_eq!(result.created, 0);
         }
@@ -1049,7 +1074,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(result.errors.len(), 1, "cross-tenant upsert_full collision must be a row error");
+            assert_eq!(
+                result.errors.len(),
+                1,
+                "cross-tenant upsert_full collision must be a row error"
+            );
             assert!(result.errors[0].message.contains("already exists"));
             assert_eq!(result.updated, 0);
         }
@@ -1188,76 +1217,163 @@ mod tests {
 
         impl MockRepo {
             fn new(bookmarks: Vec<Bookmark>) -> Self {
-                Self { bookmarks: Mutex::new(bookmarks) }
+                Self {
+                    bookmarks: Mutex::new(bookmarks),
+                }
             }
         }
 
         impl BookmarkRepository for MockRepo {
-            async fn create(&self, user_id: Uuid, input: CreateBookmark) -> Result<Bookmark, DomainError> {
+            async fn create(
+                &self,
+                user_id: Uuid,
+                input: CreateBookmark,
+            ) -> Result<Bookmark, DomainError> {
                 let b = Bookmark {
-                    id: Uuid::new_v4(), user_id, url: input.url, title: input.title,
-                    description: input.description, image_url: input.image_url,
-                    domain: input.domain, tags: input.tags.unwrap_or_default(),
-                    created_at: Utc::now(), updated_at: Utc::now(),
+                    id: Uuid::new_v4(),
+                    user_id,
+                    url: input.url,
+                    title: input.title,
+                    description: input.description,
+                    image_url: input.image_url,
+                    domain: input.domain,
+                    tags: input.tags.unwrap_or_default(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
                 };
                 self.bookmarks.lock().unwrap().push(b.clone());
                 Ok(b)
             }
             async fn get(&self, id: Uuid, user_id: Uuid) -> Result<Bookmark, DomainError> {
-                self.bookmarks.lock().unwrap().iter()
-                    .find(|b| b.id == id && b.user_id == user_id).cloned()
+                self.bookmarks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|b| b.id == id && b.user_id == user_id)
+                    .cloned()
                     .ok_or(DomainError::NotFound)
             }
-            async fn list(&self, user_id: Uuid, _filter: BookmarkFilter) -> Result<Vec<Bookmark>, DomainError> {
-                Ok(self.bookmarks.lock().unwrap().iter().filter(|b| b.user_id == user_id).cloned().collect())
+            async fn list(
+                &self,
+                user_id: Uuid,
+                _filter: BookmarkFilter,
+            ) -> Result<Vec<Bookmark>, DomainError> {
+                Ok(self
+                    .bookmarks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|b| b.user_id == user_id)
+                    .cloned()
+                    .collect())
             }
-            async fn update(&self, id: Uuid, user_id: Uuid, input: UpdateBookmark) -> Result<Bookmark, DomainError> {
+            async fn update(
+                &self,
+                id: Uuid,
+                user_id: Uuid,
+                input: UpdateBookmark,
+            ) -> Result<Bookmark, DomainError> {
                 let mut bookmarks = self.bookmarks.lock().unwrap();
-                let b = bookmarks.iter_mut().find(|b| b.id == id && b.user_id == user_id).ok_or(DomainError::NotFound)?;
-                if let Some(t) = input.title { b.title = Some(t); }
-                if let Some(d) = input.description { b.description = Some(d); }
-                if let Some(tags) = input.tags { b.tags = tags; }
+                let b = bookmarks
+                    .iter_mut()
+                    .find(|b| b.id == id && b.user_id == user_id)
+                    .ok_or(DomainError::NotFound)?;
+                if let Some(t) = input.title {
+                    b.title = Some(t);
+                }
+                if let Some(d) = input.description {
+                    b.description = Some(d);
+                }
+                if let Some(tags) = input.tags {
+                    b.tags = tags;
+                }
                 Ok(b.clone())
             }
             async fn delete(&self, id: Uuid, user_id: Uuid) -> Result<(), DomainError> {
                 let mut b = self.bookmarks.lock().unwrap();
                 let before = b.len();
                 b.retain(|bm| !(bm.id == id && bm.user_id == user_id));
-                if b.len() == before { Err(DomainError::NotFound) } else { Ok(()) }
+                if b.len() == before {
+                    Err(DomainError::NotFound)
+                } else {
+                    Ok(())
+                }
             }
-            async fn all_tags(&self, _user_id: Uuid) -> Result<Vec<String>, DomainError> { Ok(vec![]) }
-            async fn tags_with_counts(&self, _user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> { Ok(vec![]) }
+            async fn all_tags(&self, _user_id: Uuid) -> Result<Vec<String>, DomainError> {
+                Ok(vec![])
+            }
+            async fn tags_with_counts(
+                &self,
+                _user_id: Uuid,
+            ) -> Result<Vec<(String, i64)>, DomainError> {
+                Ok(vec![])
+            }
             async fn export_all(&self, user_id: Uuid) -> Result<Vec<Bookmark>, DomainError> {
-                Ok(self.bookmarks.lock().unwrap().iter().filter(|b| b.user_id == user_id).cloned().collect())
+                Ok(self
+                    .bookmarks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|b| b.user_id == user_id)
+                    .cloned()
+                    .collect())
             }
-            async fn find_by_url(&self, user_id: Uuid, url: &str) -> Result<Option<Bookmark>, DomainError> {
-                Ok(self.bookmarks.lock().unwrap().iter().find(|b| b.user_id == user_id && b.url == url).cloned())
+            async fn find_by_url(
+                &self,
+                user_id: Uuid,
+                url: &str,
+            ) -> Result<Option<Bookmark>, DomainError> {
+                Ok(self
+                    .bookmarks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|b| b.user_id == user_id && b.url == url)
+                    .cloned())
             }
             async fn insert_with_id(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {
                 let mut b = self.bookmarks.lock().unwrap();
-                if b.iter().any(|bm| bm.id == bookmark.id) { return Err(DomainError::AlreadyExists); }
-                b.push(bookmark.clone()); Ok(bookmark)
+                if b.iter().any(|bm| bm.id == bookmark.id) {
+                    return Err(DomainError::AlreadyExists);
+                }
+                b.push(bookmark.clone());
+                Ok(bookmark)
             }
             async fn upsert_full(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {
                 let mut b = self.bookmarks.lock().unwrap();
                 if let Some(existing) = b.iter_mut().find(|bm| bm.id == bookmark.id) {
-                    *existing = bookmark.clone(); Ok(bookmark)
+                    *existing = bookmark.clone();
+                    Ok(bookmark)
                 } else {
-                    b.push(bookmark.clone()); Ok(bookmark)
+                    b.push(bookmark.clone());
+                    Ok(bookmark)
                 }
             }
-            async fn update_image_url(&self, id: Uuid, user_id: Uuid, image_url: &str) -> Result<(), DomainError> {
+            async fn update_image_url(
+                &self,
+                id: Uuid,
+                user_id: Uuid,
+                image_url: &str,
+            ) -> Result<(), DomainError> {
                 let mut b = self.bookmarks.lock().unwrap();
                 if let Some(bm) = b.iter_mut().find(|bm| bm.id == id && bm.user_id == user_id) {
-                    bm.image_url = Some(image_url.to_string()); Ok(())
-                } else { Err(DomainError::NotFound) }
+                    bm.image_url = Some(image_url.to_string());
+                    Ok(())
+                } else {
+                    Err(DomainError::NotFound)
+                }
             }
         }
 
         struct NoopMetadata;
         impl MetadataExtractor for NoopMetadata {
             async fn extract(&self, _url: &str) -> Result<UrlMetadata, DomainError> {
-                Ok(UrlMetadata { title: None, description: None, image_url: None, domain: None })
+                Ok(UrlMetadata {
+                    title: None,
+                    description: None,
+                    image_url: None,
+                    domain: None,
+                })
             }
         }
 
@@ -1266,18 +1382,34 @@ mod tests {
         }
         impl MetadataExtractor for HtmlMetadata {
             async fn extract(&self, _url: &str) -> Result<UrlMetadata, DomainError> {
-                Ok(UrlMetadata { title: None, description: None, image_url: self.image_url.clone(), domain: None })
+                Ok(UrlMetadata {
+                    title: None,
+                    description: None,
+                    image_url: self.image_url.clone(),
+                    domain: None,
+                })
             }
         }
 
         struct NoopStorage;
         impl ObjectStorage for NoopStorage {
-            async fn put(&self, key: &str, _data: Vec<u8>, _ct: &str) -> Result<String, DomainError> {
+            async fn put(
+                &self,
+                key: &str,
+                _data: Vec<u8>,
+                _ct: &str,
+            ) -> Result<String, DomainError> {
                 Ok(format!("https://stored/{}", key))
             }
-            async fn get(&self, _key: &str) -> Result<Vec<u8>, DomainError> { Ok(vec![]) }
-            async fn delete(&self, _key: &str) -> Result<(), DomainError> { Ok(()) }
-            fn public_url(&self, key: &str) -> String { format!("https://stored/{}", key) }
+            async fn get(&self, _key: &str) -> Result<Vec<u8>, DomainError> {
+                Ok(vec![])
+            }
+            async fn delete(&self, _key: &str) -> Result<(), DomainError> {
+                Ok(())
+            }
+            fn public_url(&self, key: &str) -> String {
+                format!("https://stored/{}", key)
+            }
         }
 
         fn make_bookmark(user_id: Uuid, url: &str, image_url: Option<&str>) -> Bookmark {
@@ -1300,7 +1432,9 @@ mod tests {
             while let Some(event) = rx.recv().await {
                 let done = event.done;
                 events.push(event);
-                if done { break; }
+                if done {
+                    break;
+                }
             }
             events
         }
@@ -1310,15 +1444,25 @@ mod tests {
         // - HEAD /image.jpg → returns `image_status`
         async fn start_fake_site(html: &'static str, image_status: u16) -> std::net::SocketAddr {
             let app = Router::new()
-                .route("/", get(move || {
-                    let html = html.to_string();
-                    async move {
-                        (axum::http::StatusCode::OK, [("Content-Type", "text/html")], html)
-                    }
-                }))
-                .route("/image.jpg", head_route(move || async move {
-                    axum::http::StatusCode::from_u16(image_status).unwrap()
-                }));
+                .route(
+                    "/",
+                    get(move || {
+                        let html = html.to_string();
+                        async move {
+                            (
+                                axum::http::StatusCode::OK,
+                                [("Content-Type", "text/html")],
+                                html,
+                            )
+                        }
+                    }),
+                )
+                .route(
+                    "/image.jpg",
+                    head_route(move || async move {
+                        axum::http::StatusCode::from_u16(image_status).unwrap()
+                    }),
+                );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1327,10 +1471,17 @@ mod tests {
 
         // Spin up a fake screenshot sidecar that returns a minimal JPEG
         async fn start_fake_screenshot_svc() -> std::net::SocketAddr {
-            let app = Router::new().route("/screenshot", post(|| async {
-                let jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xD9];
-                (axum::http::StatusCode::OK, [("Content-Type", "image/jpeg")], jpeg)
-            }));
+            let app = Router::new().route(
+                "/screenshot",
+                post(|| async {
+                    let jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xD9];
+                    (
+                        axum::http::StatusCode::OK,
+                        [("Content-Type", "image/jpeg")],
+                        jpeg,
+                    )
+                }),
+            );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1416,11 +1567,17 @@ mod tests {
             // We need a metadata that returns a downloadable image URL.
             // Since the fake site HEAD returns 404 but we need the og:image GET to succeed,
             // start a second server that serves the image as GET.
-            let img_server = Router::new()
-                .route("/image.jpg", get(|| async {
+            let img_server = Router::new().route(
+                "/image.jpg",
+                get(|| async {
                     let jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xD9];
-                    (axum::http::StatusCode::OK, [("Content-Type", "image/jpeg")], jpeg)
-                }));
+                    (
+                        axum::http::StatusCode::OK,
+                        [("Content-Type", "image/jpeg")],
+                        jpeg,
+                    )
+                }),
+            );
             let img_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let img_addr = img_listener.local_addr().unwrap();
             tokio::spawn(async move { axum::serve(img_listener, img_server).await.unwrap() });
@@ -1430,7 +1587,9 @@ mod tests {
 
             let svc = BookmarkService::new(
                 Arc::new(MockRepo::new(vec![bookmark])),
-                Arc::new(HtmlMetadata { image_url: Some(downloadable_og_image) }),
+                Arc::new(HtmlMetadata {
+                    image_url: Some(downloadable_og_image),
+                }),
                 Arc::new(NoopStorage),
             );
             let (tx, rx) = mpsc::channel(32);
@@ -1456,7 +1615,8 @@ mod tests {
                 Arc::new(NoopStorage),
             );
             let (tx, rx) = mpsc::channel(32);
-            svc.fix_missing_images(user_id, Some(&screenshot_url), tx).await;
+            svc.fix_missing_images(user_id, Some(&screenshot_url), tx)
+                .await;
             let events = collect_events(rx).await;
             let last = events.last().unwrap();
             assert_eq!(last.fixed, 1, "should fix via screenshot sidecar");

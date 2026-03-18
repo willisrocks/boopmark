@@ -243,10 +243,12 @@ async fn fix_images_stream(
     tokio::spawn(async move {
         match &state.bookmarks {
             Bookmarks::Local(svc) => {
-                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx).await
+                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx)
+                    .await
             }
             Bookmarks::S3(svc) => {
-                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx).await
+                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx)
+                    .await
             }
         }
         jobs.lock().unwrap().remove(&user_id);

@@ -6,7 +6,9 @@ use axum::response::{Html, IntoResponse};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::domain::bookmark::{Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UpdateBookmark};
+use crate::domain::bookmark::{
+    Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UpdateBookmark,
+};
 use crate::domain::error::DomainError;
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
@@ -166,7 +168,11 @@ pub async fn list(
     let filter = BookmarkFilter {
         search: query.search.and_then(|s| {
             let trimmed = s.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         }),
         tags: if active_tags.is_empty() {
             None
@@ -346,15 +352,12 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Form(form): Form<EditForm>,
 ) -> axum::response::Response {
-    let tags = form
-        .tags_input
-        .filter(|t| !t.is_empty())
-        .map(|t| {
-            t.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        });
+    let tags = form.tags_input.filter(|t| !t.is_empty()).map(|t| {
+        t.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
 
     // Pass all three fields as Some(...) so the user can clear them.
     //
@@ -398,7 +401,10 @@ pub async fn edit_suggest(
     )
     .ok();
 
-    let result = state.enrichment.suggest(user.id, &bookmark.url, existing_tags).await;
+    let result = state
+        .enrichment
+        .suggest(user.id, &bookmark.url, existing_tags)
+        .await;
 
     // For edit suggest, always prefer enrichment suggestions over current
     // form values. The user explicitly asked for suggestions, so we replace
@@ -409,11 +415,13 @@ pub async fn edit_suggest(
         form.tags_input.and_then(non_empty).unwrap_or_default()
     };
 
-    let suggest_title = result.title
+    let suggest_title = result
+        .title
         .and_then(non_empty)
         .unwrap_or_else(|| form.title.and_then(non_empty).unwrap_or_default());
 
-    let suggest_description = result.description
+    let suggest_description = result
+        .description
         .and_then(non_empty)
         .unwrap_or_else(|| form.description.and_then(non_empty).unwrap_or_default());
 

@@ -49,9 +49,7 @@ enum Commands {
         suggest: bool,
     },
     /// Get LLM suggestions for a URL without saving
-    Suggest {
-        url: String,
-    },
+    Suggest { url: String },
     /// Delete a bookmark
     Delete { id: String },
     /// Export bookmarks to a file
@@ -326,11 +324,26 @@ async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
 
-        Commands::Add { url, title, description, tags, suggest } => {
+        Commands::Add {
+            url,
+            title,
+            description,
+            tags,
+            suggest,
+        } => {
             let client = AppConfig::load().client()?;
             let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
-            let body = CreateBookmarkRequest { url, title, description, tags };
-            let path = if suggest { "/bookmarks?suggest=true" } else { "/bookmarks" };
+            let body = CreateBookmarkRequest {
+                url,
+                title,
+                description,
+                tags,
+            };
+            let path = if suggest {
+                "/bookmarks?suggest=true"
+            } else {
+                "/bookmarks"
+            };
             let resp = client.post_json(path, &body).await?;
             if resp.status().is_success() {
                 let bm: Bookmark = resp.json().await.map_err(|e| e.to_string())?;
@@ -347,17 +360,29 @@ async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
 
-        Commands::Edit { id, title, description, tags, suggest } => {
+        Commands::Edit {
+            id,
+            title,
+            description,
+            tags,
+            suggest,
+        } => {
             // Validate id is a valid UUID
             uuid::Uuid::parse_str(&id)
                 .map_err(|_| format!("Invalid bookmark ID: '{id}' is not a valid UUID"))?;
             if !suggest && title.is_none() && description.is_none() && tags.is_none() {
-                eprintln!("Nothing to update. Provide --title, --description, --tags, or --suggest.");
+                eprintln!(
+                    "Nothing to update. Provide --title, --description, --tags, or --suggest."
+                );
                 return Ok(());
             }
             let client = AppConfig::load().client()?;
             let tags = tags.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
-            let body = UpdateBookmarkRequest { title, description, tags };
+            let body = UpdateBookmarkRequest {
+                title,
+                description,
+                tags,
+            };
             let path = if suggest {
                 format!("/bookmarks/{id}?suggest=true")
             } else {
@@ -457,11 +482,19 @@ async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
 
-        Commands::Export { format, mode, output } => {
+        Commands::Export {
+            format,
+            mode,
+            output,
+        } => {
             let client = AppConfig::load().client()?;
 
             let format = if let Some(ref path) = output {
-                if path.ends_with(".csv") { "csv".to_string() } else { format }
+                if path.ends_with(".csv") {
+                    "csv".to_string()
+                } else {
+                    format
+                }
             } else {
                 format
             };
@@ -483,13 +516,26 @@ async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
 
-        Commands::Import { file, format, mode, strategy } => {
+        Commands::Import {
+            file,
+            format,
+            mode,
+            strategy,
+        } => {
             let client = AppConfig::load().client()?;
 
             let format = format.unwrap_or_else(|| {
-                if file.ends_with(".csv") { "csv".to_string() } else { "jsonl".to_string() }
+                if file.ends_with(".csv") {
+                    "csv".to_string()
+                } else {
+                    "jsonl".to_string()
+                }
             });
-            let mime = if format == "csv" { "text/csv" } else { "application/x-ndjson" };
+            let mime = if format == "csv" {
+                "text/csv"
+            } else {
+                "application/x-ndjson"
+            };
 
             let bytes = std::fs::read(&file).map_err(|e| format!("failed to read {file}: {e}"))?;
             let filename = std::path::Path::new(&file)
@@ -571,27 +617,23 @@ async fn run(cli: Cli) -> Result<(), String> {
                                 buf.drain(..=pos);
 
                                 if let Some(json_str) = line.strip_prefix("data: ")
-                                    && let Ok(event) =
-                                        serde_json::from_str::<FixProgress>(json_str)
-                                    {
-                                        if event.done {
-                                            println!(
-                                                "\nDone. Fixed {} images. {} failed (no image found).",
-                                                event.fixed, event.failed
-                                            );
-                                            return Ok(());
-                                        } else {
-                                            print!(
-                                                "\rChecking images: {} / {} — Fixed: {} — Failed: {}   ",
-                                                event.checked,
-                                                event.total,
-                                                event.fixed,
-                                                event.failed
-                                            );
-                                            use std::io::Write;
-                                            std::io::stdout().flush().ok();
-                                        }
+                                    && let Ok(event) = serde_json::from_str::<FixProgress>(json_str)
+                                {
+                                    if event.done {
+                                        println!(
+                                            "\nDone. Fixed {} images. {} failed (no image found).",
+                                            event.fixed, event.failed
+                                        );
+                                        return Ok(());
+                                    } else {
+                                        print!(
+                                            "\rChecking images: {} / {} — Fixed: {} — Failed: {}   ",
+                                            event.checked, event.total, event.fixed, event.failed
+                                        );
+                                        use std::io::Write;
+                                        std::io::stdout().flush().ok();
                                     }
+                                }
                             }
                         }
                     }
@@ -617,8 +659,13 @@ fn try_gh_download(asset_name: &str, staging_path: &std::path::Path) -> Result<(
     use std::process::Command;
     let output = Command::new("gh")
         .args([
-            "release", "download", "--repo", "foundra-build/boopmark",
-            "--pattern", asset_name, "--dir",
+            "release",
+            "download",
+            "--repo",
+            "foundra-build/boopmark",
+            "--pattern",
+            asset_name,
+            "--dir",
             staging_path.parent().unwrap().to_str().unwrap_or("."),
             "--clobber",
         ])
@@ -647,13 +694,19 @@ async fn download_with_reqwest(url: &str) -> Result<Vec<u8>, String> {
         request = request.header("Authorization", format!("token {token}"));
     }
 
-    let resp = request.send().await.map_err(|e| format!("Download failed: {e}"))?;
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {e}"))?;
 
     if !resp.status().is_success() {
         return Err(format!("Download failed: HTTP {}", resp.status()));
     }
 
-    let bytes = resp.bytes().await.map_err(|e| format!("Failed to read response: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read response: {e}"))?;
     Ok(bytes.to_vec())
 }
 
@@ -691,7 +744,12 @@ async fn upgrade() -> Result<(), String> {
                 .args(["-cr", staging_path.to_str().unwrap_or("")])
                 .output();
             let _ = Command::new("codesign")
-                .args(["--force", "--sign", "-", staging_path.to_str().unwrap_or("")])
+                .args([
+                    "--force",
+                    "--sign",
+                    "-",
+                    staging_path.to_str().unwrap_or(""),
+                ])
                 .output();
         }
 
@@ -765,7 +823,14 @@ mod tests {
 
     #[test]
     fn test_cli_add_with_description() {
-        let cli = Cli::try_parse_from(["boop", "add", "https://example.com", "--description", "A test"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "boop",
+            "add",
+            "https://example.com",
+            "--description",
+            "A test",
+        ])
+        .unwrap();
         assert!(matches!(cli.command, Commands::Add { .. }));
     }
 
@@ -777,7 +842,8 @@ mod tests {
 
     #[test]
     fn test_cli_edit_with_description() {
-        let cli = Cli::try_parse_from(["boop", "edit", "some-id", "--description", "A desc"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["boop", "edit", "some-id", "--description", "A desc"]).unwrap();
         assert!(matches!(cli.command, Commands::Edit { suggest: false, .. }));
     }
 
@@ -795,11 +861,16 @@ mod tests {
 
     #[test]
     fn test_cli_export_with_options() {
-        let cli =
-            Cli::try_parse_from(["boop", "export", "--format", "csv", "--mode", "backup", "-o", "out.csv"])
-                .unwrap();
+        let cli = Cli::try_parse_from([
+            "boop", "export", "--format", "csv", "--mode", "backup", "-o", "out.csv",
+        ])
+        .unwrap();
         match cli.command {
-            Commands::Export { format, mode, output } => {
+            Commands::Export {
+                format,
+                mode,
+                output,
+            } => {
                 assert_eq!(format, "csv");
                 assert_eq!(mode, "backup");
                 assert_eq!(output.as_deref(), Some("out.csv"));
@@ -817,12 +888,24 @@ mod tests {
     #[test]
     fn test_cli_import_with_all_options() {
         let cli = Cli::try_parse_from([
-            "boop", "import", "data.csv", "--format", "csv", "--mode", "restore", "--strategy",
+            "boop",
+            "import",
+            "data.csv",
+            "--format",
+            "csv",
+            "--mode",
+            "restore",
+            "--strategy",
             "skip",
         ])
         .unwrap();
         match cli.command {
-            Commands::Import { file, format, mode, strategy } => {
+            Commands::Import {
+                file,
+                format,
+                mode,
+                strategy,
+            } => {
                 assert_eq!(file, "data.csv");
                 assert_eq!(format.as_deref(), Some("csv"));
                 assert_eq!(mode, "restore");

@@ -39,5 +39,4 @@ impl UserRepository for PostgresPool {
         .await
         .map_err(|e| DomainError::Internal(e.to_string()))
     }
-
 }

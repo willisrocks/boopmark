@@ -167,11 +167,7 @@ impl BookmarkRepository for PostgresPool {
         .map_err(|e| DomainError::Internal(e.to_string()))
     }
 
-    async fn find_by_url(
-        &self,
-        user_id: Uuid,
-        url: &str,
-    ) -> Result<Option<Bookmark>, DomainError> {
+    async fn find_by_url(&self, user_id: Uuid, url: &str) -> Result<Option<Bookmark>, DomainError> {
         sqlx::query_as::<_, Bookmark>(
             "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at
              FROM bookmarks WHERE user_id = $1 AND url = $2 ORDER BY created_at ASC, id ASC LIMIT 1",

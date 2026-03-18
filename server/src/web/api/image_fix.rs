@@ -11,10 +11,7 @@ use crate::app::bookmarks::ProgressEvent;
 use crate::web::extractors::AuthUser;
 use crate::web::state::{AppState, Bookmarks};
 
-pub async fn fix_images(
-    State(state): State<AppState>,
-    AuthUser(user): AuthUser,
-) -> Response {
+pub async fn fix_images(State(state): State<AppState>, AuthUser(user): AuthUser) -> Response {
     let user_id = user.id;
 
     {
@@ -32,10 +29,12 @@ pub async fn fix_images(
     tokio::spawn(async move {
         match &state.bookmarks {
             Bookmarks::Local(svc) => {
-                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx).await
+                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx)
+                    .await
             }
             Bookmarks::S3(svc) => {
-                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx).await
+                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx)
+                    .await
             }
         }
         jobs.lock().unwrap().remove(&user_id);

@@ -1,9 +1,12 @@
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::{SaltString, rand_core::OsRng}};
 use crate::domain::error::DomainError;
 use crate::domain::ports::api_key_repo::{ApiKey, ApiKeyRepository};
 use crate::domain::ports::session_repo::SessionRepository;
 use crate::domain::ports::user_repo::UserRepository;
 use crate::domain::user::{CreateUser, User};
+use argon2::{
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+    password_hash::{SaltString, rand_core::OsRng},
+};
 use chrono::{Duration, Utc};
 use rand::Rng;
 use sha2::{Digest, Sha256};
@@ -306,7 +309,11 @@ mod tests {
     fn build_service(
         user_repo: Arc<FakeUserRepo>,
     ) -> AuthService<FakeUserRepo, FakeSessionRepo, FakeApiKeyRepo> {
-        AuthService::new(user_repo, Arc::new(FakeSessionRepo::new()), Arc::new(FakeApiKeyRepo))
+        AuthService::new(
+            user_repo,
+            Arc::new(FakeSessionRepo::new()),
+            Arc::new(FakeApiKeyRepo),
+        )
     }
 
     #[tokio::test]
@@ -316,7 +323,9 @@ mod tests {
         user_repo.add_user("alice@example.com", Some(hashed));
         let service = build_service(user_repo);
 
-        let result = service.local_login("alice@example.com", "correctpass").await;
+        let result = service
+            .local_login("alice@example.com", "correctpass")
+            .await;
         assert!(result.is_ok());
         let (user, token) = result.unwrap();
         assert_eq!(user.email, "alice@example.com");

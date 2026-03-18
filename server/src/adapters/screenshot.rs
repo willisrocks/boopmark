@@ -40,7 +40,7 @@ impl ScreenshotClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, routing::post, response::IntoResponse};
+    use axum::{Router, response::IntoResponse, routing::post};
 
     async fn fake_screenshot() -> impl IntoResponse {
         // Return minimal valid JPEG bytes (SOI + EOI markers)

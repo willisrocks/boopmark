@@ -168,14 +168,19 @@ async fn create_bookmark(
     if params.suggest {
         let existing_tags = with_bookmarks!(&state.bookmarks, svc =>
             svc.tags_with_counts(user.id).await
-        ).ok();
-        let suggestions = state.enrichment.suggest(user.id, &input.url, existing_tags).await;
+        )
+        .ok();
+        let suggestions = state
+            .enrichment
+            .suggest(user.id, &input.url, existing_tags)
+            .await;
         apply_create_suggestions(&mut input, suggestions);
         // Ensure domain is set from URL so BookmarkService doesn't re-scrape just for domain
         if input.domain.is_none()
-            && let Ok(parsed) = url::Url::parse(&input.url) {
-                input.domain = parsed.host_str().map(|h| h.to_string());
-            }
+            && let Ok(parsed) = url::Url::parse(&input.url)
+        {
+            input.domain = parsed.host_str().map(|h| h.to_string());
+        }
     }
 
     let result = with_bookmarks!(&state.bookmarks, svc => svc.create(user.id, input).await);
@@ -210,8 +215,12 @@ async fn update_bookmark(
             Ok(bm) => {
                 let existing_tags = with_bookmarks!(&state.bookmarks, svc =>
                     svc.tags_with_counts(user.id).await
-                ).ok();
-                let suggestions = state.enrichment.suggest(user.id, &bm.url, existing_tags).await;
+                )
+                .ok();
+                let suggestions = state
+                    .enrichment
+                    .suggest(user.id, &bm.url, existing_tags)
+                    .await;
                 apply_update_suggestions(&mut input, suggestions);
             }
             Err(e) => return Err(error_response(e)),

@@ -10,7 +10,9 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .nest(
             "/bookmarks",
-            bookmarks::routes().merge(transfer::routes()).merge(image_fix::routes()),
+            bookmarks::routes()
+                .merge(transfer::routes())
+                .merge(image_fix::routes()),
         )
         .nest("/auth", auth::routes())
 }

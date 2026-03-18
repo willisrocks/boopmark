@@ -1,9 +1,9 @@
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Multipart, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -13,8 +13,8 @@ use crate::domain::transfer::{ExportMode, ImportMode, ImportRecord, ImportStrate
 use crate::web::extractors::AuthUser;
 use crate::web::state::{AppState, Bookmarks};
 
-use axum::Json;
 use crate::domain::error::DomainError;
+use axum::Json;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -30,7 +30,12 @@ fn error_response(err: DomainError) -> impl IntoResponse {
         DomainError::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid input"),
         DomainError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     };
-    (status, Json(ErrorBody { error: message.to_string() }))
+    (
+        status,
+        Json(ErrorBody {
+            error: message.to_string(),
+        }),
+    )
 }
 
 macro_rules! with_bookmarks {
@@ -219,8 +224,7 @@ fn bookmarks_to_csv_export(bookmarks: &[Bookmark]) -> Result<String, String> {
         ])
         .map_err(|e| e.to_string())?;
     }
-    String::from_utf8(wtr.into_inner().map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    String::from_utf8(wtr.into_inner().map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
 fn bookmarks_to_csv_backup(bookmarks: &[Bookmark]) -> Result<String, String> {
@@ -255,8 +259,7 @@ fn bookmarks_to_csv_backup(bookmarks: &[Bookmark]) -> Result<String, String> {
         ])
         .map_err(|e| e.to_string())?;
     }
-    String::from_utf8(wtr.into_inner().map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    String::from_utf8(wtr.into_inner().map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
 fn parse_csv(text: &str) -> Result<Vec<ImportRecord>, String> {
@@ -336,22 +339,14 @@ pub async fn export_handler(
             "application/x-ndjson",
             format!("bookmarks-backup-{date}.jsonl"),
         ),
-        (ExportFormat::Csv, ExportMode::Export) => {
-            match bookmarks_to_csv_export(&bookmarks) {
-                Ok(s) => (s, "text/csv", format!("bookmarks-{date}.csv")),
-                Err(e) => {
-                    return Err(error_response(DomainError::Internal(e)).into_response())
-                }
-            }
-        }
-        (ExportFormat::Csv, ExportMode::Backup) => {
-            match bookmarks_to_csv_backup(&bookmarks) {
-                Ok(s) => (s, "text/csv", format!("bookmarks-backup-{date}.csv")),
-                Err(e) => {
-                    return Err(error_response(DomainError::Internal(e)).into_response())
-                }
-            }
-        }
+        (ExportFormat::Csv, ExportMode::Export) => match bookmarks_to_csv_export(&bookmarks) {
+            Ok(s) => (s, "text/csv", format!("bookmarks-{date}.csv")),
+            Err(e) => return Err(error_response(DomainError::Internal(e)).into_response()),
+        },
+        (ExportFormat::Csv, ExportMode::Backup) => match bookmarks_to_csv_backup(&bookmarks) {
+            Ok(s) => (s, "text/csv", format!("bookmarks-backup-{date}.csv")),
+            Err(e) => return Err(error_response(DomainError::Internal(e)).into_response()),
+        },
     };
 
     Ok(Response::builder()
@@ -387,7 +382,7 @@ pub async fn import_handler(
                             error: format!("failed to read file: {e}"),
                         }),
                     )
-                        .into_response())
+                        .into_response());
                 }
             }
         }
@@ -402,7 +397,7 @@ pub async fn import_handler(
                     error: "missing 'file' field in multipart body".to_string(),
                 }),
             )
-                .into_response())
+                .into_response());
         }
     };
 
@@ -420,7 +415,7 @@ pub async fn import_handler(
                     error: format!("parse error: {e}"),
                 }),
             )
-                .into_response())
+                .into_response());
         }
     };
 
@@ -565,9 +560,9 @@ mod tests {
         // OWASP also flags \t, \r, and \n as dangerous CSV injection prefixes.
         // Test all three individually plus the common \r\n pair.
         for (label, value) in [
-            ("tab",  "\t=TAB"),
-            ("cr",   "\r=CR"),
-            ("lf",   "\n=LF"),
+            ("tab", "\t=TAB"),
+            ("cr", "\r=CR"),
+            ("lf", "\n=LF"),
             ("crlf", "\r\n=CRLF"),
         ] {
             let mut bm = make_bookmark("https://example.com", vec![]);
@@ -602,7 +597,10 @@ mod tests {
         // For lossless round-trips use JSONL backup.
         let bm = make_bookmark("https://example.com", vec!["rust", "web"]);
         let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
-        assert!(csv_text.contains("rust|web"), "tags must be pipe-separated in CSV");
+        assert!(
+            csv_text.contains("rust|web"),
+            "tags must be pipe-separated in CSV"
+        );
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records[0].tags, bm.tags);
     }
@@ -613,7 +611,8 @@ mod tests {
         // tags. Import must still handle those files correctly.
         // The CSV writer would have quoted the JSON array and doubled internal
         // quotes: "[""rust"",""web""]"
-        let csv_text = "url,title,description,tags\nhttps://example.com,T,D,\"[\"\"rust\"\",\"\"web\"\"]\"\n";
+        let csv_text =
+            "url,title,description,tags\nhttps://example.com,T,D,\"[\"\"rust\"\",\"\"web\"\"]\"\n";
         let records = parse_csv(csv_text).unwrap();
         assert_eq!(records[0].tags, vec!["rust", "web"]);
     }

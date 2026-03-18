@@ -79,12 +79,9 @@ async fn main() {
             let images = ImageStorage::S3(S3Storage::new(
                 s3_client,
                 config.s3_images_bucket.clone(),
-                config
-                    .s3_images_public_url
-                    .clone()
-                    .unwrap_or_else(|| {
-                        format!("https://{}.s3.amazonaws.com", config.s3_images_bucket)
-                    }),
+                config.s3_images_public_url.clone().unwrap_or_else(|| {
+                    format!("https://{}.s3.amazonaws.com", config.s3_images_bucket)
+                }),
             ));
             (
                 Bookmarks::S3(Arc::new(BookmarkService::new(

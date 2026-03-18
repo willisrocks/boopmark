@@ -21,11 +21,7 @@ pub trait BookmarkRepository: Send + Sync {
     async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError>;
     async fn tags_with_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError>;
     async fn export_all(&self, user_id: Uuid) -> Result<Vec<Bookmark>, DomainError>;
-    async fn find_by_url(
-        &self,
-        user_id: Uuid,
-        url: &str,
-    ) -> Result<Option<Bookmark>, DomainError>;
+    async fn find_by_url(&self, user_id: Uuid, url: &str) -> Result<Option<Bookmark>, DomainError>;
     async fn insert_with_id(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError>;
     async fn upsert_full(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError>;
     async fn update_image_url(
