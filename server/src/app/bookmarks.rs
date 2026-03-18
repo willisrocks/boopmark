@@ -1170,4 +1170,300 @@ mod tests {
             assert_eq!(result.errors[0].row, 1);
         }
     }
+
+    mod fix_images_tests {
+        use super::super::*;
+        use axum::{
+            Router,
+            routing::{get, head as head_route, post},
+        };
+        use chrono::Utc;
+        use std::sync::{Arc, Mutex};
+        use tokio::sync::mpsc;
+        use uuid::Uuid;
+
+        // ── helpers ───────────────────────────────────────────────────────────
+
+        struct MockRepo {
+            bookmarks: Mutex<Vec<Bookmark>>,
+        }
+
+        impl MockRepo {
+            fn new(bookmarks: Vec<Bookmark>) -> Self {
+                Self { bookmarks: Mutex::new(bookmarks) }
+            }
+        }
+
+        impl BookmarkRepository for MockRepo {
+            async fn create(&self, user_id: Uuid, input: CreateBookmark) -> Result<Bookmark, DomainError> {
+                let b = Bookmark {
+                    id: Uuid::new_v4(), user_id, url: input.url, title: input.title,
+                    description: input.description, image_url: input.image_url,
+                    domain: input.domain, tags: input.tags.unwrap_or_default(),
+                    created_at: Utc::now(), updated_at: Utc::now(),
+                };
+                self.bookmarks.lock().unwrap().push(b.clone());
+                Ok(b)
+            }
+            async fn get(&self, id: Uuid, user_id: Uuid) -> Result<Bookmark, DomainError> {
+                self.bookmarks.lock().unwrap().iter()
+                    .find(|b| b.id == id && b.user_id == user_id).cloned()
+                    .ok_or(DomainError::NotFound)
+            }
+            async fn list(&self, user_id: Uuid, _filter: BookmarkFilter) -> Result<Vec<Bookmark>, DomainError> {
+                Ok(self.bookmarks.lock().unwrap().iter().filter(|b| b.user_id == user_id).cloned().collect())
+            }
+            async fn update(&self, id: Uuid, user_id: Uuid, input: UpdateBookmark) -> Result<Bookmark, DomainError> {
+                let mut bookmarks = self.bookmarks.lock().unwrap();
+                let b = bookmarks.iter_mut().find(|b| b.id == id && b.user_id == user_id).ok_or(DomainError::NotFound)?;
+                if let Some(t) = input.title { b.title = Some(t); }
+                if let Some(d) = input.description { b.description = Some(d); }
+                if let Some(tags) = input.tags { b.tags = tags; }
+                Ok(b.clone())
+            }
+            async fn delete(&self, id: Uuid, user_id: Uuid) -> Result<(), DomainError> {
+                let mut b = self.bookmarks.lock().unwrap();
+                let before = b.len();
+                b.retain(|bm| !(bm.id == id && bm.user_id == user_id));
+                if b.len() == before { Err(DomainError::NotFound) } else { Ok(()) }
+            }
+            async fn all_tags(&self, _user_id: Uuid) -> Result<Vec<String>, DomainError> { Ok(vec![]) }
+            async fn tags_with_counts(&self, _user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> { Ok(vec![]) }
+            async fn export_all(&self, user_id: Uuid) -> Result<Vec<Bookmark>, DomainError> {
+                Ok(self.bookmarks.lock().unwrap().iter().filter(|b| b.user_id == user_id).cloned().collect())
+            }
+            async fn find_by_url(&self, user_id: Uuid, url: &str) -> Result<Option<Bookmark>, DomainError> {
+                Ok(self.bookmarks.lock().unwrap().iter().find(|b| b.user_id == user_id && b.url == url).cloned())
+            }
+            async fn insert_with_id(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {
+                let mut b = self.bookmarks.lock().unwrap();
+                if b.iter().any(|bm| bm.id == bookmark.id) { return Err(DomainError::AlreadyExists); }
+                b.push(bookmark.clone()); Ok(bookmark)
+            }
+            async fn upsert_full(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {
+                let mut b = self.bookmarks.lock().unwrap();
+                if let Some(existing) = b.iter_mut().find(|bm| bm.id == bookmark.id) {
+                    *existing = bookmark.clone(); Ok(bookmark)
+                } else {
+                    b.push(bookmark.clone()); Ok(bookmark)
+                }
+            }
+            async fn update_image_url(&self, id: Uuid, user_id: Uuid, image_url: &str) -> Result<(), DomainError> {
+                let mut b = self.bookmarks.lock().unwrap();
+                if let Some(bm) = b.iter_mut().find(|bm| bm.id == id && bm.user_id == user_id) {
+                    bm.image_url = Some(image_url.to_string()); Ok(())
+                } else { Err(DomainError::NotFound) }
+            }
+        }
+
+        struct NoopMetadata;
+        impl MetadataExtractor for NoopMetadata {
+            async fn extract(&self, _url: &str) -> Result<UrlMetadata, DomainError> {
+                Ok(UrlMetadata { title: None, description: None, image_url: None, domain: None })
+            }
+        }
+
+        struct HtmlMetadata {
+            image_url: Option<String>,
+        }
+        impl MetadataExtractor for HtmlMetadata {
+            async fn extract(&self, _url: &str) -> Result<UrlMetadata, DomainError> {
+                Ok(UrlMetadata { title: None, description: None, image_url: self.image_url.clone(), domain: None })
+            }
+        }
+
+        struct NoopStorage;
+        impl ObjectStorage for NoopStorage {
+            async fn put(&self, key: &str, _data: Vec<u8>, _ct: &str) -> Result<String, DomainError> {
+                Ok(format!("https://stored/{}", key))
+            }
+            async fn get(&self, _key: &str) -> Result<Vec<u8>, DomainError> { Ok(vec![]) }
+            async fn delete(&self, _key: &str) -> Result<(), DomainError> { Ok(()) }
+            fn public_url(&self, key: &str) -> String { format!("https://stored/{}", key) }
+        }
+
+        fn make_bookmark(user_id: Uuid, url: &str, image_url: Option<&str>) -> Bookmark {
+            Bookmark {
+                id: Uuid::new_v4(),
+                user_id,
+                url: url.to_string(),
+                title: Some("Test".to_string()),
+                description: None,
+                image_url: image_url.map(|s| s.to_string()),
+                domain: None,
+                tags: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        async fn collect_events(mut rx: mpsc::Receiver<ProgressEvent>) -> Vec<ProgressEvent> {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                let done = event.done;
+                events.push(event);
+                if done { break; }
+            }
+            events
+        }
+
+        // Spin up a minimal HTTP server that:
+        // - GET / → returns `html`
+        // - HEAD /image.jpg → returns `image_status`
+        async fn start_fake_site(html: &'static str, image_status: u16) -> std::net::SocketAddr {
+            let app = Router::new()
+                .route("/", get(move || {
+                    let html = html.to_string();
+                    async move {
+                        (axum::http::StatusCode::OK, [("Content-Type", "text/html")], html)
+                    }
+                }))
+                .route("/image.jpg", head_route(move || async move {
+                    axum::http::StatusCode::from_u16(image_status).unwrap()
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            addr
+        }
+
+        // Spin up a fake screenshot sidecar that returns a minimal JPEG
+        async fn start_fake_screenshot_svc() -> std::net::SocketAddr {
+            let app = Router::new().route("/screenshot", post(|| async {
+                let jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xD9];
+                (axum::http::StatusCode::OK, [("Content-Type", "image/jpeg")], jpeg)
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            addr
+        }
+
+        // ── tests ─────────────────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn empty_bookmark_list_emits_single_done_event() {
+            let user_id = Uuid::new_v4();
+            let svc = BookmarkService::new(
+                Arc::new(MockRepo::new(vec![])),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+            );
+            let (tx, rx) = mpsc::channel(32);
+            svc.fix_missing_images(user_id, None, tx).await;
+            let events = collect_events(rx).await;
+            assert_eq!(events.len(), 1);
+            let last = &events[0];
+            assert_eq!(last.checked, 0);
+            assert_eq!(last.total, 0);
+            assert_eq!(last.fixed, 0);
+            assert_eq!(last.failed, 0);
+            assert!(last.done);
+        }
+
+        #[tokio::test]
+        async fn skips_bookmarks_with_valid_images() {
+            // Arrange: one bookmark whose image HEAD returns 200 (valid)
+            let addr = start_fake_site("", 200).await;
+            let image_url = format!("http://{}/image.jpg", addr);
+            let user_id = Uuid::new_v4();
+            let bookmark = make_bookmark(user_id, &format!("http://{}/", addr), Some(&image_url));
+
+            let svc = BookmarkService::new(
+                Arc::new(MockRepo::new(vec![bookmark])),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+            );
+            let (tx, rx) = mpsc::channel(32);
+            svc.fix_missing_images(user_id, None, tx).await;
+            let events = collect_events(rx).await;
+            let last = events.last().unwrap();
+            assert_eq!(last.fixed, 0, "should not fix an already-working image");
+            assert_eq!(last.failed, 0);
+            assert_eq!(last.checked, 1);
+            assert!(last.done);
+        }
+
+        #[tokio::test]
+        async fn records_failure_when_no_image_and_no_screenshot_svc() {
+            // Arrange: one bookmark with image_url = None, no og:image, no screenshot svc
+            let user_id = Uuid::new_v4();
+            let bookmark = make_bookmark(user_id, "http://127.0.0.1:1/", None);
+            let svc = BookmarkService::new(
+                Arc::new(MockRepo::new(vec![bookmark])),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+            );
+            let (tx, rx) = mpsc::channel(32);
+            svc.fix_missing_images(user_id, None, tx).await;
+            let events = collect_events(rx).await;
+            let last = events.last().unwrap();
+            assert_eq!(last.fixed, 0);
+            assert_eq!(last.failed, 1);
+            assert!(last.done);
+        }
+
+        #[tokio::test]
+        async fn fixes_bookmark_with_broken_image_via_og_image() {
+            // Arrange: bookmark with image_url returning 404 (broken);
+            // og:image is available on the page via HtmlMetadata
+            let addr = start_fake_site("", 404).await;
+            let image_url = format!("http://{}/image.jpg", addr);
+            let user_id = Uuid::new_v4();
+            let bookmark = make_bookmark(user_id, &format!("http://{}/", addr), Some(&image_url));
+            let og_image = format!("http://{}/image.jpg", addr);
+
+            // Use a metadata extractor that returns the og:image pointing back at /image.jpg
+            // but now the storage will "store" it and return a new URL
+            // We need a metadata that returns a downloadable image URL.
+            // Since the fake site HEAD returns 404 but we need the og:image GET to succeed,
+            // start a second server that serves the image as GET.
+            let img_server = Router::new()
+                .route("/image.jpg", get(|| async {
+                    let jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xD9];
+                    (axum::http::StatusCode::OK, [("Content-Type", "image/jpeg")], jpeg)
+                }));
+            let img_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let img_addr = img_listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(img_listener, img_server).await.unwrap() });
+            let downloadable_og_image = format!("http://{}/image.jpg", img_addr);
+
+            let _ = og_image; // suppress warning
+
+            let svc = BookmarkService::new(
+                Arc::new(MockRepo::new(vec![bookmark])),
+                Arc::new(HtmlMetadata { image_url: Some(downloadable_og_image) }),
+                Arc::new(NoopStorage),
+            );
+            let (tx, rx) = mpsc::channel(32);
+            svc.fix_missing_images(user_id, None, tx).await;
+            let events = collect_events(rx).await;
+            let last = events.last().unwrap();
+            assert_eq!(last.fixed, 1, "broken image should be fixed via og:image");
+            assert_eq!(last.failed, 0);
+            assert!(last.done);
+        }
+
+        #[tokio::test]
+        async fn fixes_bookmark_via_screenshot_fallback() {
+            // Arrange: no image, no og:image, but screenshot svc available
+            let screenshot_addr = start_fake_screenshot_svc().await;
+            let screenshot_url = format!("http://{}", screenshot_addr);
+            let user_id = Uuid::new_v4();
+            let bookmark = make_bookmark(user_id, "http://127.0.0.1:1/", None);
+
+            let svc = BookmarkService::new(
+                Arc::new(MockRepo::new(vec![bookmark])),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+            );
+            let (tx, rx) = mpsc::channel(32);
+            svc.fix_missing_images(user_id, Some(&screenshot_url), tx).await;
+            let events = collect_events(rx).await;
+            let last = events.last().unwrap();
+            assert_eq!(last.fixed, 1, "should fix via screenshot sidecar");
+            assert_eq!(last.failed, 0);
+            assert!(last.done);
+        }
+    }
 }
