@@ -69,3 +69,23 @@ fmt-check:
 check:
     cargo clippy -p boop --all-targets -- -D warnings
     cargo test -p boop
+
+# Create a release (--major, --minor, or --patch)
+release bump="patch":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    latest=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    if [ -z "$latest" ]; then
+      echo "Error: no existing vX.Y.Z tag found" >&2; exit 1
+    fi
+    IFS='.' read -r major minor patch <<< "${latest#v}"
+    case "{{bump}}" in
+      major) major=$((major + 1)); minor=0; patch=0 ;;
+      minor) minor=$((minor + 1)); patch=0 ;;
+      patch) patch=$((patch + 1)) ;;
+      *) echo "Error: bump must be major, minor, or patch" >&2; exit 1 ;;
+    esac
+    next="${major}.${minor}.${patch}"
+    echo "Releasing v${next} (current: ${latest})"
+    gh workflow run release.yml -f version="${next}"
+    echo "Release workflow triggered. Watch: gh run list --workflow=release.yml"
