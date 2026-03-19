@@ -64,24 +64,42 @@ async fn main() {
             )
         }
         StorageBackend::S3 => {
-            let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                .load()
-                .await;
+            let mut s3_config_loader =
+                aws_config::defaults(aws_config::BehaviorVersion::latest());
+            if let Some(endpoint) = &config.s3_endpoint {
+                s3_config_loader = s3_config_loader.endpoint_url(endpoint);
+            }
+            if let (Some(access_key), Some(secret_key)) =
+                (&config.s3_access_key, &config.s3_secret_key)
+            {
+                s3_config_loader = s3_config_loader.credentials_provider(
+                    aws_sdk_s3::config::Credentials::new(
+                        access_key,
+                        secret_key,
+                        None,
+                        None,
+                        "env",
+                    ),
+                );
+            }
+            s3_config_loader = s3_config_loader.region(aws_sdk_s3::config::Region::new(
+                config.s3_region.clone(),
+            ));
+            let s3_config = s3_config_loader.load().await;
             let s3_client = aws_sdk_s3::Client::new(&s3_config);
+            let images_public_url =
+                config.s3_images_public_url.clone().unwrap_or_else(|| {
+                    format!("https://{}.s3.amazonaws.com", config.s3_images_bucket)
+                });
             let storage = Arc::new(S3Storage::new(
                 s3_client.clone(),
-                config.s3_bucket.clone(),
-                config
-                    .s3_public_url
-                    .clone()
-                    .unwrap_or_else(|| format!("https://{}.s3.amazonaws.com", config.s3_bucket)),
+                config.s3_images_bucket.clone(),
+                images_public_url.clone(),
             ));
             let images = ImageStorage::S3(S3Storage::new(
                 s3_client,
                 config.s3_images_bucket.clone(),
-                config.s3_images_public_url.clone().unwrap_or_else(|| {
-                    format!("https://{}.s3.amazonaws.com", config.s3_images_bucket)
-                }),
+                images_public_url,
             ));
             (
                 Bookmarks::S3(Arc::new(BookmarkService::new(
