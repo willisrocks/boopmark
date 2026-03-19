@@ -62,7 +62,9 @@ const server = http.createServer(async (req, res) => {
     try {
       page = await browser.newPage();
       await page.setViewportSize({ width: 1200, height: 630 });
-      await page.goto(url, { waitUntil: 'networkidle', timeout: 15000 });
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      // Brief settle for JS-rendered content after DOM is ready
+      await new Promise(r => setTimeout(r, 2000));
       const screenshot = await page.screenshot({ type: 'jpeg', quality: 85 });
       res.writeHead(200, { 'Content-Type': 'image/jpeg' });
       res.end(screenshot);
