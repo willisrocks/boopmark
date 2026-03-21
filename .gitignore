@@ -10,3 +10,4 @@ playwright-report/
 test-results/
 .devproxy-override.yml
 .playwright-mcp/
+.superpowers/
