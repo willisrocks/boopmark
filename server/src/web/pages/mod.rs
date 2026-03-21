@@ -1,6 +1,7 @@
 mod auth;
 pub mod auth_shared;
 pub mod bookmarks;
+mod invite;
 mod settings;
 pub(crate) mod shared;
 
@@ -21,6 +22,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/bookmarks/{id}/edit", get(bookmarks::edit))
         .route("/bookmarks/{id}/suggest", post(bookmarks::edit_suggest))
+        .route("/invite/{token}", get(invite::invite_landing))
         .merge(auth::routes())
         .merge(settings::routes())
 }
