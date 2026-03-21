@@ -5,9 +5,11 @@ use crate::adapters::storage::s3::S3Storage;
 use crate::app::auth::AuthService;
 use crate::app::bookmarks::BookmarkService;
 use crate::app::enrichment::EnrichmentService;
+use crate::app::invite::InviteService;
 use crate::app::settings::SettingsService;
 use crate::config::Config;
 use crate::domain::error::DomainError;
+use crate::domain::ports::login_provider::LoginProvider;
 use crate::domain::ports::storage::ObjectStorage;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -18,6 +20,7 @@ use uuid::Uuid;
 /// Uses an enum to handle the two storage backends at the type level,
 /// avoiding dyn dispatch while keeping a single AppState type.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct AppState {
     pub bookmarks: Bookmarks,
     pub auth: Arc<AuthService<PostgresPool, PostgresPool, PostgresPool>>,
@@ -26,6 +29,8 @@ pub struct AppState {
     pub enrichment: Arc<EnrichmentService<HtmlMetadataExtractor, PostgresPool>>,
     pub images_storage: ImageStorage,
     pub active_image_fix_jobs: Arc<Mutex<HashSet<Uuid>>>,
+    pub login_provider: Arc<dyn LoginProvider>,
+    pub invites: Arc<InviteService<PostgresPool>>,
 }
 
 #[derive(Clone)]

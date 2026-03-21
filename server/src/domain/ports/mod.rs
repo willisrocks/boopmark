@@ -3,6 +3,7 @@ pub mod bookmark_repo;
 pub mod invite_repo;
 pub mod llm_enricher;
 pub mod llm_settings_repo;
+pub mod login_provider;
 pub mod metadata;
 pub mod session_repo;
 pub mod storage;

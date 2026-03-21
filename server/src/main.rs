@@ -5,6 +5,8 @@ mod domain;
 mod web;
 
 use adapters::anthropic::AnthropicEnricher;
+use adapters::login::google::GoogleLoginProvider;
+use adapters::login::local_password::LocalPasswordLoginProvider;
 use adapters::postgres::PostgresPool;
 use adapters::scraper::HtmlMetadataExtractor;
 use adapters::storage::local::LocalStorage;
@@ -12,10 +14,12 @@ use adapters::storage::s3::S3Storage;
 use app::auth::AuthService;
 use app::bookmarks::BookmarkService;
 use app::enrichment::EnrichmentService;
+use app::invite::InviteService;
 use app::secrets::SecretBox;
 use app::settings::SettingsService;
-use config::{Config, StorageBackend};
+use config::{Config, LoginAdapter, StorageBackend};
 use domain::ports::llm_enricher::LlmEnricher;
+use domain::ports::login_provider::LoginProvider;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use web::state::{AppState, Bookmarks, ImageStorage};
@@ -123,6 +127,25 @@ async fn main() {
         enricher,
         settings_service.clone(),
     ));
+    let invite_service = Arc::new(InviteService::new(db.clone()));
+
+    let login_provider: Arc<dyn LoginProvider> = match config.login_adapter {
+        LoginAdapter::Google => {
+            let client_id = config
+                .google_client_id
+                .clone()
+                .expect("GOOGLE_CLIENT_ID required when LOGIN_ADAPTER=google");
+            let client_secret = config
+                .google_client_secret
+                .clone()
+                .expect("GOOGLE_CLIENT_SECRET required when LOGIN_ADAPTER=google");
+            Arc::new(GoogleLoginProvider {
+                client_id,
+                client_secret,
+            })
+        }
+        LoginAdapter::LocalPassword => Arc::new(LocalPasswordLoginProvider),
+    };
 
     let state = AppState {
         bookmarks,
@@ -132,6 +155,8 @@ async fn main() {
         enrichment: enrichment_service,
         images_storage,
         active_image_fix_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        login_provider,
+        invites: invite_service,
     };
 
     let app = web::router::create_router(state);

@@ -1,4 +1,5 @@
 mod auth;
+pub mod auth_shared;
 pub mod bookmarks;
 mod settings;
 pub(crate) mod shared;

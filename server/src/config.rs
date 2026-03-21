@@ -1,6 +1,12 @@
 use base64::Engine;
 use std::env;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginAdapter {
+    Google,
+    LocalPassword,
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Config {
@@ -9,10 +15,10 @@ pub struct Config {
     pub port: u16,
     pub llm_settings_encryption_key: String,
     pub session_secret: String,
-    pub google_client_id: String,
-    pub google_client_secret: String,
+    pub google_client_id: Option<String>,
+    pub google_client_secret: Option<String>,
     pub enable_e2e_auth: bool,
-    pub enable_local_auth: bool,
+    pub login_adapter: LoginAdapter,
     pub storage_backend: StorageBackend,
     pub s3_endpoint: Option<String>,
     pub s3_access_key: Option<String>,
@@ -41,15 +47,18 @@ impl Config {
                 .unwrap(),
             llm_settings_encryption_key: llm_settings_encryption_key(),
             session_secret: env::var("SESSION_SECRET").expect("SESSION_SECRET required"),
-            google_client_id: env::var("GOOGLE_CLIENT_ID").expect("GOOGLE_CLIENT_ID required"),
-            google_client_secret: env::var("GOOGLE_CLIENT_SECRET")
-                .expect("GOOGLE_CLIENT_SECRET required"),
+            google_client_id: env::var("GOOGLE_CLIENT_ID").ok(),
+            google_client_secret: env::var("GOOGLE_CLIENT_SECRET").ok(),
             enable_e2e_auth: env::var("ENABLE_E2E_AUTH")
                 .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
                 .unwrap_or(false),
-            enable_local_auth: env::var("ENABLE_LOCAL_AUTH")
-                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
-                .unwrap_or(false),
+            login_adapter: match env::var("LOGIN_ADAPTER")
+                .unwrap_or_else(|_| "google".into())
+                .as_str()
+            {
+                "local_password" => LoginAdapter::LocalPassword,
+                _ => LoginAdapter::Google,
+            },
             storage_backend: match env::var("STORAGE_BACKEND")
                 .unwrap_or_else(|_| "local".into())
                 .as_str()
