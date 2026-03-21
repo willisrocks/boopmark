@@ -156,7 +156,7 @@ mod tests {
     use crate::domain::ports::api_key_repo::{ApiKey, ApiKeyRepository};
     use crate::domain::ports::session_repo::{Session, SessionRepository};
     use crate::domain::ports::user_repo::UserRepository;
-    use crate::domain::user::{CreateUser, User};
+    use crate::domain::user::{CreateUser, User, UserRole};
     use chrono::{DateTime, Utc};
     use std::sync::Mutex;
 
@@ -188,6 +188,8 @@ mod tests {
                 name: Some(email.to_string()),
                 image: None,
                 password_hash,
+                role: UserRole::User,
+                deactivated_at: None,
                 created_at: Utc::now(),
             });
         }
@@ -221,10 +223,40 @@ mod tests {
                 name: input.name,
                 image: input.image,
                 password_hash: None,
+                role: UserRole::User,
+                deactivated_at: None,
                 created_at: Utc::now(),
             };
             self.users.lock().unwrap().push(user.clone());
             Ok(user)
+        }
+
+        async fn list_all(&self) -> Result<Vec<User>, DomainError> {
+            Ok(self.users.lock().unwrap().clone())
+        }
+
+        async fn update_role(
+            &self,
+            user_id: Uuid,
+            role: UserRole,
+        ) -> Result<(), DomainError> {
+            let mut users = self.users.lock().unwrap();
+            if let Some(u) = users.iter_mut().find(|u| u.id == user_id) {
+                u.role = role;
+                Ok(())
+            } else {
+                Err(DomainError::NotFound)
+            }
+        }
+
+        async fn deactivate(&self, user_id: Uuid) -> Result<(), DomainError> {
+            let mut users = self.users.lock().unwrap();
+            if let Some(u) = users.iter_mut().find(|u| u.id == user_id) {
+                u.deactivated_at = Some(Utc::now());
+                Ok(())
+            } else {
+                Err(DomainError::NotFound)
+            }
         }
     }
 
