@@ -61,3 +61,24 @@ impl FromRequestParts<AppState> for MaybeUser {
         Ok(MaybeUser(resolve_user(parts, state).await))
     }
 }
+
+/// Requires authenticated user with owner or admin role.
+/// Returns 403 Forbidden if the user doesn't have the required role.
+#[allow(dead_code)]
+pub struct AdminUser(pub User);
+
+impl FromRequestParts<AppState> for AdminUser {
+    type Rejection = axum::http::StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let AuthUser(user) = AuthUser::from_request_parts(parts, state).await?;
+        if user.is_admin_or_owner() {
+            Ok(AdminUser(user))
+        } else {
+            Err(axum::http::StatusCode::FORBIDDEN)
+        }
+    }
+}
