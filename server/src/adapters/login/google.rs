@@ -5,9 +5,9 @@ use axum::response::Redirect;
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
-use crate::domain::ports::login_provider::{LoginPageContext, LoginProvider};
+use crate::domain::ports::login_provider::{AuthenticatedIdentity, LoginPageContext, LoginProvider};
 use crate::domain::ports::storage::ObjectStorage;
-use crate::web::pages::auth_shared::{build_session_cookie, origin_from_headers};
+use crate::web::pages::auth_shared::{handle_authenticated_identity, origin_from_headers};
 use crate::web::state::AppState;
 
 #[allow(dead_code)]
@@ -49,13 +49,14 @@ async fn google_redirect(State(state): State<AppState>, headers: HeaderMap) -> R
     Redirect::temporary(&url)
 }
 
-/// Exchange the authorization code for tokens, fetch user info, upsert user, create session.
+/// Exchange the authorization code for tokens, fetch user info, then delegate
+/// to the shared post-auth logic which handles invite checks and session creation.
 async fn google_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<CallbackParams>,
     jar: CookieJar,
-) -> Result<(CookieJar, Redirect), (axum::http::StatusCode, String)> {
+) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
     let config = &state.config;
     let origin = origin_from_headers(&headers, config);
     let redirect_uri = format!("{origin}/auth/google/callback");
@@ -115,52 +116,13 @@ async fn google_callback(
         None
     };
 
-    // Look up the user's current avatar so we can clean up the old one after upsert.
-    let old_avatar_url = state
-        .auth
-        .find_user_by_email(&userinfo.email)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|u| u.image);
-
-    // Upsert user and create session.
-    let user = match state
-        .auth
-        .upsert_user(userinfo.email, userinfo.name, stored_image.clone())
-        .await
-    {
-        Ok(user) => user,
-        Err(e) => {
-            // Clean up the newly stored avatar since the upsert failed
-            if let Some(ref new_url) = stored_image
-                && let Some(key) = state.images_storage.key_from_url(new_url)
-            {
-                let _ = state.images_storage.delete(&key).await;
-            }
-            return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
-        }
+    let identity = AuthenticatedIdentity {
+        email: userinfo.email,
+        name: userinfo.name,
+        image: stored_image,
     };
 
-    // Clean up old avatar from storage only when a new one was successfully stored.
-    if let Some(ref new_url) = stored_image
-        && let Some(ref old_url) = old_avatar_url
-        && new_url != old_url
-        && let Some(old_key) = state.images_storage.key_from_url(old_url)
-        && let Err(e) = state.images_storage.delete(&old_key).await
-    {
-        tracing::warn!("Failed to delete old avatar {old_key}: {e}");
-    }
-
-    let session_token = state
-        .auth
-        .create_session(user.id)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let cookie = build_session_cookie(&origin, session_token);
-
-    Ok((jar.add(cookie), Redirect::to("/")))
+    Ok(handle_authenticated_identity(&state, &origin, identity, jar).await)
 }
 
 #[derive(Deserialize)]

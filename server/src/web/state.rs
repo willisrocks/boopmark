@@ -84,6 +84,7 @@ impl ObjectStorage for ImageStorage {
 impl ImageStorage {
     /// Extract the storage key from a full public URL produced by this storage.
     /// Returns `None` if the URL does not match this storage's prefix.
+    #[allow(dead_code)]
     pub fn key_from_url(&self, url: &str) -> Option<String> {
         // public_url("") gives us the prefix with a trailing separator
         let prefix = self.public_url("");
