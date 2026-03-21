@@ -144,6 +144,25 @@ where
     pub async fn list_users(&self) -> Result<Vec<User>, DomainError> {
         self.users.list_all().await
     }
+
+    #[allow(dead_code)]
+    pub async fn find_user_by_id(&self, id: Uuid) -> Result<User, DomainError> {
+        self.users.find_by_id(id).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn update_user_role(
+        &self,
+        user_id: Uuid,
+        role: crate::domain::user::UserRole,
+    ) -> Result<(), DomainError> {
+        self.users.update_role(user_id, role).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn deactivate_user(&self, user_id: Uuid) -> Result<(), DomainError> {
+        self.users.deactivate(user_id).await
+    }
 }
 
 fn generate_token() -> String {

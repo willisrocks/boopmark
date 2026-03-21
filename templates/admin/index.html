@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Admin - BoopMark{% endblock %}
+{% block content %}
+{% include "components/header.html" %}
+<main class="max-w-4xl mx-auto px-6 py-8 space-y-8">
+    <div class="bg-[#1e2235] rounded-xl border border-gray-700 p-8 space-y-8">
+        <div>
+            <h1 class="text-2xl font-bold">Admin</h1>
+            <p class="text-sm text-gray-400 mt-1">Manage invites and users.</p>
+        </div>
+
+        <section class="space-y-5">
+            <div>
+                <h2 class="text-lg font-semibold">Invites</h2>
+                <p class="text-sm text-gray-400">Create invite links to allow new users to sign up.</p>
+            </div>
+
+            <form hx-post="/admin/invites" hx-target="#invite-list" hx-swap="innerHTML" class="flex gap-3">
+                <input
+                    type="text"
+                    name="email"
+                    placeholder="Email (optional)"
+                    class="flex-1 px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 text-sm"
+                >
+                <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
+                    Create Invite
+                </button>
+            </form>
+
+            <div id="invite-list">
+                {% include "admin/invite_list.html" %}
+            </div>
+        </section>
+
+        <section class="space-y-5">
+            <div>
+                <h2 class="text-lg font-semibold">Users</h2>
+                <p class="text-sm text-gray-400">Manage user roles and access.</p>
+            </div>
+
+            <div id="user-list">
+                {% include "admin/user_list.html" %}
+            </div>
+        </section>
+    </div>
+</main>
+{% endblock %}

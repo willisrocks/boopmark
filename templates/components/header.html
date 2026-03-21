@@ -46,6 +46,9 @@
                 <p class="text-sm text-gray-400">{{ user.display_name }}</p>
                 <p class="text-xs text-gray-500 mb-2">{{ user.email }}</p>
                 <a href="/settings" data-testid="profile-menu-settings" class="block text-sm text-gray-300 hover:text-white py-1">Settings</a>
+                {% if user.is_admin_or_owner %}
+                <a href="/admin" class="block text-sm text-gray-300 hover:text-white py-1">Admin</a>
+                {% endif %}
                 <form method="post" action="/auth/logout">
                     <button data-testid="profile-menu-sign-out" class="text-sm text-gray-300 hover:text-white py-1">Sign Out</button>
                 </form>
@@ -89,6 +92,9 @@
                 <p class="text-sm text-gray-400">{{ user.display_name }}</p>
                 <p class="text-xs text-gray-500 mb-2">{{ user.email }}</p>
                 <a href="/settings" data-testid="profile-menu-settings" class="block text-sm text-gray-300 hover:text-white py-1">Settings</a>
+                {% if user.is_admin_or_owner %}
+                <a href="/admin" class="block text-sm text-gray-300 hover:text-white py-1">Admin</a>
+                {% endif %}
                 <form method="post" action="/auth/logout">
                     <button data-testid="profile-menu-sign-out" class="text-sm text-gray-300 hover:text-white py-1">Sign Out</button>
                 </form>
