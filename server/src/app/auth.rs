@@ -70,6 +70,10 @@ where
             .verify_password(password.as_bytes(), &parsed_hash)
             .map_err(|_| DomainError::Unauthorized)?;
 
+        if !user.is_active() {
+            return Err(DomainError::Unauthorized);
+        }
+
         let token = self.create_session(user.id).await?;
         Ok((user, token))
     }
@@ -96,7 +100,11 @@ where
             .find_by_token(token)
             .await?
             .ok_or(DomainError::Unauthorized)?;
-        self.users.find_by_id(session.user_id).await
+        let user = self.users.find_by_id(session.user_id).await?;
+        if !user.is_active() {
+            return Err(DomainError::Unauthorized);
+        }
+        Ok(user)
     }
 
     pub async fn delete_session(&self, token: &str) -> Result<(), DomainError> {
@@ -117,7 +125,11 @@ where
             .find_by_hash(&hash)
             .await?
             .ok_or(DomainError::Unauthorized)?;
-        self.users.find_by_id(api_key.user_id).await
+        let user = self.users.find_by_id(api_key.user_id).await?;
+        if !user.is_active() {
+            return Err(DomainError::Unauthorized);
+        }
+        Ok(user)
     }
 
     pub async fn list_api_keys(&self, user_id: Uuid) -> Result<Vec<ApiKey>, DomainError> {
@@ -126,6 +138,11 @@ where
 
     pub async fn delete_api_key(&self, id: Uuid, user_id: Uuid) -> Result<(), DomainError> {
         self.api_keys.delete(id, user_id).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn list_users(&self) -> Result<Vec<User>, DomainError> {
+        self.users.list_all().await
     }
 }
 
@@ -180,18 +197,29 @@ mod tests {
             }
         }
 
-        fn add_user(&self, email: &str, password_hash: Option<String>) {
+        fn add_user(&self, email: &str, password_hash: Option<String>) -> Uuid {
+            self.add_user_ex(email, password_hash, None)
+        }
+
+        fn add_user_ex(
+            &self,
+            email: &str,
+            password_hash: Option<String>,
+            deactivated_at: Option<DateTime<Utc>>,
+        ) -> Uuid {
+            let id = Uuid::new_v4();
             let mut users = self.users.lock().unwrap();
             users.push(User {
-                id: Uuid::new_v4(),
+                id,
                 email: email.to_string(),
                 name: Some(email.to_string()),
                 image: None,
                 password_hash,
                 role: UserRole::User,
-                deactivated_at: None,
+                deactivated_at,
                 created_at: Utc::now(),
             });
+            id
         }
     }
 
@@ -313,7 +341,27 @@ mod tests {
         }
     }
 
-    struct FakeApiKeyRepo;
+    struct FakeApiKeyRepo {
+        keys: Mutex<Vec<ApiKey>>,
+    }
+
+    impl FakeApiKeyRepo {
+        fn new() -> Self {
+            Self {
+                keys: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn add_key(&self, user_id: Uuid, key_hash: &str) {
+            self.keys.lock().unwrap().push(ApiKey {
+                id: Uuid::new_v4(),
+                user_id,
+                key_hash: key_hash.to_string(),
+                name: "test".to_string(),
+                created_at: Utc::now(),
+            });
+        }
+    }
 
     impl ApiKeyRepository for FakeApiKeyRepo {
         async fn create(
@@ -329,8 +377,14 @@ mod tests {
             unimplemented!()
         }
 
-        async fn find_by_hash(&self, _key_hash: &str) -> Result<Option<ApiKey>, DomainError> {
-            unimplemented!()
+        async fn find_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>, DomainError> {
+            Ok(self
+                .keys
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|k| k.key_hash == key_hash)
+                .cloned())
         }
 
         async fn delete(&self, _id: Uuid, _user_id: Uuid) -> Result<(), DomainError> {
@@ -341,11 +395,15 @@ mod tests {
     fn build_service(
         user_repo: Arc<FakeUserRepo>,
     ) -> AuthService<FakeUserRepo, FakeSessionRepo, FakeApiKeyRepo> {
-        AuthService::new(
-            user_repo,
-            Arc::new(FakeSessionRepo::new()),
-            Arc::new(FakeApiKeyRepo),
-        )
+        build_service_full(user_repo, Arc::new(FakeSessionRepo::new()), Arc::new(FakeApiKeyRepo::new()))
+    }
+
+    fn build_service_full(
+        user_repo: Arc<FakeUserRepo>,
+        session_repo: Arc<FakeSessionRepo>,
+        api_key_repo: Arc<FakeApiKeyRepo>,
+    ) -> AuthService<FakeUserRepo, FakeSessionRepo, FakeApiKeyRepo> {
+        AuthService::new(user_repo, session_repo, api_key_repo)
     }
 
     #[tokio::test]
@@ -393,6 +451,51 @@ mod tests {
         let result = service
             .local_login("oauth-only@example.com", "anypass")
             .await;
+        assert!(matches!(result, Err(DomainError::Unauthorized)));
+    }
+
+    #[tokio::test]
+    async fn local_login_fails_for_deactivated_user() {
+        let user_repo = Arc::new(FakeUserRepo::new());
+        let hashed = hash_password("correctpass");
+        user_repo.add_user_ex("deactivated@example.com", Some(hashed), Some(Utc::now()));
+        let service = build_service(user_repo);
+
+        let result = service
+            .local_login("deactivated@example.com", "correctpass")
+            .await;
+        assert!(matches!(result, Err(DomainError::Unauthorized)));
+    }
+
+    #[tokio::test]
+    async fn validate_session_fails_for_deactivated_user() {
+        let user_repo = Arc::new(FakeUserRepo::new());
+        let session_repo = Arc::new(FakeSessionRepo::new());
+        let user_id =
+            user_repo.add_user_ex("deactivated@example.com", None, Some(Utc::now()));
+        let service =
+            build_service_full(user_repo, session_repo.clone(), Arc::new(FakeApiKeyRepo::new()));
+
+        let token = service.create_session(user_id).await.unwrap();
+        let result = service.validate_session(&token).await;
+        assert!(matches!(result, Err(DomainError::Unauthorized)));
+    }
+
+    #[tokio::test]
+    async fn validate_api_key_fails_for_deactivated_user() {
+        let user_repo = Arc::new(FakeUserRepo::new());
+        let api_key_repo = Arc::new(FakeApiKeyRepo::new());
+        let user_id =
+            user_repo.add_user_ex("deactivated@example.com", None, Some(Utc::now()));
+
+        let raw_key = "boop_testkey123";
+        let hashed_key = hash_api_key(raw_key);
+        api_key_repo.add_key(user_id, &hashed_key);
+
+        let service =
+            build_service_full(user_repo, Arc::new(FakeSessionRepo::new()), api_key_repo);
+
+        let result = service.validate_api_key(raw_key).await;
         assert!(matches!(result, Err(DomainError::Unauthorized)));
     }
 }

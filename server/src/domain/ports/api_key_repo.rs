@@ -2,7 +2,7 @@ use crate::domain::error::DomainError;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 #[allow(dead_code)]
 pub struct ApiKey {
     pub id: Uuid,
