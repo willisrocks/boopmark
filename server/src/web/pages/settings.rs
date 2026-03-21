@@ -238,18 +238,11 @@ async fn fix_images_stream(
 
     let (tx, rx) = mpsc::channel::<ProgressEvent>(32);
     let jobs = state.active_image_fix_jobs.clone();
-    let screenshot_url = state.config.screenshot_service_url.clone();
 
     tokio::spawn(async move {
         match &state.bookmarks {
-            Bookmarks::Local(svc) => {
-                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx)
-                    .await
-            }
-            Bookmarks::S3(svc) => {
-                svc.fix_missing_images(user_id, screenshot_url.as_deref(), tx)
-                    .await
-            }
+            Bookmarks::Local(svc) => svc.fix_missing_images(user_id, tx).await,
+            Bookmarks::S3(svc) => svc.fix_missing_images(user_id, tx).await,
         }
         jobs.lock().unwrap().remove(&user_id);
     });

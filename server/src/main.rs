@@ -59,6 +59,7 @@ async fn main() {
                     db.clone(),
                     metadata,
                     storage,
+                    config.screenshot_service_url.clone(),
                 ))),
                 images,
             )
@@ -106,6 +107,7 @@ async fn main() {
                     db.clone(),
                     metadata,
                     storage,
+                    config.screenshot_service_url.clone(),
                 ))),
                 images,
             )

@@ -20,6 +20,7 @@ pub struct BookmarkService<R, M, S> {
     metadata: Arc<M>,
     storage: Arc<S>,
     http_client: reqwest::Client,
+    screenshot_service_url: Option<String>,
 }
 
 impl<R, M, S> BookmarkService<R, M, S>
@@ -28,7 +29,12 @@ where
     M: MetadataExtractor + Send + Sync,
     S: ObjectStorage + Send + Sync,
 {
-    pub fn new(repo: Arc<R>, metadata: Arc<M>, storage: Arc<S>) -> Self {
+    pub fn new(
+        repo: Arc<R>,
+        metadata: Arc<M>,
+        storage: Arc<S>,
+        screenshot_service_url: Option<String>,
+    ) -> Self {
         let http_client = reqwest::Client::builder()
             .user_agent("Boopmark/1.0 (+https://boopmark.app)")
             .timeout(std::time::Duration::from_secs(30))
@@ -39,6 +45,7 @@ where
             metadata,
             storage,
             http_client,
+            screenshot_service_url,
         }
     }
 
@@ -47,12 +54,28 @@ where
         user_id: Uuid,
         mut input: CreateBookmark,
     ) -> Result<Bookmark, DomainError> {
-        if needs_metadata(&input)
-            && let Ok(meta) = self.metadata.extract(&input.url).await
-            && let Some(image_url) = merge_metadata(&mut input, meta)
-            && let Ok(stored_url) = self.download_and_store_image(&image_url).await
-        {
-            input.image_url = Some(stored_url);
+        if needs_metadata(&input) {
+            // Try metadata extraction for title/description and og:image
+            if let Ok(meta) = self.metadata.extract(&input.url).await
+                && let Some(image_url) = merge_metadata(&mut input, meta) {
+                    // og:image found — download and store it
+                    if let Ok(stored_url) = self.download_and_store_image(&image_url).await {
+                        input.image_url = Some(stored_url);
+                    }
+                }
+            // Fall back to screenshot service if still no image
+            if input.image_url.is_none()
+                && let Some(svc_url) = &self.screenshot_service_url
+            {
+                let client =
+                    crate::adapters::screenshot::ScreenshotClient::new(svc_url.clone());
+                if let Ok(bytes) = client.capture(&input.url).await {
+                    let key = format!("images/{}.jpg", Uuid::new_v4());
+                    if let Ok(stored_url) = self.storage.put(&key, bytes, "image/jpeg").await {
+                        input.image_url = Some(stored_url);
+                    }
+                }
+            }
         }
 
         // Extract domain from URL if not set
@@ -291,7 +314,6 @@ where
     pub async fn fix_missing_images(
         &self,
         user_id: Uuid,
-        screenshot_service_url: Option<&str>,
         tx: tokio::sync::mpsc::Sender<ProgressEvent>,
     ) {
         let bookmarks = match self.repo.export_all(user_id).await {
@@ -318,7 +340,7 @@ where
 
             if needs_fix {
                 match self
-                    .fetch_and_store_image(&bookmark.url, screenshot_service_url)
+                    .fetch_and_store_image(&bookmark.url)
                     .await
                 {
                     Ok(new_url) => {
@@ -364,7 +386,6 @@ where
     async fn fetch_and_store_image(
         &self,
         page_url: &str,
-        screenshot_service_url: Option<&str>,
     ) -> Result<String, DomainError> {
         // 1. Try og:image
         if let Ok(meta) = self.metadata.extract(page_url).await
@@ -375,7 +396,9 @@ where
         }
 
         // 2. Fall back to screenshot sidecar via ScreenshotClient adapter
-        let svc_url = screenshot_service_url
+        let svc_url = self
+            .screenshot_service_url
+            .as_deref()
             .ok_or_else(|| DomainError::Internal("no screenshot svc".into()))?;
 
         let screenshot_client =
@@ -701,6 +724,7 @@ mod tests {
                 Arc::new(MockRepo::new(bookmarks)),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
+                None,
             )
         }
 
@@ -711,6 +735,7 @@ mod tests {
                 Arc::new(MockRepo::new_with_failing_upsert(bookmarks)),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
+                None,
             )
         }
 
@@ -1094,6 +1119,7 @@ mod tests {
                 Arc::clone(&repo),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
+                None,
             );
             let past = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
                 .unwrap()
@@ -1144,6 +1170,7 @@ mod tests {
                 Arc::clone(&repo),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
+                None,
             );
             let past = chrono::DateTime::parse_from_rfc3339("2021-06-15T12:00:00Z")
                 .unwrap()
@@ -1497,9 +1524,10 @@ mod tests {
                 Arc::new(MockRepo::new(vec![])),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
+                None,
             );
             let (tx, rx) = mpsc::channel(32);
-            svc.fix_missing_images(user_id, None, tx).await;
+            svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
             assert_eq!(events.len(), 1);
             let last = &events[0];
@@ -1522,9 +1550,10 @@ mod tests {
                 Arc::new(MockRepo::new(vec![bookmark])),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
+                None,
             );
             let (tx, rx) = mpsc::channel(32);
-            svc.fix_missing_images(user_id, None, tx).await;
+            svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
             let last = events.last().unwrap();
             assert_eq!(last.fixed, 0, "should not fix an already-working image");
@@ -1542,9 +1571,10 @@ mod tests {
                 Arc::new(MockRepo::new(vec![bookmark])),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
+                None,
             );
             let (tx, rx) = mpsc::channel(32);
-            svc.fix_missing_images(user_id, None, tx).await;
+            svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
             let last = events.last().unwrap();
             assert_eq!(last.fixed, 0);
@@ -1591,9 +1621,10 @@ mod tests {
                     image_url: Some(downloadable_og_image),
                 }),
                 Arc::new(NoopStorage),
+                None,
             );
             let (tx, rx) = mpsc::channel(32);
-            svc.fix_missing_images(user_id, None, tx).await;
+            svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
             let last = events.last().unwrap();
             assert_eq!(last.fixed, 1, "broken image should be fixed via og:image");
@@ -1613,10 +1644,10 @@ mod tests {
                 Arc::new(MockRepo::new(vec![bookmark])),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
+                Some(screenshot_url),
             );
             let (tx, rx) = mpsc::channel(32);
-            svc.fix_missing_images(user_id, Some(&screenshot_url), tx)
-                .await;
+            svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
             let last = events.last().unwrap();
             assert_eq!(last.fixed, 1, "should fix via screenshot sidecar");
