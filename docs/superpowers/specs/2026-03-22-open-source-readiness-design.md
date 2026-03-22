@@ -26,17 +26,20 @@ pub trait ScreenshotProvider: Send + Sync {
 }
 ```
 
-Three adapters:
+Two adapters:
 
 | Adapter | Backend | Config |
 |---------|---------|--------|
 | `PlaywrightScreenshot` | Current sidecar HTTP call | `SCREENSHOT_SERVICE_URL` |
-| `CloudflareScreenshot` | Cloudflare Browser Rendering API | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` |
 | `NoopScreenshot` | Returns error / no-op | (none) |
 
+Cloudflare Browser Rendering adapter deferred — it's a paid service and most self-hosters won't use it. Can be added later following the same port pattern.
+
 Config:
-- New env var `SCREENSHOT_BACKEND`: `playwright` | `cloudflare` | `disabled` (default: `disabled`)
+- New env var `SCREENSHOT_BACKEND`: `playwright` | `disabled` (default: `disabled`)
+- `SCREENSHOT_SERVICE_URL` remains as sub-config when `SCREENSHOT_BACKEND=playwright`
 - `BookmarkService` receives `Arc<dyn ScreenshotProvider>` instead of `Option<String>`
+- Note: `BookmarkService` is generic (`BookmarkService<R, M, S>`) — the screenshot provider will be added as a fourth generic parameter or use `Arc<dyn ScreenshotProvider>` as a field. The `Bookmarks` enum in `state.rs` and construction in `main.rs` will need corresponding updates.
 - Existing `screenshot.rs` adapter renamed/refactored into `adapters/screenshot/playwright.rs`
 
 ## 2. Owner Bootstrap & User Management
@@ -47,16 +50,19 @@ Config:
 
 ### Solution
 
-Extend `scripts/add-user.sh` to accept optional flags:
+Rewrite `scripts/add-user.sh` with proper flag parsing:
 
 ```bash
 just add-user email@example.com --role owner                    # Google OAuth (no password)
 just add-user email@example.com --role owner --password secret  # Local auth
 ```
 
-- `--role` accepts `owner`, `admin`, `user` (default: `user`)
-- `--password` is optional; required when `LOGIN_ADAPTER=local_password`, error if local auth but no password
-- `--role owner` fails if an owner already exists in the database
+This is a non-trivial rewrite of the current script, which only takes positional args and has no role support. The new script needs:
+- Argument parser (getopt or manual flag loop)
+- `--role` flag: accepts `owner`, `admin`, `user` (default: `user`)
+- `--password` flag: optional; required when `LOGIN_ADAPTER=local_password`, error if local auth but no password provided
+- Owner guard: `--role owner` fails if an owner already exists in the database
+- The INSERT statement must include the `role` column
 
 ## 3. Bootstrap Command
 
@@ -66,7 +72,7 @@ New self-hosters need to: copy env, generate secrets, start services, wait for D
 
 ### Solution
 
-New `just bootstrap` command that:
+New `just bootstrap` command for self-hosters (Docker-only workflow):
 
 1. Copies `.env.example` to `.env`
 2. Auto-generates `SESSION_SECRET` and `LLM_SETTINGS_ENCRYPTION_KEY` with cryptographically random values
@@ -77,11 +83,13 @@ New `just bootstrap` command that:
 7. Creates the owner user via `just add-user ... --role owner`
 8. Prints "Ready at http://localhost:4000"
 
-New `just dev` command checks `USE_DEVPROXY` env var:
+Modify existing `just dev` to check `USE_DEVPROXY` env var:
 - `USE_DEVPROXY=1`: runs `devproxy up`
 - `USE_DEVPROXY=0` (default): runs `docker compose up -d`
 
-Existing `just setup` retired in favor of `just bootstrap`.
+Note: `just dev` currently runs `docker compose up -d db minio` + `cargo run`. This changes to a Docker-first workflow by default, which is a behavior change for existing contributors.
+
+Keep existing `just setup` for contributors who want the hybrid workflow (infra in Docker, server running locally via cargo). Update it to reflect new service names (RustFS instead of MinIO) and ensure it still works alongside `just bootstrap`.
 
 ## 4. Infrastructure Changes
 
@@ -93,6 +101,7 @@ MinIO's licensing (AGPL) is unfriendly for self-hosters. Replace with RustFS:
 - Built in Rust, lighter weight
 - Docker image: `rustfs/rustfs`
 - Our `S3Storage` adapter works unchanged (generic S3 protocol)
+- Note: RustFS is still alpha (v1.0.0-alpha). Acceptable for our use case (single-node, bookmark images) but worth noting.
 
 ### Dockerfile: Add Tailwind CSS Build Stage
 
@@ -128,6 +137,12 @@ Optional services (commented out with instructions):
 - `rustfs` — RustFS for S3-compatible storage
 - `screenshot-svc` — Playwright screenshot sidecar
 
+Changes from current docker-compose.yml:
+- Remove `minio` service, replace with commented-out `rustfs` block
+- Remove `minio` from `server.depends_on`
+- Remove S3 env vars from `server.environment` when `STORAGE_BACKEND=local` (the default)
+- Ensure `server` starts cleanly with only `db` as a dependency
+
 Sensible defaults so minimal `.env` works out of the box.
 
 ## 6. Documentation
@@ -141,11 +156,12 @@ Sensible defaults so minimal `.env` works out of the box.
 - CLI section (install + usage)
 - Architecture overview (hex architecture, link to deeper docs)
 - License badge (MIT)
+- Clean up stale references to `ENABLE_LOCAL_AUTH` (replaced by `LOGIN_ADAPTER` in prior work)
 
 ### CONTRIBUTING.md — New
 
 - Prerequisites (Rust, Node, Docker)
-- Development setup (`just bootstrap`, `just dev`)
+- Development setup (`just setup` for hybrid, `just bootstrap` for Docker-only)
 - Project structure overview
 - How to add a new adapter (document the existing pattern)
 - Testing (`cargo test`, Playwright E2E)
@@ -154,12 +170,15 @@ Sensible defaults so minimal `.env` works out of the box.
 ### LICENSE — MIT
 
 Standard MIT license file in repository root.
+Add `license = "MIT"` to workspace `Cargo.toml` and per-crate `Cargo.toml` files.
 
 ### .env.example — Rewrite
 
 - Grouped: Required vs Optional
 - Comments explaining each variable
 - Defaults that work for Docker Compose out of the box
+- New vars: `SCREENSHOT_BACKEND`, `USE_DEVPROXY`
+- Remove/update stale references
 
 ## 7. License
 
@@ -175,8 +194,10 @@ MIT. Chosen for:
 |----------|--------|-----------|
 | License | MIT | Simplest, most contributor-friendly, open-core compatible |
 | Screenshot default | Disabled | Minimal dependency footprint for self-hosters |
+| Screenshot adapters | Playwright + Noop (Cloudflare deferred) | Ship what's needed now, extend later |
 | S3 provider | RustFS (replaces MinIO) | Apache 2.0 license, lighter, S3-compatible |
-| Auth default | Local password | No Google OAuth setup needed for self-hosting |
-| Storage default | Local filesystem | No S3/RustFS needed for basic install |
+| Auth default (proposed) | Change to local password | No Google OAuth setup needed for self-hosting. Note: currently defaults to `google` in `config.rs` — this is a proposed change. |
+| Storage default | Local filesystem | Already the default. No S3/RustFS needed for basic install. |
 | Registration | Invite-only | Owner invites users via admin panel |
 | Tailwind in Docker | Node 24 build stage | Self-hosters don't need Node locally |
+| Contributor workflow | Keep `just setup` alongside `just bootstrap` | Hybrid dev (cargo run locally) still supported |
