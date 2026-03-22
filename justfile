@@ -1,12 +1,58 @@
 # Local development commands
 
+# One-command setup for self-hosters (Docker-only)
+bootstrap *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Step 1: Create .env from example if it doesn't exist
+    if [ ! -f .env ]; then
+      echo "==> Creating .env from .env.example"
+      cp .env.example .env
+
+      # Generate random secrets
+      echo "==> Generating secrets"
+      SESSION_SECRET=$(openssl rand -hex 32)
+      LLM_KEY=$(openssl rand -base64 32)
+      if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' "s|^SESSION_SECRET=.*|SESSION_SECRET=$SESSION_SECRET|" .env
+        sed -i '' "s|^LLM_SETTINGS_ENCRYPTION_KEY=.*|LLM_SETTINGS_ENCRYPTION_KEY=$LLM_KEY|" .env
+      else
+        sed -i "s|^SESSION_SECRET=.*|SESSION_SECRET=$SESSION_SECRET|" .env
+        sed -i "s|^LLM_SETTINGS_ENCRYPTION_KEY=.*|LLM_SETTINGS_ENCRYPTION_KEY=$LLM_KEY|" .env
+      fi
+    else
+      echo "==> .env already exists, skipping"
+    fi
+
+    # Step 2: Start services
+    echo "==> Starting Docker services"
+    docker compose up -d --build
+
+    # Step 3: Wait for Postgres
+    echo "==> Waiting for Postgres..."
+    until docker compose exec db pg_isready -U boopmark > /dev/null 2>&1; do sleep 1; done
+
+    # Step 4: Wait for server to be ready (it runs migrations on startup)
+    echo "==> Waiting for server..."
+    until curl -sf http://localhost:4000 > /dev/null 2>&1; do sleep 2; done
+
+    # Step 5: Create owner user
+    echo ""
+    echo "==> Create your admin account"
+    ./scripts/add-user.sh {{ARGS}} --role owner
+
+    echo ""
+    echo "==> Boopmark is ready at http://localhost:4000"
+
+# Contributor setup (hybrid: infra in Docker, server runs locally)
 setup:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "==> Copying .env.example to .env (if needed)"
     [ -f .env ] || cp .env.example .env
-    echo "==> Starting Docker services"
-    docker compose up -d db minio
+    echo "==> Starting Docker services (db only)"
+    docker compose up -d db
     echo "==> Waiting for Postgres..."
     until docker compose exec db pg_isready -U boopmark > /dev/null 2>&1; do sleep 1; done
     echo "==> Installing sqlx-cli (if needed)"
@@ -20,11 +66,20 @@ setup:
     npx tailwindcss -i static/css/input.css -o static/css/output.css --minify
     echo "==> Building project"
     cargo build
-    echo "==> Setup complete! Run 'just dev' to start the server."
+    echo "==> Setup complete! Run 'cargo run -p boopmark-server' to start the server."
 
+# Daily development driver (starts infra + runs server locally)
+# Set USE_DEVPROXY=1 in .env to use devproxy instead of docker compose
 dev:
-    docker compose up -d db minio
-    cargo run -p boopmark-server
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source .env 2>/dev/null || true
+    if [ "${USE_DEVPROXY:-0}" = "1" ]; then
+      devproxy up
+    else
+      docker compose up -d db
+      cargo run -p boopmark-server
+    fi
 
 build:
     cargo build --release
