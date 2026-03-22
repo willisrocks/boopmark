@@ -77,10 +77,10 @@ HASH=""
 if [ -n "$PASSWORD" ]; then
   echo "Hashing password..."
   if command -v cargo > /dev/null 2>&1; then
-    HASH=$(echo "$PASSWORD" | cargo run -p boopmark-server --example hash_password 2>/dev/null)
+    HASH=$(printf '%s' "$PASSWORD" | cargo run -p boopmark-server --example hash_password 2>/dev/null)
   else
     # Docker-only: exec into server container to hash via stdin
-    HASH=$(echo "$PASSWORD" | docker compose exec -T server ./hash_password)
+    HASH=$(printf '%s' "$PASSWORD" | docker compose exec -T server ./hash_password)
   fi
 fi
 

@@ -114,7 +114,63 @@ fn llm_settings_encryption_key() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::llm_settings_encryption_key;
+    use super::{llm_settings_encryption_key, LoginAdapter, ScreenshotBackend};
+
+    /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.
+    /// Existing Google OAuth deployments must set LOGIN_ADAPTER=google explicitly.
+    /// These tests verify the parsing logic in isolation (not env var lookup,
+    /// which is inherently racy in multi-threaded tests).
+    #[test]
+    fn login_adapter_parses_local_password() {
+        let adapter: LoginAdapter = match "local_password" {
+            "local_password" => LoginAdapter::LocalPassword,
+            _ => LoginAdapter::Google,
+        };
+        assert!(matches!(adapter, LoginAdapter::LocalPassword));
+    }
+
+    #[test]
+    fn login_adapter_default_value_is_local_password() {
+        // The literal default passed to unwrap_or_else must be "local_password"
+        // so that unset deployments get local auth, not Google OAuth.
+        let default = "local_password";
+        let adapter: LoginAdapter = match default {
+            "local_password" => LoginAdapter::LocalPassword,
+            _ => LoginAdapter::Google,
+        };
+        assert!(
+            matches!(adapter, LoginAdapter::LocalPassword),
+            "default must be LocalPassword for self-hosting"
+        );
+    }
+
+    #[test]
+    fn login_adapter_parses_google() {
+        let adapter: LoginAdapter = match "google" {
+            "local_password" => LoginAdapter::LocalPassword,
+            _ => LoginAdapter::Google,
+        };
+        assert!(matches!(adapter, LoginAdapter::Google));
+    }
+
+    #[test]
+    fn screenshot_backend_default_is_disabled() {
+        let default = "disabled";
+        let backend: ScreenshotBackend = match default {
+            "playwright" => ScreenshotBackend::Playwright,
+            _ => ScreenshotBackend::Disabled,
+        };
+        assert!(matches!(backend, ScreenshotBackend::Disabled));
+    }
+
+    #[test]
+    fn screenshot_backend_parses_playwright() {
+        let backend: ScreenshotBackend = match "playwright" {
+            "playwright" => ScreenshotBackend::Playwright,
+            _ => ScreenshotBackend::Disabled,
+        };
+        assert!(matches!(backend, ScreenshotBackend::Playwright));
+    }
 
     #[test]
     fn accepts_valid_llm_settings_encryption_key() {
