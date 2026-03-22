@@ -114,7 +114,7 @@ fn llm_settings_encryption_key() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{llm_settings_encryption_key, LoginAdapter, ScreenshotBackend};
+    use super::{LoginAdapter, ScreenshotBackend, llm_settings_encryption_key};
 
     /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.
     /// Existing Google OAuth deployments must set LOGIN_ADAPTER=google explicitly.
