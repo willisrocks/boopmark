@@ -19,13 +19,11 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Local Auth (Development)
 
-When Google OAuth isn't available (e.g. behind devproxy), enable local username/password login:
+When Google OAuth isn't available (e.g. behind devproxy), use local username/password login:
 
-1. Set `ENABLE_LOCAL_AUTH=1` in `.env` (already set in `docker-compose.yml`)
-2. Create a user: `just add-user email@example.com mypassword`
+1. Set `LOGIN_ADAPTER=local_password` in `.env` (this is the default)
+2. Create a user: `just add-user email@example.com --password mypassword`
 3. Sign in with the local form on the login page
-
-This is for development only — do not use in production.
 
 ## Local HTTPS (devproxy)
 
