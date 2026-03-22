@@ -60,7 +60,7 @@ impl Config {
                 .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
                 .unwrap_or(false),
             login_adapter: match env::var("LOGIN_ADAPTER")
-                .unwrap_or_else(|_| "google".into())
+                .unwrap_or_else(|_| "local_password".into())
                 .as_str()
             {
                 "local_password" => LoginAdapter::LocalPassword,
