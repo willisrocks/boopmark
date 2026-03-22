@@ -59,6 +59,8 @@ impl Config {
             enable_e2e_auth: env::var("ENABLE_E2E_AUTH")
                 .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
                 .unwrap_or(false),
+            // Default is local_password for self-hosting simplicity.
+            // Set LOGIN_ADAPTER=google in .env to use Google OAuth.
             login_adapter: match env::var("LOGIN_ADAPTER")
                 .unwrap_or_else(|_| "local_password".into())
                 .as_str()

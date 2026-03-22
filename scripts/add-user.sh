@@ -62,20 +62,9 @@ if [ "$LOGIN_ADAPTER" = "local_password" ] && [ -z "$PASSWORD" ]; then
   exit 1
 fi
 
-# Find the db container
-DB_CONTAINER=$(docker ps --filter "name=boopmark-db-1" --format "{{.Names}}" | head -1)
-if [ -z "$DB_CONTAINER" ]; then
-  # Fallback: try docker compose service name
-  DB_CONTAINER=$(docker ps --filter "name=db-1" --format "{{.Names}}" | head -1)
-fi
-if [ -z "$DB_CONTAINER" ]; then
-  echo "Error: no running boopmark db container found. Start services first." >&2
-  exit 1
-fi
-
-# Owner guard
+# Owner guard: use docker compose exec to scope to this project's db
 if [ "$ROLE" = "owner" ]; then
-  EXISTING_OWNER=$(docker exec "$DB_CONTAINER" psql -U boopmark -d boopmark -t -c \
+  EXISTING_OWNER=$(docker compose exec -T db psql -U boopmark -d boopmark -t -c \
     "SELECT COUNT(*) FROM users WHERE role = 'owner' AND deactivated_at IS NULL;" | tr -d ' ')
   if [ "$EXISTING_OWNER" -gt 0 ]; then
     echo "Error: an owner already exists. Use the admin panel to manage users." >&2
@@ -83,28 +72,26 @@ if [ "$ROLE" = "owner" ]; then
   fi
 fi
 
-# Hash password if provided
-HASH_CLAUSE="NULL"
+# Hash password if provided — pass via stdin to avoid exposing in process listing
+HASH=""
 if [ -n "$PASSWORD" ]; then
   echo "Hashing password..."
   if command -v cargo > /dev/null 2>&1; then
-    HASH=$(cargo run -p boopmark-server --example hash_password -- "$PASSWORD" 2>/dev/null)
+    HASH=$(echo "$PASSWORD" | cargo run -p boopmark-server --example hash_password 2>/dev/null)
   else
-    # Docker-only: exec into server container to hash
-    SERVER_CONTAINER=$(docker ps --filter "name=server" --format "{{.Names}}" | head -1)
-    if [ -z "$SERVER_CONTAINER" ]; then
-      echo "Error: no running server container found and cargo not available." >&2
-      exit 1
-    fi
-    HASH=$(docker exec "$SERVER_CONTAINER" ./hash_password "$PASSWORD")
+    # Docker-only: exec into server container to hash via stdin
+    HASH=$(echo "$PASSWORD" | docker compose exec -T server ./hash_password)
   fi
-  HASH_CLAUSE="'$HASH'"
 fi
 
 echo "Creating $ROLE user $EMAIL..."
-docker exec "$DB_CONTAINER" psql -U boopmark -d boopmark \
+# Use psql -v variables to avoid SQL injection from user-supplied email/hash/role
+docker compose exec -T db psql -U boopmark -d boopmark \
+  -v email="$EMAIL" \
+  -v hash="${HASH:-}" \
+  -v role="$ROLE" \
   -c "INSERT INTO users (email, name, password_hash, role)
-      VALUES ('$EMAIL', '$EMAIL', $HASH_CLAUSE, '$ROLE')
+      VALUES (:'email', :'email', NULLIF(:'hash', ''), :'role')
       ON CONFLICT (email) DO UPDATE SET
         password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash),
         role = EXCLUDED.role;"
