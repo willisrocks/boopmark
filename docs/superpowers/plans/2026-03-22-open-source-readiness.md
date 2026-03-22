@@ -709,13 +709,21 @@ FROM node:24-slim AS css
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
+COPY tailwind.config.js ./
 COPY static/css/input.css static/css/input.css
 COPY templates/ templates/
 RUN npx tailwindcss -i static/css/input.css -o static/css/output.css --minify
 
 ```
 
-- [ ] **Step 2: Copy built CSS into the final stage instead of from host**
+- [ ] **Step 2: Build hash_password example binary**
+
+In the Rust builder stage, after the main binary build (after `cargo build --release -p boopmark-server`), add:
+```dockerfile
+RUN cargo build --release -p boopmark-server --example hash_password
+```
+
+- [ ] **Step 3: Copy built CSS and hash_password into the final stage**
 
 In the final stage (the `debian:trixie-slim` section), change:
 ```dockerfile
@@ -724,22 +732,23 @@ COPY static/ static/
 
 To:
 ```dockerfile
+COPY --from=builder /app/target/release/examples/hash_password .
 COPY static/ static/
 COPY --from=css /app/static/css/output.css static/css/output.css
 ```
 
-This copies the full static dir first (for JS, images, etc.), then overwrites `output.css` with the freshly built version.
+This copies the full static dir first (for JS, images, etc.), then overwrites `output.css` with the freshly built version. The `hash_password` binary is needed for Docker-only user creation via `add-user.sh`.
 
-- [ ] **Step 3: Verify Docker build works**
+- [ ] **Step 4: Verify Docker build works**
 
 Run: `docker compose build server`
-Expected: Build succeeds with the CSS stage
+Expected: Build succeeds with the CSS stage and hash_password binary
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add Dockerfile
-git commit -m "feat: add Node 24 Tailwind CSS build stage to Dockerfile"
+git commit -m "feat: add Node 24 Tailwind CSS build stage and hash_password binary to Dockerfile"
 ```
 
 ---
@@ -918,7 +927,17 @@ fi
 HASH_CLAUSE="NULL"
 if [ -n "$PASSWORD" ]; then
   echo "Hashing password..."
-  HASH=$(cargo run -p boopmark-server --example hash_password -- "$PASSWORD" 2>/dev/null)
+  if command -v cargo > /dev/null 2>&1; then
+    HASH=$(cargo run -p boopmark-server --example hash_password -- "$PASSWORD" 2>/dev/null)
+  else
+    # Docker-only: exec into server container to hash
+    SERVER_CONTAINER=$(docker ps --filter "name=server" --format "{{.Names}}" | head -1)
+    if [ -z "$SERVER_CONTAINER" ]; then
+      echo "Error: no running server container found and cargo not available." >&2
+      exit 1
+    fi
+    HASH=$(docker exec "$SERVER_CONTAINER" ./hash_password "$PASSWORD")
+  fi
   HASH_CLAUSE="'$HASH'"
 fi
 
@@ -1000,11 +1019,9 @@ bootstrap *ARGS:
     echo "==> Waiting for Postgres..."
     until docker compose exec db pg_isready -U boopmark > /dev/null 2>&1; do sleep 1; done
 
-    # Step 4: Run migrations
-    echo "==> Running migrations"
-    docker compose exec server ./boopmark-server migrate 2>/dev/null || true
-    # Fallback: migrations run on server startup, so just wait a moment
-    sleep 2
+    # Step 4: Wait for server to be ready (it runs migrations on startup)
+    echo "==> Waiting for server..."
+    until curl -sf http://localhost:4000 > /dev/null 2>&1; do sleep 2; done
 
     # Step 5: Create owner user
     echo ""
