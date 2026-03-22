@@ -2,6 +2,7 @@ use crate::domain::bookmark::*;
 use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::BookmarkRepository;
 use crate::domain::ports::metadata::MetadataExtractor;
+use crate::domain::ports::screenshot::ScreenshotProvider;
 use crate::domain::ports::storage::ObjectStorage;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -19,8 +20,8 @@ pub struct BookmarkService<R, M, S> {
     repo: Arc<R>,
     metadata: Arc<M>,
     storage: Arc<S>,
+    screenshot: Arc<dyn ScreenshotProvider>,
     http_client: reqwest::Client,
-    screenshot_service_url: Option<String>,
 }
 
 impl<R, M, S> BookmarkService<R, M, S>
@@ -33,7 +34,7 @@ where
         repo: Arc<R>,
         metadata: Arc<M>,
         storage: Arc<S>,
-        screenshot_service_url: Option<String>,
+        screenshot: Arc<dyn ScreenshotProvider>,
     ) -> Self {
         let http_client = reqwest::Client::builder()
             .user_agent("Boopmark/1.0 (+https://boopmark.app)")
@@ -44,8 +45,8 @@ where
             repo,
             metadata,
             storage,
+            screenshot,
             http_client,
-            screenshot_service_url,
         }
     }
 
@@ -65,17 +66,12 @@ where
                 }
             // Fall back to screenshot service if still no image
             if input.image_url.is_none()
-                && let Some(svc_url) = &self.screenshot_service_url
-            {
-                let client =
-                    crate::adapters::screenshot::ScreenshotClient::new(svc_url.clone());
-                if let Ok(bytes) = client.capture(&input.url).await {
+                && let Ok(bytes) = self.screenshot.capture(&input.url).await {
                     let key = format!("images/{}.jpg", Uuid::new_v4());
                     if let Ok(stored_url) = self.storage.put(&key, bytes, "image/jpeg").await {
                         input.image_url = Some(stored_url);
                     }
                 }
-            }
         }
 
         // Extract domain from URL if not set
@@ -395,15 +391,8 @@ where
             return Ok(stored);
         }
 
-        // 2. Fall back to screenshot sidecar via ScreenshotClient adapter
-        let svc_url = self
-            .screenshot_service_url
-            .as_deref()
-            .ok_or_else(|| DomainError::Internal("no screenshot svc".into()))?;
-
-        let screenshot_client =
-            crate::adapters::screenshot::ScreenshotClient::new(svc_url.to_string());
-        let bytes = screenshot_client.capture(page_url).await?;
+        // 2. Fall back to screenshot sidecar
+        let bytes = self.screenshot.capture(page_url).await?;
 
         let key = format!("images/{}.jpg", Uuid::new_v4());
         self.storage.put(&key, bytes, "image/jpeg").await
@@ -490,6 +479,7 @@ mod tests {
     }
 
     mod import_tests {
+        use crate::adapters::screenshot::noop::NoopScreenshot;
         use crate::app::bookmarks::BookmarkService;
         use crate::domain::bookmark::*;
         use crate::domain::error::DomainError;
@@ -652,10 +642,10 @@ mod tests {
                 let mut bookmarks = self.bookmarks.lock().unwrap();
                 // Simulate Postgres cross-tenant guard: only update if the
                 // existing row belongs to the same user.
-                if let Some(existing) = bookmarks.iter().find(|b| b.id == bookmark.id) {
-                    if existing.user_id != bookmark.user_id {
-                        return Err(DomainError::AlreadyExists);
-                    }
+                if let Some(existing) = bookmarks.iter().find(|b| b.id == bookmark.id)
+                    && existing.user_id != bookmark.user_id
+                {
+                    return Err(DomainError::AlreadyExists);
                 }
                 if let Some(b) = bookmarks.iter_mut().find(|b| b.id == bookmark.id) {
                     *b = bookmark.clone();
@@ -724,7 +714,7 @@ mod tests {
                 Arc::new(MockRepo::new(bookmarks)),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
-                None,
+                Arc::new(NoopScreenshot),
             )
         }
 
@@ -735,7 +725,7 @@ mod tests {
                 Arc::new(MockRepo::new_with_failing_upsert(bookmarks)),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
-                None,
+                Arc::new(NoopScreenshot),
             )
         }
 
@@ -1119,7 +1109,7 @@ mod tests {
                 Arc::clone(&repo),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
-                None,
+                Arc::new(NoopScreenshot),
             );
             let past = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
                 .unwrap()
@@ -1170,7 +1160,7 @@ mod tests {
                 Arc::clone(&repo),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
-                None,
+                Arc::new(NoopScreenshot),
             );
             let past = chrono::DateTime::parse_from_rfc3339("2021-06-15T12:00:00Z")
                 .unwrap()
@@ -1227,6 +1217,8 @@ mod tests {
 
     mod fix_images_tests {
         use super::super::*;
+        use crate::adapters::screenshot::noop::NoopScreenshot;
+        use crate::adapters::screenshot::playwright::PlaywrightScreenshot;
         use axum::{
             Router,
             routing::{get, head as head_route, post},
@@ -1524,7 +1516,7 @@ mod tests {
                 Arc::new(MockRepo::new(vec![])),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
-                None,
+                Arc::new(NoopScreenshot),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
@@ -1550,7 +1542,7 @@ mod tests {
                 Arc::new(MockRepo::new(vec![bookmark])),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
-                None,
+                Arc::new(NoopScreenshot),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
@@ -1571,7 +1563,7 @@ mod tests {
                 Arc::new(MockRepo::new(vec![bookmark])),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
-                None,
+                Arc::new(NoopScreenshot),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
@@ -1621,7 +1613,7 @@ mod tests {
                     image_url: Some(downloadable_og_image),
                 }),
                 Arc::new(NoopStorage),
-                None,
+                Arc::new(NoopScreenshot),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
@@ -1644,7 +1636,7 @@ mod tests {
                 Arc::new(MockRepo::new(vec![bookmark])),
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
-                Some(screenshot_url),
+                Arc::new(PlaywrightScreenshot::new(screenshot_url)),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;

@@ -26,7 +26,14 @@ pub struct Config {
     pub s3_region: String,
     pub s3_images_bucket: String,
     pub s3_images_public_url: Option<String>,
+    pub screenshot_backend: ScreenshotBackend,
     pub screenshot_service_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScreenshotBackend {
+    Playwright,
+    Disabled,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +80,13 @@ impl Config {
             s3_images_bucket: env::var("S3_IMAGES_BUCKET")
                 .unwrap_or_else(|_| "boopmark-images".into()),
             s3_images_public_url: env::var("S3_IMAGES_PUBLIC_URL").ok(),
+            screenshot_backend: match env::var("SCREENSHOT_BACKEND")
+                .unwrap_or_else(|_| "disabled".into())
+                .as_str()
+            {
+                "playwright" => ScreenshotBackend::Playwright,
+                _ => ScreenshotBackend::Disabled,
+            },
             screenshot_service_url: env::var("SCREENSHOT_SERVICE_URL").ok(),
         }
     }

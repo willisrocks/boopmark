@@ -5,6 +5,7 @@ pub mod llm_enricher;
 pub mod llm_settings_repo;
 pub mod login_provider;
 pub mod metadata;
+pub mod screenshot;
 pub mod session_repo;
 pub mod storage;
 pub mod user_repo;

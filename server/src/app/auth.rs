@@ -309,6 +309,7 @@ mod tests {
 
     /// Stores (id, user_id, token, expires_at) tuples for session tracking.
     struct FakeSessionRepo {
+        #[allow(clippy::type_complexity)]
         sessions: Mutex<Vec<(Uuid, Uuid, String, DateTime<Utc>)>>,
     }
 

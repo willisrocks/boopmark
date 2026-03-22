@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn jsonl_export_roundtrip() {
         let bm = make_bookmark("https://example.com", vec!["rust", "web"]);
-        let jsonl = bookmarks_to_jsonl_export(&[bm.clone()]);
+        let jsonl = bookmarks_to_jsonl_export(std::slice::from_ref(&bm));
         let records = parse_jsonl(&jsonl).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].url, bm.url);
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn jsonl_backup_roundtrip() {
         let bm = make_bookmark("https://example.com", vec!["rust"]);
-        let jsonl = bookmarks_to_jsonl_backup(&[bm.clone()]);
+        let jsonl = bookmarks_to_jsonl_backup(std::slice::from_ref(&bm));
         let records = parse_jsonl(&jsonl).unwrap();
         assert_eq!(records[0].id, Some(bm.id));
         assert_eq!(records[0].url, bm.url);
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn csv_export_roundtrip() {
         let bm = make_bookmark("https://example.com", vec!["rust", "web"]);
-        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        let csv_text = bookmarks_to_csv_export(std::slice::from_ref(&bm)).unwrap();
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].url, bm.url);
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn csv_backup_roundtrip() {
         let bm = make_bookmark("https://example.com", vec!["a", "b"]);
-        let csv_text = bookmarks_to_csv_backup(&[bm.clone()]).unwrap();
+        let csv_text = bookmarks_to_csv_backup(std::slice::from_ref(&bm)).unwrap();
         let records = parse_csv(&csv_text).unwrap();
         assert_eq!(records[0].id, Some(bm.id));
         assert_eq!(records[0].tags, bm.tags);
@@ -596,7 +596,7 @@ mod tests {
         // on re-import — this is an accepted limitation of the pipe format.
         // For lossless round-trips use JSONL backup.
         let bm = make_bookmark("https://example.com", vec!["rust", "web"]);
-        let csv_text = bookmarks_to_csv_export(&[bm.clone()]).unwrap();
+        let csv_text = bookmarks_to_csv_export(std::slice::from_ref(&bm)).unwrap();
         assert!(
             csv_text.contains("rust|web"),
             "tags must be pipe-separated in CSV"

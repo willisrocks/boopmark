@@ -9,6 +9,8 @@ use adapters::login::google::GoogleLoginProvider;
 use adapters::login::local_password::LocalPasswordLoginProvider;
 use adapters::postgres::PostgresPool;
 use adapters::scraper::HtmlMetadataExtractor;
+use adapters::screenshot::noop::NoopScreenshot;
+use adapters::screenshot::playwright::PlaywrightScreenshot;
 use adapters::storage::local::LocalStorage;
 use adapters::storage::s3::S3Storage;
 use app::auth::AuthService;
@@ -17,9 +19,10 @@ use app::enrichment::EnrichmentService;
 use app::invite::InviteService;
 use app::secrets::SecretBox;
 use app::settings::SettingsService;
-use config::{Config, LoginAdapter, StorageBackend};
+use config::{Config, LoginAdapter, ScreenshotBackend, StorageBackend};
 use domain::ports::llm_enricher::LlmEnricher;
 use domain::ports::login_provider::LoginProvider;
+use domain::ports::screenshot::ScreenshotProvider;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use web::state::{AppState, Bookmarks, ImageStorage};
@@ -48,6 +51,17 @@ async fn main() {
     let metadata = Arc::new(HtmlMetadataExtractor::new());
     let metadata_for_enrichment = metadata.clone();
 
+    let screenshot: Arc<dyn ScreenshotProvider> = match config.screenshot_backend {
+        ScreenshotBackend::Playwright => {
+            let url = config
+                .screenshot_service_url
+                .clone()
+                .expect("SCREENSHOT_SERVICE_URL required when SCREENSHOT_BACKEND=playwright");
+            Arc::new(PlaywrightScreenshot::new(url))
+        }
+        ScreenshotBackend::Disabled => Arc::new(NoopScreenshot),
+    };
+
     let (bookmarks, images_storage) = match config.storage_backend {
         StorageBackend::Local => {
             let storage = Arc::new(LocalStorage::new(
@@ -63,7 +77,7 @@ async fn main() {
                     db.clone(),
                     metadata,
                     storage,
-                    config.screenshot_service_url.clone(),
+                    screenshot.clone(),
                 ))),
                 images,
             )
@@ -111,7 +125,7 @@ async fn main() {
                     db.clone(),
                     metadata,
                     storage,
-                    config.screenshot_service_url.clone(),
+                    screenshot.clone(),
                 ))),
                 images,
             )
