@@ -15,22 +15,24 @@ services:
       timeout: 5s
       retries: 10
 
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+  # Uncomment to enable S3-compatible storage (set STORAGE_BACKEND=s3 in .env)
+  # rustfs:
+  #   image: rustfs/rustfs
+  #   command: server /data --console-address ":9001"
+  #   environment:
+  #     RUSTFS_ROOT_USER: rustfsadmin
+  #     RUSTFS_ROOT_PASSWORD: rustfsadmin
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
 
-  screenshot-svc:
-    build: ./screenshot-svc
-    ports:
-      - "3001:3001"
-    environment:
-      PORT: "3001"
+  # Uncomment to enable screenshot capture (set SCREENSHOT_BACKEND=playwright in .env)
+  # screenshot-svc:
+  #   build: ./screenshot-svc
+  #   ports:
+  #     - "3001:3001"
+  #   environment:
+  #     PORT: "3001"
 
   server:
     build: .
@@ -39,9 +41,7 @@ services:
         required: false
     environment:
       DATABASE_URL: postgres://boopmark:devpassword@db:5432/boopmark
-      S3_ENDPOINT: http://minio:9000
       LOGIN_ADAPTER: "local_password"
-      SCREENSHOT_SERVICE_URL: http://screenshot-svc:3001
     ports:
       - "4000:4000"
     labels:
@@ -49,10 +49,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      minio:
-        condition: service_started
-      screenshot-svc:
-        condition: service_started
     volumes:
       - ./uploads:/app/uploads
 
