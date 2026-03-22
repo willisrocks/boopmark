@@ -62,8 +62,8 @@ git commit -m "feat: add ScreenshotProvider port trait"
 **Files:**
 - Create: `server/src/adapters/screenshot/playwright.rs`
 - Create: `server/src/adapters/screenshot/mod.rs`
-- Delete content from: `server/src/adapters/screenshot.rs` (becomes directory)
-- Modify: `server/src/adapters/mod.rs`
+- Delete: `server/src/adapters/screenshot.rs` (replaced by directory)
+- No changes needed to: `server/src/adapters/mod.rs` (already has `pub mod screenshot;`)
 
 - [ ] **Step 1: Create adapter directory structure**
 
@@ -155,10 +155,9 @@ pub mod noop;
 pub mod playwright;
 ```
 
-- [ ] **Step 4: Verify it compiles**
+- [ ] **Step 4: Note — crate will not compile yet**
 
-Run: `cargo check -p boopmark-server`
-Expected: SUCCESS
+The crate will NOT compile at this point because `bookmarks.rs` still references the deleted `ScreenshotClient`. This is expected. Continue writing tests below (they will be verified after Tasks 3-4 fix the call sites).
 
 - [ ] **Step 5: Write tests for PlaywrightScreenshot**
 
@@ -230,17 +229,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 7: Run tests**
+- [ ] **Step 7: Tests will be verified later**
 
-Run: `cargo test -p boopmark-server screenshot`
-Expected: 3 tests pass
+The screenshot adapter tests (3 tests) will be verified in Task 4 Step 7 after all call sites are updated.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 8: Do NOT commit yet**
 
-```bash
-git add server/src/adapters/screenshot/
-git commit -m "feat: add PlaywrightScreenshot and NoopScreenshot adapters implementing ScreenshotProvider port"
-```
+The crate will not compile until Tasks 3-4 update `bookmarks.rs` and `main.rs` to stop using the deleted `ScreenshotClient`. All adapter, wiring, and config changes will be committed together in Task 4.
 
 ---
 
@@ -450,13 +445,7 @@ With:
 
 - [ ] **Step 4: Update main.rs imports**
 
-In `server/src/main.rs`, replace:
-```rust
-use adapters::screenshot::ScreenshotClient;
-```
-(If this import doesn't exist — it won't since ScreenshotClient was used inline — just add the new imports.)
-
-Add these imports to the top of main.rs:
+In `server/src/main.rs`, add these imports (there is no existing `ScreenshotClient` import to remove — it was used inline via full path):
 ```rust
 use adapters::screenshot::noop::NoopScreenshot;
 use adapters::screenshot::playwright::PlaywrightScreenshot;
@@ -513,16 +502,19 @@ Do the same for the `StorageBackend::S3` arm (around line 110-115):
                 ))),
 ```
 
-- [ ] **Step 7: Verify it compiles and tests pass**
+- [ ] **Step 7: Verify it compiles and all tests pass (including Task 2 screenshot adapter tests)**
 
 Run: `cargo check -p boopmark-server && cargo test -p boopmark-server`
-Expected: All tests pass
+Expected: All tests pass, including 3 new screenshot adapter tests from Task 2
 
-- [ ] **Step 8: Commit (includes Task 3 changes)**
+- [ ] **Step 8: Commit (includes Tasks 2 and 3 changes)**
+
+This commit includes all changes from Tasks 2, 3, and 4 — the new adapter files, `bookmarks.rs` wiring, config changes, and `main.rs` updates:
 
 ```bash
-git add server/src/app/bookmarks.rs server/src/config.rs server/src/main.rs
-git commit -m "feat: wire ScreenshotBackend config to select Playwright or Noop screenshot provider"
+git rm server/src/adapters/screenshot.rs
+git add server/src/adapters/screenshot/ server/src/app/bookmarks.rs server/src/config.rs server/src/main.rs
+git commit -m "feat: add Playwright and Noop screenshot adapters, wire ScreenshotBackend config"
 ```
 
 ---
@@ -718,7 +710,7 @@ RUN npx tailwindcss -i static/css/input.css -o static/css/output.css --minify
 
 - [ ] **Step 2: Build hash_password example binary**
 
-In the Rust builder stage, after the main binary build (after `cargo build --release -p boopmark-server`), add:
+In the Rust builder stage, after the **second** `cargo build --release -p boopmark-server` (the one after `COPY server/ server/` and `RUN touch server/src/main.rs`, currently line 13 — this is the real build, not the cache-warming build on line 8), add:
 ```dockerfile
 RUN cargo build --release -p boopmark-server --example hash_password
 ```
@@ -1257,22 +1249,22 @@ git commit -m "docs: add CONTRIBUTING.md for open-source contributors"
 ### Task 15: Clean Up Stale References
 
 **Files:**
-- Modify: `CLAUDE.md` (if it references `ENABLE_LOCAL_AUTH`)
+- Modify: `AGENTS.md` (the canonical file — `CLAUDE.md` is a symlink to it)
 
 - [ ] **Step 1: Update stale ENABLE_LOCAL_AUTH references**
 
-`CLAUDE.md` (line 24) references `ENABLE_LOCAL_AUTH=1` which was replaced by `LOGIN_ADAPTER`. Update the "Local Auth (Development)" section in `CLAUDE.md` to reference `LOGIN_ADAPTER=local_password` instead.
+`AGENTS.md` (line 24) references `ENABLE_LOCAL_AUTH=1` which was replaced by `LOGIN_ADAPTER`. Update the "Local Auth (Development)" section in `AGENTS.md` to reference `LOGIN_ADAPTER=local_password` instead. Do NOT edit `CLAUDE.md` directly — it is a symlink to `AGENTS.md`.
 
 Also search for any other stale references:
 
 Run: `grep -r "ENABLE_LOCAL_AUTH" . --include="*.md" --exclude-dir=node_modules --exclude-dir=target --exclude-dir=docs/superpowers`
 
-Update any remaining hits in non-historical documentation. README.md is already rewritten in Task 13.
+Update any remaining hits in non-historical documentation. `README.md` is already rewritten in Task 13.
 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add -A
+git add AGENTS.md
 git commit -m "chore: clean up stale ENABLE_LOCAL_AUTH references"
 ```
 
