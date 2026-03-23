@@ -12,24 +12,43 @@ Tell your AI coding agent:
 
 > Read https://raw.githubusercontent.com/willisrocks/boopmark/main/README.md and follow the installation instructions.
 
-Or follow the [Quick Start](#quick-start-self-hosting) below.
+Or follow the [Quick Start](#quick-start-self-hosting) and [CLI](#cli-boop) sections below.
 
 ### For AI agents
 
-#### Claude Code
+#### Claude Code plugin
 
-Install the `boop` CLI as a skill:
+Install the Boopmark plugin to give Claude Code the `boop` skill:
 
 ```bash
-# 1. Install the boop binary
-curl -fsSL https://raw.githubusercontent.com/willisrocks/boopmark/main/install.sh | sh
-
-# 2. Configure it to point at your Boopmark instance
-boop config set-server https://your-boopmark-instance.example.com
-boop config set-key YOUR_API_KEY
+claude plugin add willisrocks/boopmark
 ```
 
-Then add it to your project's `CLAUDE.md` or `AGENTS.md`:
+This adds the `boop` skill, which Claude Code will automatically use when you ask about bookmarks.
+
+#### CLI setup (all agents)
+
+Any AI agent with shell access can use the `boop` CLI directly:
+
+```bash
+# 1. Install the binary
+curl -fsSL https://raw.githubusercontent.com/willisrocks/boopmark/main/install.sh | sh
+
+# 2. Point at your Boopmark server (local or hosted)
+boop config set-server http://localhost:4000          # local dev
+# or
+boop config set-server https://boopmark.yourdomain.com  # your hosted instance
+
+# 3. Get your API key: log in to the Boopmark web app → Settings → Generate API Key
+boop config set-key YOUR_API_KEY
+
+# 4. Verify
+boop list
+```
+
+> **Important:** You need a running Boopmark server and a user account before the CLI will work. See [Quick Start](#quick-start-self-hosting) to set one up, then log in to the web app to generate your API key under **Settings**.
+
+To give Claude Code (or any AI agent) access without the plugin, add this to your project's `CLAUDE.md` or `AGENTS.md`:
 
 ```markdown
 ## Bookmarks
@@ -40,10 +59,6 @@ Use the `boop` CLI to save and search bookmarks:
 - `boop list` — list recent bookmarks
 - `boop add <url> --suggest` — save with AI-suggested tags and description
 ```
-
-#### Other AI agents
-
-Any agent with shell access can use the `boop` CLI. Install the binary and configure as above.
 
 ## Features
 

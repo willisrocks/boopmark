@@ -1,27 +1,27 @@
 {
   "name": "boopmark",
   "owner": {
-    "name": "Foundra",
-    "email": "hello@foundra.build"
+    "name": "willisrocks",
+    "email": "chris@willisrocks.com"
   },
   "metadata": {
-    "description": "Claude Code plugins for boopmark — CLI bookmark management"
+    "description": "Claude Code plugin for Boopmark — bookmark management for humans and AI agents"
   },
   "plugins": [
     {
       "name": "boop",
       "source": "./",
       "description": "Skills for using the boop CLI to manage bookmarks from Claude Code",
-      "version": "0.1.0",
+      "version": "0.7.1",
       "author": {
-        "name": "Foundra"
+        "name": "willisrocks"
       },
       "homepage": "https://github.com/willisrocks/boopmark",
       "repository": "https://github.com/willisrocks/boopmark",
       "license": "MIT",
-      "keywords": ["bookmarks", "cli", "boop", "boopmark"],
+      "keywords": ["bookmarks", "cli", "boop", "boopmark", "agents"],
       "category": "developer-tools",
-      "tags": ["bookmarks", "cli", "productivity"]
+      "tags": ["bookmarks", "cli", "productivity", "agents"]
     }
   ]
 }

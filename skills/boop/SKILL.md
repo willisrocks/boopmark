@@ -1,127 +1,87 @@
 ---
 name: boop
-description: This skill should be used when the user mentions "boop", "bookmarks", "boopmark", asks about managing bookmarks from the CLI, wants to add/list/search/edit/delete bookmarks, wants LLM suggestions for bookmark metadata, needs to configure or upgrade the boop CLI, or asks about "boop add", "boop list", "boop search", "boop edit", "boop suggest", "boop delete", "boop upgrade", or "boop config".
+description: Use this skill when the user mentions "boop", "bookmarks", "boopmark", wants to save/find/manage bookmarks, asks about the boop CLI, or wants to add/list/search/edit/delete/suggest/export/import bookmarks. Also use when the user asks about installing or configuring boop, getting an API key, or connecting to a Boopmark server. Trigger phrases include "boop add", "boop list", "boop search", "save this link", "bookmark this", "find my bookmarks", or any bookmark management task.
 ---
 
 # boop CLI
 
-Command-line interface for managing bookmarks on Boopmark. Single Rust binary.
+Command-line bookmark manager for [Boopmark](https://github.com/willisrocks/boopmark). Works for both humans at the terminal and AI agents with shell access.
 
-**Prerequisites:** The boop CLI must be installed. See the install section below.
+## Quick Reference
 
-## Commands Reference
+| Command | What it does |
+|---------|-------------|
+| `boop add <url>` | Save a bookmark |
+| `boop add <url> --suggest` | Save with AI-suggested title, description, and tags |
+| `boop add <url> --title "X" --tags "a,b"` | Save with explicit metadata |
+| `boop search <query>` | Search bookmarks |
+| `boop list` | List recent bookmarks |
+| `boop list --tags "rust,tools"` | Filter by tags |
+| `boop edit <id> --suggest` | AI-suggest metadata for existing bookmark |
+| `boop suggest <url>` | Preview AI suggestions without saving |
+| `boop delete <id>` | Delete a bookmark |
+| `boop export --format jsonl` | Export bookmarks |
+| `boop import <file>` | Import bookmarks |
+| `boop upgrade` | Upgrade to latest version |
+| `boop config show` | Show current configuration |
 
-| Command                                    | What it does                                           |
-|--------------------------------------------|--------------------------------------------------------|
-| `boop add <url>`                           | Add a bookmark                                         |
-| `boop add <url> --title "My Title"`        | Add a bookmark with a title                            |
-| `boop add <url> --description "Summary"`   | Add a bookmark with a description                      |
-| `boop add <url> --tags "a,b,c"`            | Add a bookmark with tags                               |
-| `boop add <url> --suggest`                 | Add a bookmark and ask the server to suggest metadata  |
-| `boop list`                                | List all bookmarks (newest first)                      |
-| `boop list --search "query"`               | List bookmarks matching a search query                 |
-| `boop list --tags "tag1,tag2"`             | List bookmarks with specific tags                      |
-| `boop list --sort oldest`                  | List bookmarks sorted oldest first                     |
-| `boop search <query>`                      | Search bookmarks                                       |
-| `boop edit <id> --title "New Title"`       | Edit an existing bookmark title                        |
-| `boop edit <id> --description "Summary"`   | Edit an existing bookmark description                  |
-| `boop edit <id> --tags "a,b,c"`            | Edit an existing bookmark's tags                       |
-| `boop edit <id> --suggest`                 | Ask the server to suggest title, description, and tags |
-| `boop suggest <url>`                       | Preview LLM suggestions without saving                 |
-| `boop delete <id>`                         | Delete a bookmark by ID                                |
-| `boop upgrade`                             | Upgrade `boop` to the latest version                   |
-| `boop config set-server <url>`             | Set the Boopmark server URL                            |
-| `boop config set-key <key>`                | Set your API key                                       |
-| `boop config show`                         | Show current configuration                             |
+## Setup (if not already configured)
 
-## Installation
+If `boop` isn't installed or configured, follow these steps:
 
-Install via the install script:
-
+**1. Install the binary:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/willisrocks/boopmark/main/install.sh | sh
 ```
 
-Install a specific version:
-
+**2. Point it at your Boopmark server:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/willisrocks/boopmark/main/install.sh | BOOP_VERSION=v0.1.0 sh
+# Local development server
+boop config set-server http://localhost:4000
+
+# Or your hosted instance
+boop config set-server https://boopmark.yourdomain.com
 ```
 
-Custom install directory:
+**3. Get your API key from the web app:**
 
+Log in to the Boopmark web app in your browser, go to **Settings**, and generate an API key. Then:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/willisrocks/boopmark/main/install.sh | BOOP_INSTALL_DIR=/usr/local/bin sh
-```
-
-Verify installation:
-
-```bash
-boop --help
-```
-
-## First-Time Setup
-
-After installing, configure the CLI to connect to your Boopmark server:
-
-```bash
-boop config set-server https://your-boopmark-instance.example.com
 boop config set-key YOUR_API_KEY
 ```
 
-Verify the configuration:
-
+**4. Verify it works:**
 ```bash
 boop config show
+boop list
 ```
 
-## Usage Examples
+> **No Boopmark server yet?** See `references/server-setup.md` for how to self-host one.
 
-Add a bookmark with explicit metadata:
+## Common Patterns
+
+**Save a link you found useful:**
 ```bash
-boop add https://example.com --title "Example Site" --description "Reference page" --tags "reference,docs"
+boop add https://example.com/article --tags "rust,async" --suggest
 ```
 
-Add a bookmark and let the server suggest missing metadata:
+**Find something you saved before:**
 ```bash
-boop add https://example.com --suggest
+boop search "rust error handling"
 ```
 
-Edit an existing bookmark description:
+**Bulk export for backup:**
 ```bash
-boop edit <bookmark-uuid> --description "Updated summary"
+boop export --format jsonl > bookmarks.jsonl
 ```
 
-Ask the server to suggest metadata for an existing bookmark:
-```bash
-boop edit <bookmark-uuid> --suggest
-```
-
-Preview suggestions without saving:
-```bash
-boop suggest https://example.com
-```
-
-Search bookmarks:
-```bash
-boop search "rust async"
-```
-
-List recent bookmarks with tag filter:
-```bash
-boop list --tags "rust" --sort newest
-```
-
-Upgrade the CLI:
-```bash
-boop upgrade
-```
-
-## Common Issues
+## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| "Server URL not configured" | Run `boop config set-server <url>` |
-| "API key not configured" | Run `boop config set-key <key>` — generate a key in the Boopmark web UI settings |
-| Binary "killed" on macOS | Gatekeeper quarantine. Run: `xattr -cr $(which boop) && codesign --force --sign - $(which boop)` |
-| `boop: command not found` | `~/.local/bin` may not be in your PATH. Add: `export PATH="$HOME/.local/bin:$PATH"` to your shell profile |
+| "Server URL not configured" | `boop config set-server <url>` |
+| "API key not configured" | Log in to Boopmark web UI → Settings → generate API key → `boop config set-key <key>` |
+| Binary "killed" on macOS | Gatekeeper quarantine: `xattr -cr $(which boop) && codesign --force --sign - $(which boop)` |
+| `boop: command not found` | Add `~/.local/bin` to PATH: `export PATH="$HOME/.local/bin:$PATH"` |
+
+For detailed installation options, version pinning, and server setup, see `references/setup-guide.md`.
