@@ -1,15 +1,57 @@
 # Boopmark
 
-A self-hostable bookmark manager built with Rust (Axum), HTMX, and Tailwind CSS. Save, tag, search, and enrich your bookmarks — with optional AI enrichment and screenshot capture.
+A fast, self-hostable bookmark manager for humans and AI agents. Built with Rust (Axum), HTMX, and Tailwind CSS, Boopmark gives you a clean web UI for saving, tagging, and searching your bookmarks — plus a CLI (`boop`) and Claude Code skill so your AI coding agents can save and retrieve bookmarks alongside you. Optional AI enrichment auto-generates tags and descriptions, and a pluggable screenshot system captures page thumbnails on save.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+## Installation
+
+### For humans
+
+Tell your AI coding agent:
+
+> Read https://raw.githubusercontent.com/foundra-build/boopmark/main/README.md and follow the installation instructions.
+
+Or follow the [Quick Start](#quick-start-self-hosting) below.
+
+### For AI agents
+
+#### Claude Code
+
+Install the `boop` CLI as a skill:
+
+```bash
+# 1. Install the boop binary
+curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | sh
+
+# 2. Configure it to point at your Boopmark instance
+boop config set-server https://your-boopmark-instance.example.com
+boop config set-key YOUR_API_KEY
+```
+
+Then add it to your project's `CLAUDE.md` or `AGENTS.md`:
+
+```markdown
+## Bookmarks
+
+Use the `boop` CLI to save and search bookmarks:
+- `boop add <url> --tags "tag1,tag2"` — save a bookmark
+- `boop search <query>` — find bookmarks
+- `boop list` — list recent bookmarks
+- `boop add <url> --suggest` — save with AI-suggested tags and description
+```
+
+#### Other AI agents
+
+Any agent with shell access can use the `boop` CLI. Install the binary and configure as above.
 
 ## Features
 
 - Save and tag bookmarks with automatic metadata extraction
 - Full-text search across titles, descriptions, and URLs
 - AI enrichment via Anthropic Claude (auto-tagging, descriptions)
-- CLI client (`boop`) for terminal-based bookmark management
+- CLI client (`boop`) for terminal and agent-based bookmark management
+- Claude Code skill support — agents can save and search bookmarks
 - Optional screenshot capture via Playwright sidecar
 - Invite-only access control with admin panel
 - Import/export (JSONL, CSV, Netscape HTML)
