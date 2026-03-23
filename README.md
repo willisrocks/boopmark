@@ -1,8 +1,22 @@
-# Boopmark
+<p align="center">
+  <img src="static/social-preview.png" alt="Boopmark — A bookmark manager for humans and AI agents" width="640">
+</p>
 
-A fast, self-hostable bookmark manager for humans and AI agents. Built with Rust (Axum), HTMX, and Tailwind CSS, Boopmark gives you a clean web UI for saving, tagging, and searching your bookmarks — plus a CLI (`boop`) and Claude Code skill so your AI coding agents can save and retrieve bookmarks alongside you. Optional AI enrichment auto-generates tags and descriptions, and a pluggable screenshot system captures page thumbnails on save.
+<p align="center">
+  <strong>A fast, self-hostable bookmark manager for humans and AI agents.</strong>
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://github.com/willisrocks/boopmark/releases"><img src="https://img.shields.io/github/v/release/willisrocks/boopmark" alt="Latest Release"></a>
+  <a href="https://github.com/willisrocks/boopmark"><img src="https://img.shields.io/github/stars/willisrocks/boopmark?style=social" alt="GitHub Stars"></a>
+</p>
+
+<p align="center">
+  Built with Rust, HTMX, and Tailwind CSS. Save, tag, and search your bookmarks from a clean web UI, a CLI (<code>boop</code>), or let your AI coding agents do it for you. Optional AI enrichment auto-generates tags and descriptions. Pluggable screenshot capture for page thumbnails.
+</p>
+
+---
 
 ## Installation
 
