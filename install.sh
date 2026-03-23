@@ -3,7 +3,7 @@ set -eu
 
 BOOP_VERSION="${BOOP_VERSION:-latest}"
 BOOP_INSTALL_DIR="${BOOP_INSTALL_DIR:-${HOME}/.local/bin}"
-BOOP_INSTALL_BASE_URL="${BOOP_INSTALL_BASE_URL:-https://github.com/foundra-build/boopmark/releases}"
+BOOP_INSTALL_BASE_URL="${BOOP_INSTALL_BASE_URL:-https://github.com/willisrocks/boopmark/releases}"
 
 main() {
     detect_platform

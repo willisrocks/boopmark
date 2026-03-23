@@ -10,7 +10,7 @@ A fast, self-hostable bookmark manager for humans and AI agents. Built with Rust
 
 Tell your AI coding agent:
 
-> Read https://raw.githubusercontent.com/foundra-build/boopmark/main/README.md and follow the installation instructions.
+> Read https://raw.githubusercontent.com/willisrocks/boopmark/main/README.md and follow the installation instructions.
 
 Or follow the [Quick Start](#quick-start-self-hosting) below.
 
@@ -22,7 +22,7 @@ Install the `boop` CLI as a skill:
 
 ```bash
 # 1. Install the boop binary
-curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/willisrocks/boopmark/main/install.sh | sh
 
 # 2. Configure it to point at your Boopmark instance
 boop config set-server https://your-boopmark-instance.example.com

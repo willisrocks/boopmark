@@ -39,19 +39,19 @@ Command-line interface for managing bookmarks on Boopmark. Single Rust binary.
 Install via the install script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/willisrocks/boopmark/main/install.sh | sh
 ```
 
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | BOOP_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/willisrocks/boopmark/main/install.sh | BOOP_VERSION=v0.1.0 sh
 ```
 
 Custom install directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/foundra-build/boopmark/main/install.sh | BOOP_INSTALL_DIR=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/willisrocks/boopmark/main/install.sh | BOOP_INSTALL_DIR=/usr/local/bin sh
 ```
 
 Verify installation:

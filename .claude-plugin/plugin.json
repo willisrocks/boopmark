@@ -4,9 +4,9 @@
   "description": "Claude Code plugin for managing bookmarks with the boop CLI",
   "author": {
     "name": "Foundra",
-    "url": "https://github.com/foundra-build"
+    "url": "https://github.com/willisrocks"
   },
-  "repository": "https://github.com/foundra-build/boopmark",
+  "repository": "https://github.com/willisrocks/boopmark",
   "license": "MIT",
   "keywords": ["bookmarks", "cli", "boop", "boopmark"]
 }

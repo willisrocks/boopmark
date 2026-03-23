@@ -16,8 +16,8 @@
       "author": {
         "name": "Foundra"
       },
-      "homepage": "https://github.com/foundra-build/boopmark",
-      "repository": "https://github.com/foundra-build/boopmark",
+      "homepage": "https://github.com/willisrocks/boopmark",
+      "repository": "https://github.com/willisrocks/boopmark",
       "license": "MIT",
       "keywords": ["bookmarks", "cli", "boop", "boopmark"],
       "category": "developer-tools",

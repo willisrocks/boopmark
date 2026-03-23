@@ -68,7 +68,7 @@ make_harness() {
 # --- Helper: extract detect_platform + construct_url and print TARGET/URL ---
 run_detection() {
     _uname_dir="$1"
-    _base_url="${2:-https://github.com/foundra-build/boopmark/releases}"
+    _base_url="${2:-https://github.com/willisrocks/boopmark/releases}"
     _version="${3:-latest}"
     _harness="$TMPDIR_ROOT/harness-$$.sh"
     make_harness "$_harness"
