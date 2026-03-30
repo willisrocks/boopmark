@@ -137,9 +137,7 @@ mod tests {
         }
     }
 
-    fn build_service(
-        repo: Arc<FakeInviteRepository>,
-    ) -> InviteService<FakeInviteRepository> {
+    fn build_service(repo: Arc<FakeInviteRepository>) -> InviteService<FakeInviteRepository> {
         InviteService::new(repo)
     }
 
@@ -259,11 +257,7 @@ mod tests {
         let claimer = Uuid::new_v4();
         service.claim_invite("claimme", claimer).await.unwrap();
 
-        let found = repo
-            .find_by_token("claimme")
-            .await
-            .unwrap()
-            .unwrap();
+        let found = repo.find_by_token("claimme").await.unwrap().unwrap();
         assert_eq!(found.claimed_by, Some(claimer));
     }
 
@@ -277,11 +271,7 @@ mod tests {
 
         service.revoke_invite(invite_id).await.unwrap();
 
-        let found = repo
-            .find_by_token("revokeme")
-            .await
-            .unwrap()
-            .unwrap();
+        let found = repo.find_by_token("revokeme").await.unwrap().unwrap();
         assert!(found.revoked_at.is_some());
     }
 }

@@ -1,5 +1,5 @@
 use crate::domain::bookmark::*;
-use crate::domain::error::DomainError;
+use crate::domain::error::{CF_CHALLENGE_MSG, DomainError};
 use crate::domain::ports::bookmark_repo::BookmarkRepository;
 use crate::domain::ports::metadata::MetadataExtractor;
 use crate::domain::ports::screenshot::ScreenshotProvider;
@@ -56,22 +56,30 @@ where
         mut input: CreateBookmark,
     ) -> Result<Bookmark, DomainError> {
         if needs_metadata(&input) {
-            // Try metadata extraction for title/description and og:image
-            if let Ok(meta) = self.metadata.extract(&input.url).await
-                && let Some(image_url) = merge_metadata(&mut input, meta) {
-                    // og:image found — download and store it
-                    if let Ok(stored_url) = self.download_and_store_image(&image_url).await {
+            let mut cf_blocked = false;
+            match self.metadata.extract(&input.url).await {
+                Ok(meta) => {
+                    if let Some(image_url) = merge_metadata(&mut input, meta)
+                        && let Ok(stored_url) = self.download_and_store_image(&image_url).await
+                    {
                         input.image_url = Some(stored_url);
                     }
                 }
-            // Fall back to screenshot service if still no image
+                Err(e) => {
+                    cf_blocked = e.to_string().contains(CF_CHALLENGE_MSG);
+                    tracing::warn!(url = %input.url, error = %e, "metadata extraction failed");
+                }
+            }
+            // Fall back to screenshot service if still no image (skip if CF-blocked)
             if input.image_url.is_none()
-                && let Ok(bytes) = self.screenshot.capture(&input.url).await {
-                    let key = format!("images/{}.jpg", Uuid::new_v4());
-                    if let Ok(stored_url) = self.storage.put(&key, bytes, "image/jpeg").await {
-                        input.image_url = Some(stored_url);
-                    }
+                && !cf_blocked
+                && let Ok(bytes) = self.screenshot.capture(&input.url).await
+            {
+                let key = format!("images/{}.jpg", Uuid::new_v4());
+                if let Ok(stored_url) = self.storage.put(&key, bytes, "image/jpeg").await {
+                    input.image_url = Some(stored_url);
                 }
+            }
         }
 
         // Extract domain from URL if not set
@@ -335,10 +343,7 @@ where
             };
 
             if needs_fix {
-                match self
-                    .fetch_and_store_image(&bookmark.url)
-                    .await
-                {
+                match self.fetch_and_store_image(&bookmark.url).await {
                     Ok(new_url) => {
                         if self
                             .repo
@@ -379,21 +384,23 @@ where
     }
 
     /// Try og:image scrape first; fall back to screenshot sidecar.
-    async fn fetch_and_store_image(
-        &self,
-        page_url: &str,
-    ) -> Result<String, DomainError> {
-        // 1. Try og:image
-        if let Ok(meta) = self.metadata.extract(page_url).await
-            && let Some(image_url) = meta.image_url
-            && let Ok(stored) = self.download_and_store_image(&image_url).await
-        {
-            return Ok(stored);
+    /// Skips screenshot if Cloudflare challenge was detected.
+    async fn fetch_and_store_image(&self, page_url: &str) -> Result<String, DomainError> {
+        match self.metadata.extract(page_url).await {
+            Ok(meta) => {
+                if let Some(image_url) = meta.image_url
+                    && let Ok(stored) = self.download_and_store_image(&image_url).await
+                {
+                    return Ok(stored);
+                }
+            }
+            Err(e) if e.to_string().contains(CF_CHALLENGE_MSG) => {
+                return Err(e);
+            }
+            Err(_) => {}
         }
 
-        // 2. Fall back to screenshot sidecar
         let bytes = self.screenshot.capture(page_url).await?;
-
         let key = format!("images/{}.jpg", Uuid::new_v4());
         self.storage.put(&key, bytes, "image/jpeg").await
     }

@@ -9,6 +9,8 @@ use adapters::login::google::GoogleLoginProvider;
 use adapters::login::local_password::LocalPasswordLoginProvider;
 use adapters::metadata::fallback::FallbackMetadataExtractor;
 use adapters::metadata::html::HtmlMetadataExtractor;
+use adapters::metadata::iframely::IframelyExtractor;
+use adapters::metadata::opengraph_io::OpengraphIoExtractor;
 use adapters::postgres::PostgresPool;
 use adapters::screenshot::noop::NoopScreenshot;
 use adapters::screenshot::playwright::PlaywrightScreenshot;
@@ -20,7 +22,7 @@ use app::enrichment::EnrichmentService;
 use app::invite::InviteService;
 use app::secrets::SecretBox;
 use app::settings::SettingsService;
-use config::{Config, LoginAdapter, ScreenshotBackend, StorageBackend};
+use config::{Config, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, StorageBackend};
 use domain::ports::llm_enricher::LlmEnricher;
 use domain::ports::login_provider::LoginProvider;
 use domain::ports::screenshot::ScreenshotProvider;
@@ -50,10 +52,28 @@ async fn main() {
     let db = Arc::new(PostgresPool::new(pool));
 
     let html_extractor = HtmlMetadataExtractor::new();
-    let extractors: Vec<Box<dyn domain::ports::metadata::MetadataExtractor>> =
+    let mut extractors: Vec<Box<dyn domain::ports::metadata::MetadataExtractor>> =
         vec![Box::new(html_extractor)];
-    // Fallback adapters are wired in Task 7 after they are implemented.
-    // For now, the chain always has just the HTML extractor.
+
+    match &config.metadata_fallback_backend {
+        MetadataFallbackBackend::Iframely => {
+            let api_key = config
+                .iframely_api_key
+                .clone()
+                .expect("IFRAMELY_API_KEY required when METADATA_FALLBACK_BACKEND=iframely");
+            tracing::info!("metadata fallback: iframely");
+            extractors.push(Box::new(IframelyExtractor::new(api_key)));
+        }
+        MetadataFallbackBackend::OpengraphIo => {
+            let api_key = config.opengraph_io_api_key.clone().expect(
+                "OPENGRAPH_IO_API_KEY required when METADATA_FALLBACK_BACKEND=opengraph_io",
+            );
+            tracing::info!("metadata fallback: opengraph.io");
+            extractors.push(Box::new(OpengraphIoExtractor::new(api_key)));
+        }
+        MetadataFallbackBackend::None => {}
+    }
+
     let metadata = Arc::new(FallbackMetadataExtractor::new(extractors));
     let metadata_for_enrichment = metadata.clone();
 
@@ -89,8 +109,7 @@ async fn main() {
             )
         }
         StorageBackend::S3 => {
-            let mut s3_config_loader =
-                aws_config::defaults(aws_config::BehaviorVersion::latest());
+            let mut s3_config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
             if let Some(endpoint) = &config.s3_endpoint {
                 s3_config_loader = s3_config_loader.endpoint_url(endpoint);
             }
@@ -98,24 +117,17 @@ async fn main() {
                 (&config.s3_access_key, &config.s3_secret_key)
             {
                 s3_config_loader = s3_config_loader.credentials_provider(
-                    aws_sdk_s3::config::Credentials::new(
-                        access_key,
-                        secret_key,
-                        None,
-                        None,
-                        "env",
-                    ),
+                    aws_sdk_s3::config::Credentials::new(access_key, secret_key, None, None, "env"),
                 );
             }
-            s3_config_loader = s3_config_loader.region(aws_sdk_s3::config::Region::new(
-                config.s3_region.clone(),
-            ));
+            s3_config_loader =
+                s3_config_loader.region(aws_sdk_s3::config::Region::new(config.s3_region.clone()));
             let s3_config = s3_config_loader.load().await;
             let s3_client = aws_sdk_s3::Client::new(&s3_config);
-            let images_public_url =
-                config.s3_images_public_url.clone().unwrap_or_else(|| {
-                    format!("https://{}.s3.amazonaws.com", config.s3_images_bucket)
-                });
+            let images_public_url = config
+                .s3_images_public_url
+                .clone()
+                .unwrap_or_else(|| format!("https://{}.s3.amazonaws.com", config.s3_images_bucket));
             let storage = Arc::new(S3Storage::new(
                 s3_client.clone(),
                 config.s3_images_bucket.clone(),

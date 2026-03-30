@@ -26,15 +26,9 @@ pub fn routes() -> Router<AppState> {
         .route("/invite/{token}", get(invite::invite_landing))
         .route("/admin", get(admin::admin_page))
         .route("/admin/invites", post(admin::create_invite))
-        .route(
-            "/admin/invites/{id}/revoke",
-            post(admin::revoke_invite),
-        )
+        .route("/admin/invites/{id}/revoke", post(admin::revoke_invite))
         .route("/admin/users/{id}/role", post(admin::update_user_role))
-        .route(
-            "/admin/users/{id}/deactivate",
-            post(admin::deactivate_user),
-        )
+        .route("/admin/users/{id}/deactivate", post(admin::deactivate_user))
         .merge(auth::routes())
         .merge(settings::routes())
 }

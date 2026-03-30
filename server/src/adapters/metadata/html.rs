@@ -74,8 +74,7 @@ impl MetadataExtractor for HtmlMetadataExtractor {
             let description = select_meta(&document, "og:description")
                 .or_else(|| select_meta_name(&document, "description"));
 
-            let image_url =
-                extract_image_url(&document).map(|img| resolve_url(&url_str, &img));
+            let image_url = extract_image_url(&document).map(|img| resolve_url(&url_str, &img));
 
             Ok(UrlMetadata {
                 title,

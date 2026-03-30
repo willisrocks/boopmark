@@ -135,7 +135,7 @@ fn llm_settings_encryption_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        llm_settings_encryption_key, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend,
+        LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, llm_settings_encryption_key,
     };
 
     /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.

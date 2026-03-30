@@ -83,11 +83,7 @@ pub async fn handle_authenticated_identity(
                         Some(_invite) => {
                             match state
                                 .auth
-                                .upsert_user(
-                                    identity.email,
-                                    identity.name,
-                                    identity.image,
-                                )
+                                .upsert_user(identity.email, identity.name, identity.image)
                                 .await
                             {
                                 Ok(user) => {
@@ -99,10 +95,7 @@ pub async fn handle_authenticated_identity(
                                             let jar = jar
                                                 .add(cookie)
                                                 .remove(Cookie::build("invite_token").path("/"));
-                                            (
-                                                jar,
-                                                Redirect::to("/bookmarks").into_response(),
-                                            )
+                                            (jar, Redirect::to("/bookmarks").into_response())
                                         }
                                         Err(e) => {
                                             tracing::error!("Failed to create session: {e}");
@@ -118,8 +111,7 @@ pub async fn handle_authenticated_identity(
                                     tracing::error!("Failed to create user: {e}");
                                     (
                                         jar,
-                                        Redirect::to("/auth/login?error=internal")
-                                            .into_response(),
+                                        Redirect::to("/auth/login?error=internal").into_response(),
                                     )
                                 }
                             }
@@ -129,17 +121,14 @@ pub async fn handle_authenticated_identity(
                             let jar = jar.remove(Cookie::build("invite_token").path("/"));
                             (
                                 jar,
-                                Redirect::to("/auth/login?error=invite_invalid")
-                                    .into_response(),
+                                Redirect::to("/auth/login?error=invite_invalid").into_response(),
                             )
                         }
                     }
                 }
                 None => {
                     // No invite — show "invite only" page
-                    let body = InviteOnlyPage
-                        .render()
-                        .unwrap_or_default();
+                    let body = InviteOnlyPage.render().unwrap_or_default();
                     (jar, Html(body).into_response())
                 }
             }

@@ -282,11 +282,7 @@ mod tests {
             Ok(self.users.lock().unwrap().clone())
         }
 
-        async fn update_role(
-            &self,
-            user_id: Uuid,
-            role: UserRole,
-        ) -> Result<(), DomainError> {
+        async fn update_role(&self, user_id: Uuid, role: UserRole) -> Result<(), DomainError> {
             let mut users = self.users.lock().unwrap();
             if let Some(u) = users.iter_mut().find(|u| u.id == user_id) {
                 u.role = role;
@@ -415,7 +411,11 @@ mod tests {
     fn build_service(
         user_repo: Arc<FakeUserRepo>,
     ) -> AuthService<FakeUserRepo, FakeSessionRepo, FakeApiKeyRepo> {
-        build_service_full(user_repo, Arc::new(FakeSessionRepo::new()), Arc::new(FakeApiKeyRepo::new()))
+        build_service_full(
+            user_repo,
+            Arc::new(FakeSessionRepo::new()),
+            Arc::new(FakeApiKeyRepo::new()),
+        )
     }
 
     fn build_service_full(
@@ -491,10 +491,12 @@ mod tests {
     async fn validate_session_fails_for_deactivated_user() {
         let user_repo = Arc::new(FakeUserRepo::new());
         let session_repo = Arc::new(FakeSessionRepo::new());
-        let user_id =
-            user_repo.add_user_ex("deactivated@example.com", None, Some(Utc::now()));
-        let service =
-            build_service_full(user_repo, session_repo.clone(), Arc::new(FakeApiKeyRepo::new()));
+        let user_id = user_repo.add_user_ex("deactivated@example.com", None, Some(Utc::now()));
+        let service = build_service_full(
+            user_repo,
+            session_repo.clone(),
+            Arc::new(FakeApiKeyRepo::new()),
+        );
 
         let token = service.create_session(user_id).await.unwrap();
         let result = service.validate_session(&token).await;
@@ -505,15 +507,13 @@ mod tests {
     async fn validate_api_key_fails_for_deactivated_user() {
         let user_repo = Arc::new(FakeUserRepo::new());
         let api_key_repo = Arc::new(FakeApiKeyRepo::new());
-        let user_id =
-            user_repo.add_user_ex("deactivated@example.com", None, Some(Utc::now()));
+        let user_id = user_repo.add_user_ex("deactivated@example.com", None, Some(Utc::now()));
 
         let raw_key = "boop_testkey123";
         let hashed_key = hash_api_key(raw_key);
         api_key_repo.add_key(user_id, &hashed_key);
 
-        let service =
-            build_service_full(user_repo, Arc::new(FakeSessionRepo::new()), api_key_repo);
+        let service = build_service_full(user_repo, Arc::new(FakeSessionRepo::new()), api_key_repo);
 
         let result = service.validate_api_key(raw_key).await;
         assert!(matches!(result, Err(DomainError::Unauthorized)));
