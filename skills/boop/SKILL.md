@@ -17,8 +17,8 @@ Command-line bookmark manager for [Boopmark](https://github.com/willisrocks/boop
 | `boop search <query>` | Search bookmarks |
 | `boop list` | List recent bookmarks |
 | `boop list --tags "rust,tools"` | Filter by tags |
-| `boop edit <bookmark-uuid> --suggest` | LLM-suggest metadata for existing bookmark |
-| `boop edit <bookmark-uuid> --description "Y"` | Update bookmark description |
+| `boop edit <id> --suggest` | LLM-suggest metadata for existing bookmark (pass a bookmark-uuid) |
+| `boop edit <id> --description "Y"` | Update bookmark description |
 | `boop suggest <url>` | Preview AI suggestions without saving |
 | `boop delete <id>` | Delete a bookmark |
 | `boop export --format jsonl` | Export bookmarks |
