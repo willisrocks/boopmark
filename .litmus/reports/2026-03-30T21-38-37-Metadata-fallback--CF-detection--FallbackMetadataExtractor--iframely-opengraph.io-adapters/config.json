@@ -1,0 +1,11 @@
+{
+  "session": "2026-03-30T21-38-37-Metadata-fallback--CF-detection--FallbackMetadataExtractor--iframely-opengraph.io-adapters",
+  "session_dir": "/Users/chrisfenton/Code/personal/boopmark/.worktrees/metadata-fallback/.litmus/reports/2026-03-30T21-38-37-Metadata-fallback--CF-detection--FallbackMetadataExtractor--iframely-opengraph.io-adapters",
+  "env": "local",
+  "url": "http://localhost:4000",
+  "driver": "curl",
+  "parallelism": 2,
+  "description": "Metadata-fallback--CF-detection--FallbackMetadataExtractor--iframely-opengraph.io-adapters",
+  "litmus_version": "0.1.0",
+  "timestamp": "2026-03-30T21:38:37.276356+00:00"
+}

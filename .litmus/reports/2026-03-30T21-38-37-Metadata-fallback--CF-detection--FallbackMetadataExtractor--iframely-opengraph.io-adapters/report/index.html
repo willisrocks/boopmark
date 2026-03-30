@@ -1,0 +1,1362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Litmus Proof Report</title>
+  <style>
+    /* ── Design tokens ─────────────────────────────────────────── */
+    :root {
+      --bg:          #09090b;
+      --bg-card:     #18181b;
+      --bg-raised:   #1f1f23;
+      --border:      #27272a;
+      --border-muted:#3f3f46;
+      --text:        #fafafa;
+      --text-muted:  #a1a1aa;
+      --text-dim:    #71717a;
+      --radius:      8px;
+      --radius-sm:   4px;
+      --shadow:      0 1px 3px rgba(0,0,0,.4), 0 1px 2px rgba(0,0,0,.3);
+      --shadow-lg:   0 8px 32px rgba(0,0,0,.6);
+
+      --proven:      #22c55e;
+      --proven-bg:   rgba(34,197,94,.12);
+      --partial:     #f59e0b;
+      --partial-bg:  rgba(245,158,11,.12);
+      --disproven:   #ef4444;
+      --disproven-bg:rgba(239,68,68,.12);
+      --unverifiable:#6b7280;
+      --unverifiable-bg:rgba(107,114,128,.12);
+    }
+
+    /* ── Reset / base ──────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    a { color: inherit; }
+
+    /* ── Layout ────────────────────────────────────────────────── */
+    .page { max-width: 1200px; margin: 0 auto; padding: 0 24px 80px; }
+
+    /* ── Verdict banner ────────────────────────────────────────── */
+    #verdict-banner {
+      width: 100%;
+      padding: 32px 24px;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 32px;
+    }
+
+    .verdict-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .verdict-level {
+      font-size: 48px;
+      font-weight: 800;
+      letter-spacing: -.02em;
+      line-height: 1;
+      margin-bottom: 16px;
+    }
+
+    .verdict-summary {
+      font-size: 16px;
+      color: var(--text-muted);
+      max-width: 720px;
+      margin: 0 auto;
+    }
+
+    .verdict--PROVEN    .verdict-level { color: var(--proven); }
+    .verdict--PARTIAL   .verdict-level { color: var(--partial); }
+    .verdict--DISPROVEN .verdict-level { color: var(--disproven); }
+    .verdict--UNVERIFIABLE .verdict-level { color: var(--unverifiable); }
+
+    .verdict--PROVEN    { background: var(--proven-bg); }
+    .verdict--PARTIAL   { background: var(--partial-bg); }
+    .verdict--DISPROVEN { background: var(--disproven-bg); }
+    .verdict--UNVERIFIABLE { background: var(--unverifiable-bg); }
+
+    /* ── Cards ─────────────────────────────────────────────────── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px 24px;
+      margin-bottom: 24px;
+    }
+
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+
+    /* ── Section headings ──────────────────────────────────────── */
+    .section { margin-bottom: 32px; }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    /* ── Summary grid ──────────────────────────────────────────── */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+    }
+
+    .summary-item { }
+    .summary-item .label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+    }
+    .summary-item .value {
+      font-size: 14px;
+      color: var(--text);
+      word-break: break-all;
+    }
+
+    .scenario-breakdown {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── Badges ────────────────────────────────────────────────── */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 10px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .04em;
+    }
+
+    .badge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+
+    .badge--PROVEN    { background: var(--proven-bg);    color: var(--proven);    }
+    .badge--PARTIAL   { background: var(--partial-bg);   color: var(--partial);   }
+    .badge--DISPROVEN { background: var(--disproven-bg); color: var(--disproven); }
+    .badge--UNVERIFIABLE { background: var(--unverifiable-bg); color: var(--unverifiable); }
+
+    .badge-dot--PROVEN    { background: var(--proven);    }
+    .badge-dot--PARTIAL   { background: var(--partial);   }
+    .badge-dot--DISPROVEN { background: var(--disproven); }
+    .badge-dot--UNVERIFIABLE { background: var(--unverifiable); }
+
+    /* ── Collapsible ───────────────────────────────────────────── */
+    .collapsible-trigger {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+      width: 100%;
+      background: none;
+      border: none;
+      color: var(--text);
+      text-align: left;
+      padding: 0;
+    }
+
+    .collapsible-trigger::-webkit-details-marker { display: none; }
+
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+
+    .chevron {
+      width: 16px;
+      height: 16px;
+      color: var(--text-dim);
+      transition: transform .15s ease;
+      flex-shrink: 0;
+    }
+
+    details[open] .chevron { transform: rotate(90deg); }
+
+    .collapsible-body {
+      padding-top: 16px;
+    }
+
+    /* ── Proof plan section ────────────────────────────────────── */
+    .plan-meta {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    .plan-meta-item .label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+    }
+
+    .plan-meta-item .value {
+      font-size: 14px;
+      color: var(--text);
+    }
+
+    .review-round {
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      margin-top: 10px;
+    }
+
+    .review-round-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .review-round ul {
+      padding-left: 18px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .review-round ul li { margin-bottom: 4px; }
+
+    .converged-note {
+      font-size: 12px;
+      color: var(--text-dim);
+      font-style: italic;
+    }
+
+    /* ── Evidence gallery filters ──────────────────────────────── */
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .filter-btn {
+      padding: 5px 14px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: background .1s, color .1s, border-color .1s;
+    }
+
+    .filter-btn:hover { background: var(--bg-raised); color: var(--text); }
+
+    .filter-btn.active--ALL       { background: var(--bg-raised); color: var(--text); border-color: var(--border-muted); }
+    .filter-btn.active--PROVEN    { background: var(--proven-bg);    color: var(--proven);    border-color: var(--proven);    }
+    .filter-btn.active--PARTIAL   { background: var(--partial-bg);   color: var(--partial);   border-color: var(--partial);   }
+    .filter-btn.active--DISPROVEN { background: var(--disproven-bg); color: var(--disproven); border-color: var(--disproven); }
+    .filter-btn.active--UNVERIFIABLE { background: var(--unverifiable-bg); color: var(--unverifiable); border-color: var(--unverifiable); }
+
+    .gallery-controls {
+      display: flex;
+      gap: 8px;
+      margin-left: auto;
+    }
+
+    .ctrl-btn {
+      padding: 5px 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: background .1s, color .1s;
+    }
+
+    .ctrl-btn:hover { background: var(--bg-raised); color: var(--text); }
+
+    /* ── Scenario card ─────────────────────────────────────────── */
+    .scenario-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 16px;
+      overflow: hidden;
+      transition: border-color .15s;
+    }
+
+    .scenario-card:hover { border-color: var(--border-muted); }
+
+    .scenario-card--DISPROVEN { border-left: 3px solid var(--disproven); }
+    .scenario-card--PARTIAL   { border-left: 3px solid var(--partial); }
+    .scenario-card--PROVEN    { border-left: 3px solid var(--proven); }
+    .scenario-card--UNVERIFIABLE { border-left: 3px solid var(--unverifiable); }
+
+    .scenario-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 16px 20px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .scenario-header:hover { background: var(--bg-raised); }
+
+    .scenario-id {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: ui-monospace, monospace;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .scenario-claim {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text);
+      flex: 1;
+    }
+
+    .scenario-body {
+      padding: 0 20px 20px;
+      border-top: 1px solid var(--border);
+    }
+
+    .outcome-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin: 16px 0;
+    }
+
+    @media (max-width: 640px) {
+      .outcome-row { grid-template-columns: 1fr; }
+    }
+
+    .outcome-box {
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+    }
+
+    .outcome-box .label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 6px;
+    }
+
+    .outcome-box.expected .label { color: var(--text-dim); }
+    .outcome-box.actual   .label { color: var(--text-muted); }
+
+    .outcome-box p {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    /* ── Screenshot gallery ────────────────────────────────────── */
+    .screenshots-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 10px;
+      margin: 16px 0;
+    }
+
+    .screenshot-thumb {
+      position: relative;
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      aspect-ratio: 16/10;
+      background: var(--bg-raised);
+      transition: border-color .15s, transform .1s;
+    }
+
+    .screenshot-thumb:hover {
+      border-color: var(--border-muted);
+      transform: translateY(-1px);
+    }
+
+    .screenshot-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .screenshot-placeholder {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      color: var(--text-dim);
+      font-size: 11px;
+      text-align: center;
+      padding: 8px;
+    }
+
+    .screenshot-placeholder svg {
+      width: 24px;
+      height: 24px;
+      opacity: .4;
+    }
+
+    .screenshot-caption {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: linear-gradient(transparent, rgba(0,0,0,.85));
+      color: #fff;
+      font-size: 10px;
+      padding: 16px 8px 6px;
+      line-height: 1.3;
+    }
+
+    .screenshot-step {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      background: rgba(0,0,0,.7);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 9999px;
+    }
+
+    /* ── Log section ───────────────────────────────────────────── */
+    .log-block {
+      margin-top: 12px;
+    }
+
+    .log-block details {
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      margin-bottom: 8px;
+    }
+
+    .log-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .log-type-tag {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: var(--bg);
+      color: var(--text-dim);
+    }
+
+    .log-source {
+      color: var(--text-dim);
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+    }
+
+    .log-ts {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: ui-monospace, monospace;
+    }
+
+    .log-content {
+      padding: 0 12px 12px;
+    }
+
+    .log-content pre {
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 12px;
+      color: #a3e635;
+      background: #0a0a0a;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.6;
+    }
+
+    /* ── Fix history ───────────────────────────────────────────── */
+    .fix-history {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    .fix-history-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+    }
+
+    .fix-round {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+
+    .fix-round-num {
+      flex-shrink: 0;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-dim);
+    }
+
+    .fix-round-body { flex: 1; }
+    .fix-round-action { color: var(--text-muted); margin-bottom: 3px; }
+    .fix-round-result { font-size: 12px; color: var(--text-dim); }
+
+    /* ── Fix loop timeline ─────────────────────────────────────── */
+    .timeline {
+      position: relative;
+      padding-left: 24px;
+    }
+
+    .timeline::before {
+      content: '';
+      position: absolute;
+      left: 7px;
+      top: 10px;
+      bottom: 10px;
+      width: 2px;
+      background: var(--border);
+    }
+
+    .timeline-entry {
+      position: relative;
+      margin-bottom: 20px;
+    }
+
+    .timeline-dot {
+      position: absolute;
+      left: -20px;
+      top: 4px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      background: var(--bg-card);
+    }
+
+    .timeline-dot--progress { border-color: var(--partial); background: var(--partial-bg); }
+    .timeline-dot--stalled  { border-color: var(--disproven); background: var(--disproven-bg); }
+    .timeline-dot--done     { border-color: var(--proven); background: var(--proven-bg); }
+
+    .timeline-round {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      margin-bottom: 6px;
+    }
+
+    .timeline-stats {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .timeline-stat { font-size: 13px; color: var(--text-muted); }
+    .timeline-stat strong { color: var(--text); }
+
+    .timeline-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .chip {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: var(--radius-sm);
+      font-family: ui-monospace, monospace;
+    }
+
+    .chip--fixed    { background: var(--proven-bg);    color: var(--proven);    }
+    .chip--remaining{ background: var(--disproven-bg); color: var(--disproven); }
+
+    .fix-loop-exit {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-dim);
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 6px 12px;
+      margin-top: 8px;
+    }
+
+    /* ── Findings section ──────────────────────────────────────── */
+    .finding-card {
+      background: var(--disproven-bg);
+      border: 1px solid rgba(239,68,68,.3);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      margin-bottom: 16px;
+    }
+
+    .finding-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .finding-claim {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .finding-attempts {
+      font-size: 11px;
+      color: var(--text-dim);
+      flex-shrink: 0;
+      white-space: nowrap;
+      margin-top: 2px;
+    }
+
+    .finding-reason {
+      font-size: 13px;
+      color: var(--text-muted);
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+      margin-bottom: 12px;
+      line-height: 1.6;
+    }
+
+    /* ── Metadata footer ───────────────────────────────────────── */
+    .meta-footer {
+      border-top: 1px solid var(--border);
+      padding: 24px 0;
+      margin-top: 48px;
+    }
+
+    .meta-footer-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 24px;
+    }
+
+    .meta-footer-item .label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+    }
+
+    .meta-footer-item .value {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-family: ui-monospace, monospace;
+    }
+
+    /* ── Lightbox ──────────────────────────────────────────────── */
+    #lightbox {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: rgba(0,0,0,.92);
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      padding: 24px;
+    }
+
+    #lightbox.open { display: flex; }
+
+    #lightbox-img {
+      max-width: 100%;
+      max-height: calc(100vh - 100px);
+      border-radius: var(--radius);
+      object-fit: contain;
+      box-shadow: var(--shadow-lg);
+    }
+
+    #lightbox-placeholder {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      color: var(--text-muted);
+    }
+
+    #lightbox-placeholder svg { width: 64px; height: 64px; opacity: .3; }
+
+    #lightbox-caption {
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--text-muted);
+      text-align: center;
+      max-width: 600px;
+    }
+
+    #lightbox-close {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius-sm);
+      padding: 6px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    #lightbox-close:hover { background: var(--bg-raised); }
+
+    /* ── Empty states / loading ────────────────────────────────── */
+    .loading {
+      text-align: center;
+      color: var(--text-dim);
+      padding: 64px 0;
+      font-size: 15px;
+    }
+
+    .error-state {
+      text-align: center;
+      color: var(--disproven);
+      padding: 64px 0;
+    }
+
+    .error-state h2 { font-size: 18px; margin-bottom: 8px; }
+    .error-state p  { color: var(--text-dim); font-size: 13px; }
+
+    /* ── Utility ───────────────────────────────────────────────── */
+    .hidden { display: none !important; }
+    .mono   { font-family: ui-monospace, SFMono-Regular, monospace; }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 24px 0;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Verdict banner (populated by JS) -->
+  <div id="verdict-banner">
+    <div class="page">
+      <div class="verdict-label">Litmus Proof Report</div>
+      <div class="verdict-level" id="verdict-level">—</div>
+      <div class="verdict-summary" id="verdict-summary"></div>
+    </div>
+  </div>
+
+  <div class="page" id="main-content">
+    <div class="loading" id="loading">Loading proof report…</div>
+    <div class="error-state hidden" id="error-state">
+      <h2>Could not load report data</h2>
+      <p id="error-msg">Make sure data.json is in the same directory as this file.</p>
+    </div>
+  </div>
+
+  <!-- Lightbox -->
+  <div id="lightbox" role="dialog" aria-modal="true" aria-label="Screenshot viewer">
+    <button id="lightbox-close">Close ✕</button>
+    <img id="lightbox-img" src="" alt="" />
+    <div id="lightbox-placeholder">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
+        <path d="M21 15l-5-5L5 21"/>
+      </svg>
+      <p>Screenshot file not available in this preview</p>
+    </div>
+    <div id="lightbox-caption"></div>
+  </div>
+
+  <script>
+  (() => {
+    'use strict';
+
+    // ── State ──────────────────────────────────────────────────────
+    let activeFilter = 'ALL';
+    let allExpanded = false;
+
+    // ── Icons (inline SVG strings) ─────────────────────────────────
+    const icon = {
+      chevron: `<svg class="chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4l4 4-4 4"/></svg>`,
+      image: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:22px;height:22px;opacity:.35"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>`,
+    };
+
+    // ── Helpers ────────────────────────────────────────────────────
+    function el(tag, cls, html) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (html !== undefined) e.innerHTML = html;
+      return e;
+    }
+
+    function esc(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function fmtTs(iso) {
+      if (!iso) return '—';
+      try {
+        return new Date(iso).toLocaleString(undefined, {
+          year: 'numeric', month: 'short', day: 'numeric',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+        });
+      } catch { return iso; }
+    }
+
+    function confidenceCounts(scenarios) {
+      const c = { PROVEN: 0, PARTIAL: 0, DISPROVEN: 0, UNVERIFIABLE: 0 };
+      for (const s of scenarios) c[s.confidence_level] = (c[s.confidence_level] || 0) + 1;
+      return c;
+    }
+
+    // ── Badge ──────────────────────────────────────────────────────
+    function renderBadge(level) {
+      return `<span class="badge badge--${esc(level)}"><span class="badge-dot badge-dot--${esc(level)}"></span>${esc(level)}</span>`;
+    }
+
+    // ── Screenshots ────────────────────────────────────────────────
+    function renderScreenshots(screenshots) {
+      if (!screenshots || screenshots.length === 0) return '';
+      const thumbs = screenshots.map(s => `
+        <div class="screenshot-thumb" data-path="${esc(s.path)}" data-caption="${esc(s.caption)}" data-name="${esc(s.name)}" role="button" tabindex="0" aria-label="View screenshot: ${esc(s.caption)}">
+          <img src="${esc(s.path)}" alt="${esc(s.caption)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" loading="lazy" />
+          <div class="screenshot-placeholder" style="display:none">
+            ${icon.image}
+            <span>${esc(s.name)}</span>
+          </div>
+          ${s.step ? `<span class="screenshot-step">Step ${esc(s.step)}</span>` : ''}
+          ${s.caption ? `<div class="screenshot-caption">${esc(s.caption)}</div>` : ''}
+        </div>
+      `).join('');
+      return `<div class="screenshots-grid">${thumbs}</div>`;
+    }
+
+    // ── Logs ───────────────────────────────────────────────────────
+    function renderLogs(logs) {
+      if (!logs || logs.length === 0) return '';
+      const items = logs.map((l, i) => `
+        <details>
+          <summary class="log-summary">
+            ${icon.chevron}
+            <span class="log-type-tag">${esc(l.type || 'log')}</span>
+            <span class="log-source">${esc(l.source || '')}</span>
+            <span class="log-ts">${fmtTs(l.timestamp)}</span>
+          </summary>
+          <div class="log-content">
+            <pre>${esc(l.content || '')}</pre>
+          </div>
+        </details>
+      `).join('');
+      return `<div class="log-block">${items}</div>`;
+    }
+
+    // ── Fix history (per-scenario) ─────────────────────────────────
+    function renderFixHistory(fixHistory) {
+      if (!fixHistory || fixHistory.length === 0) return '';
+      const rounds = fixHistory.map(f => `
+        <div class="fix-round">
+          <div class="fix-round-num">${esc(f.round)}</div>
+          <div class="fix-round-body">
+            <div class="fix-round-action">${esc(f.action)}</div>
+            <div class="fix-round-result">${esc(f.result)}</div>
+          </div>
+        </div>
+      `).join('');
+      return `
+        <div class="fix-history">
+          <div class="fix-history-title">Fix history</div>
+          ${rounds}
+        </div>
+      `;
+    }
+
+    // ── Scenario card ──────────────────────────────────────────────
+    function renderScenarioCard(scenario) {
+      const { id, claim, confidence_level, evidence = {}, expected_outcome, actual_outcome, fix_history = [] } = scenario;
+      const screenshots = evidence.screenshots || [];
+      const logs = evidence.logs || [];
+
+      const detailsId = `scenario-${esc(id)}`;
+      return `
+        <div class="scenario-card scenario-card--${esc(confidence_level)}" data-confidence="${esc(confidence_level)}">
+          <details id="${detailsId}">
+            <summary class="scenario-header">
+              <span class="scenario-id">${esc(id)}</span>
+              <span class="scenario-claim">${esc(claim)}</span>
+              ${renderBadge(confidence_level)}
+              ${icon.chevron}
+            </summary>
+            <div class="scenario-body">
+              <div class="outcome-row">
+                <div class="outcome-box expected">
+                  <div class="label">Expected</div>
+                  <p>${esc(expected_outcome)}</p>
+                </div>
+                <div class="outcome-box actual">
+                  <div class="label">Actual</div>
+                  <p>${esc(actual_outcome)}</p>
+                </div>
+              </div>
+              ${screenshots.length > 0 ? `<div class="card-title" style="margin-top:4px;margin-bottom:8px">Screenshots (${screenshots.length})</div>` : ''}
+              ${renderScreenshots(screenshots)}
+              ${logs.length > 0 ? `<div class="card-title" style="margin-top:8px;margin-bottom:4px">Logs (${logs.length})</div>` : ''}
+              ${renderLogs(logs)}
+              ${renderFixHistory(fix_history)}
+            </div>
+          </details>
+        </div>
+      `;
+    }
+
+    // ── Findings ───────────────────────────────────────────────────
+    function renderFinding(f) {
+      const screenshots = (f.evidence && f.evidence.screenshots) || [];
+      const logs = (f.evidence && f.evidence.logs) || [];
+      return `
+        <div class="finding-card">
+          <div class="finding-header">
+            <div class="finding-claim">${esc(f.claim)}</div>
+            <div class="finding-attempts">${f.attempts} attempt${f.attempts !== 1 ? 's' : ''}</div>
+          </div>
+          <div class="finding-reason">${esc(f.reason)}</div>
+          ${screenshots.length > 0 ? `
+            <div class="card-title" style="margin-bottom:8px">Evidence (${screenshots.length} screenshot${screenshots.length !== 1 ? 's' : ''})</div>
+            ${renderScreenshots(screenshots)}
+          ` : ''}
+          ${logs.length > 0 ? `
+            <div class="card-title" style="margin-top:8px;margin-bottom:4px">Logs</div>
+            ${renderLogs(logs)}
+          ` : ''}
+        </div>
+      `;
+    }
+
+    // ── Fix loop timeline ──────────────────────────────────────────
+    function renderFixLoop(fixLoop) {
+      if (!fixLoop || !fixLoop.rounds_executed) return '';
+
+      const entries = (fixLoop.progression || []).map(p => {
+        const shrank = p.failures_after < p.failures_before;
+        const dotClass = shrank ? 'progress' : 'stalled';
+        const fixedChips = (p.fixed || []).map(id => `<span class="chip chip--fixed">${esc(id)}</span>`).join('');
+        const remainingChips = (p.remaining || []).map(id => `<span class="chip chip--remaining">${esc(id)}</span>`).join('');
+        return `
+          <div class="timeline-entry">
+            <div class="timeline-dot timeline-dot--${dotClass}"></div>
+            <div class="timeline-round">Round ${p.round}</div>
+            <div class="timeline-stats">
+              <span class="timeline-stat">Failures before: <strong>${p.failures_before}</strong></span>
+              <span class="timeline-stat">Failures after: <strong>${p.failures_after}</strong></span>
+            </div>
+            ${fixedChips ? `<div style="margin-bottom:6px"><span style="font-size:11px;color:var(--text-dim);margin-right:6px">Fixed:</span>${fixedChips}</div>` : ''}
+            ${remainingChips ? `<div><span style="font-size:11px;color:var(--text-dim);margin-right:6px">Remaining:</span>${remainingChips}</div>` : ''}
+          </div>
+        `;
+      }).join('');
+
+      const exitReasonLabel = (fixLoop.exit_reason || '').replace(/_/g, ' ');
+
+      return `
+        <div class="section">
+          <div class="section-header">
+            <h2 class="section-title">Fix Loop Timeline</h2>
+          </div>
+          <div class="card">
+            <div class="timeline">${entries}</div>
+            <div class="fix-loop-exit">
+              Exit reason: <strong>${esc(exitReasonLabel)}</strong>
+              &nbsp;·&nbsp; ${esc(fixLoop.rounds_executed)} round${fixLoop.rounds_executed !== 1 ? 's' : ''} executed
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // ── Plan review section ────────────────────────────────────────
+    function renderPlanReview(proofPlan, planReview) {
+      const roundsHtml = (planReview && planReview.findings_per_round || []).map(r => {
+        const findings = (r.findings || []).map(f => `<li>${esc(f)}</li>`).join('');
+        const converged = r.findings_count === 0;
+        return `
+          <div class="review-round">
+            <div class="review-round-header">
+              <span>Round ${r.round}</span>
+              <span>${converged ? '<span class="converged-note">No new findings — converged</span>' : `${r.findings_count} finding${r.findings_count !== 1 ? 's' : ''}`}</span>
+            </div>
+            ${findings ? `<ul>${findings}</ul>` : ''}
+          </div>
+        `;
+      }).join('');
+
+      return `
+        <div class="section">
+          <details>
+            <summary class="card" style="cursor:pointer;margin-bottom:0;list-style:none">
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <h2 class="section-title">Proof Plan</h2>
+                ${icon.chevron}
+              </div>
+              <div class="plan-meta" style="margin-top:12px">
+                <div class="plan-meta-item">
+                  <div class="label">Source</div>
+                  <div class="value">${esc(proofPlan.source)}</div>
+                </div>
+                <div class="plan-meta-item">
+                  <div class="label">Scenarios</div>
+                  <div class="value">${esc(proofPlan.scenarios_count)}</div>
+                </div>
+                <div class="plan-meta-item">
+                  <div class="label">Review Rounds</div>
+                  <div class="value">${esc(proofPlan.review_rounds)}</div>
+                </div>
+              </div>
+            </summary>
+            <div class="collapsible-body" style="margin-top:0">
+              ${roundsHtml || '<p style="color:var(--text-dim);font-size:13px">No review round data available.</p>'}
+            </div>
+          </details>
+        </div>
+      `;
+    }
+
+    // ── Main render ────────────────────────────────────────────────
+    function render(data) {
+      // Verdict banner
+      const bannerEl = document.getElementById('verdict-banner');
+      bannerEl.classList.add(`verdict--${data.verdict.level}`);
+      document.getElementById('verdict-level').textContent = data.verdict.level;
+      document.getElementById('verdict-summary').textContent = data.verdict.summary;
+      document.title = `Litmus: ${data.verdict.level} — ${data.meta.session}`;
+
+      const container = document.getElementById('main-content');
+      document.getElementById('loading').remove();
+
+      const scenarios = data.scenarios || [];
+      const findings  = data.findings  || [];
+      const counts    = confidenceCounts(scenarios);
+
+      // ── Summary card ─────────────────────────────────────────────
+      const summaryCard = el('div', 'section');
+      summaryCard.innerHTML = `
+        <div class="card">
+          <div class="card-title">Summary</div>
+          <div class="summary-grid">
+            <div class="summary-item">
+              <div class="label">Feature / Session</div>
+              <div class="value mono">${esc(data.meta.session)}</div>
+            </div>
+            <div class="summary-item">
+              <div class="label">Environment</div>
+              <div class="value">${esc(data.meta.env)}</div>
+            </div>
+            <div class="summary-item">
+              <div class="label">URL</div>
+              <div class="value mono">${esc(data.meta.url)}</div>
+            </div>
+            <div class="summary-item">
+              <div class="label">Driver</div>
+              <div class="value mono">${esc(data.meta.driver)}</div>
+            </div>
+            <div class="summary-item">
+              <div class="label">Timestamp</div>
+              <div class="value">${fmtTs(data.meta.timestamp)}</div>
+            </div>
+            <div class="summary-item">
+              <div class="label">Spec Source</div>
+              <div class="value">${esc(data.meta.spec_source)}</div>
+            </div>
+          </div>
+          <div class="scenario-breakdown">
+            ${Object.entries(counts).filter(([,n]) => n > 0).map(([level, n]) =>
+              `<span class="badge badge--${esc(level)}"><span class="badge-dot badge-dot--${esc(level)}"></span>${n} ${esc(level)}</span>`
+            ).join('')}
+            <span style="font-size:12px;color:var(--text-dim);margin-left:4px">${scenarios.length} scenario${scenarios.length !== 1 ? 's' : ''} total</span>
+          </div>
+        </div>
+      `;
+      container.appendChild(summaryCard);
+
+      // ── Proof plan ────────────────────────────────────────────────
+      const planSection = el('div');
+      planSection.innerHTML = renderPlanReview(data.proof_plan, data.plan_review);
+      container.appendChild(planSection);
+
+      // ── Findings (prominent) ──────────────────────────────────────
+      if (findings.length > 0) {
+        const findingsSection = el('div', 'section');
+        findingsSection.innerHTML = `
+          <div class="section-header">
+            <h2 class="section-title">Findings <span style="font-size:14px;color:var(--disproven);font-weight:700;margin-left:6px">${findings.length}</span></h2>
+          </div>
+          ${findings.map(renderFinding).join('')}
+        `;
+        container.appendChild(findingsSection);
+      }
+
+      // ── Evidence gallery ──────────────────────────────────────────
+      const gallerySection = el('div', 'section');
+      const filterCounts = {
+        ALL: scenarios.length,
+        ...Object.fromEntries(Object.entries(counts).filter(([,n]) => n > 0))
+      };
+
+      const filterBtns = Object.entries(filterCounts).map(([level, n]) =>
+        `<button class="filter-btn${level === 'ALL' ? ' active--ALL' : ''}" data-filter="${level}">${level} (${n})</button>`
+      ).join('');
+
+      gallerySection.innerHTML = `
+        <div class="section-header">
+          <h2 class="section-title">Evidence Gallery</h2>
+        </div>
+        <div class="filter-bar">
+          ${filterBtns}
+          <div class="gallery-controls">
+            <button class="ctrl-btn" id="expand-all">Expand all</button>
+            <button class="ctrl-btn" id="collapse-all">Collapse all</button>
+          </div>
+        </div>
+        <div id="scenario-list">
+          ${scenarios.map(renderScenarioCard).join('')}
+        </div>
+      `;
+      container.appendChild(gallerySection);
+
+      // ── Fix loop timeline ─────────────────────────────────────────
+      if (data.fix_loop && data.fix_loop.rounds_executed > 0) {
+        const fixSection = el('div');
+        fixSection.innerHTML = renderFixLoop(data.fix_loop);
+        container.appendChild(fixSection);
+      }
+
+      // ── Metadata footer ───────────────────────────────────────────
+      const footer = el('div', 'meta-footer');
+      footer.innerHTML = `
+        <div class="meta-footer-grid">
+          <div class="meta-footer-item">
+            <div class="label">Litmus Version</div>
+            <div class="value">${esc(data.meta.litmus_version)}</div>
+          </div>
+          <div class="meta-footer-item">
+            <div class="label">Driver</div>
+            <div class="value">${esc(data.meta.driver)}</div>
+          </div>
+          <div class="meta-footer-item">
+            <div class="label">Parallelism</div>
+            <div class="value">${esc(data.meta.parallelism)}</div>
+          </div>
+          <div class="meta-footer-item">
+            <div class="label">Session</div>
+            <div class="value">${esc(data.meta.session)}</div>
+          </div>
+          <div class="meta-footer-item">
+            <div class="label">Generated</div>
+            <div class="value">${fmtTs(data.meta.timestamp)}</div>
+          </div>
+        </div>
+      `;
+      container.appendChild(footer);
+
+      // ── Bind interactions ─────────────────────────────────────────
+      bindFilters();
+      bindExpandCollapse();
+    }
+
+    // ── Filter logic ───────────────────────────────────────────────
+    function bindFilters() {
+      document.addEventListener('click', e => {
+        const btn = e.target.closest('.filter-btn');
+        if (!btn) return;
+
+        activeFilter = btn.dataset.filter;
+
+        // Update button states
+        document.querySelectorAll('.filter-btn').forEach(b => {
+          b.className = 'filter-btn';
+          if (b.dataset.filter === activeFilter) {
+            b.classList.add(`active--${activeFilter}`);
+          }
+        });
+
+        // Show/hide scenario cards
+        document.querySelectorAll('.scenario-card').forEach(card => {
+          const match = activeFilter === 'ALL' || card.dataset.confidence === activeFilter;
+          card.classList.toggle('hidden', !match);
+        });
+      });
+    }
+
+    // ── Expand / collapse all ──────────────────────────────────────
+    function bindExpandCollapse() {
+      document.getElementById('expand-all').addEventListener('click', () => {
+        document.querySelectorAll('.scenario-card details').forEach(d => d.open = true);
+      });
+      document.getElementById('collapse-all').addEventListener('click', () => {
+        document.querySelectorAll('.scenario-card details').forEach(d => d.open = false);
+      });
+    }
+
+    // ── Lightbox ───────────────────────────────────────────────────
+    const lightbox    = document.getElementById('lightbox');
+    const lbImg       = document.getElementById('lightbox-img');
+    const lbCaption   = document.getElementById('lightbox-caption');
+    const lbPlaceholder = document.getElementById('lightbox-placeholder');
+
+    function openLightbox(path, caption, name) {
+      lbImg.src = path;
+      lbImg.alt = caption || name || '';
+      lbCaption.textContent = caption || '';
+
+      // Show placeholder if image fails to load
+      lbImg.style.display = 'block';
+      lbPlaceholder.style.display = 'none';
+      lbImg.onerror = () => {
+        lbImg.style.display = 'none';
+        lbPlaceholder.style.display = 'flex';
+        lbPlaceholder.querySelector('p').textContent = name || path || 'Screenshot not available';
+      };
+
+      lightbox.classList.add('open');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeLightbox() {
+      lightbox.classList.remove('open');
+      document.body.style.overflow = '';
+      lbImg.src = '';
+    }
+
+    document.getElementById('lightbox-close').addEventListener('click', closeLightbox);
+
+    lightbox.addEventListener('click', e => {
+      if (e.target === lightbox) closeLightbox();
+    });
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && lightbox.classList.contains('open')) closeLightbox();
+    });
+
+    // Event delegation for screenshot thumbnails (rendered dynamically)
+    document.addEventListener('click', e => {
+      const thumb = e.target.closest('.screenshot-thumb');
+      if (!thumb) return;
+      openLightbox(thumb.dataset.path, thumb.dataset.caption, thumb.dataset.name);
+    });
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        const thumb = e.target.closest('.screenshot-thumb');
+        if (thumb) {
+          e.preventDefault();
+          openLightbox(thumb.dataset.path, thumb.dataset.caption, thumb.dataset.name);
+        }
+      }
+    });
+
+    // ── Bootstrap ──────────────────────────────────────────────────
+    fetch('./data.json')
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+        return r.json();
+      })
+      .then(data => render(data))
+      .catch(err => {
+        document.getElementById('loading').remove();
+        const errEl = document.getElementById('error-state');
+        errEl.classList.remove('hidden');
+        document.getElementById('error-msg').textContent =
+          `${err.message}. Make sure data.json is in the same directory as this file and is being served over HTTP (not file://).`;
+      });
+  })();
+  </script>
+</body>
+</html>

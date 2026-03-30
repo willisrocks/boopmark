@@ -29,12 +29,8 @@ impl MetadataExtractor for FallbackMetadataExtractor {
                     Ok(meta) => return Ok(meta),
                     Err(e) => {
                         tracing::warn!(url = %url, error = %e, "metadata extractor failed, trying next");
-                        if cf_err.is_none()
-                            && e.to_string().contains(CF_CHALLENGE_MSG)
-                        {
-                            cf_err = Some(DomainError::Internal(
-                                CF_CHALLENGE_MSG.to_string(),
-                            ));
+                        if cf_err.is_none() && e.to_string().contains(CF_CHALLENGE_MSG) {
+                            cf_err = Some(DomainError::Internal(CF_CHALLENGE_MSG.to_string()));
                         }
                         last_err = e;
                     }
@@ -118,5 +114,43 @@ mod tests {
         ]);
         let result = fallback.extract("https://example.com").await;
         assert!(result.is_err());
+    }
+
+    struct CfBlockedExtractor;
+    impl MetadataExtractor for CfBlockedExtractor {
+        fn extract(
+            &self,
+            _url: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
+            Box::pin(async { Err(DomainError::Internal(CF_CHALLENGE_MSG.to_string())) })
+        }
+    }
+
+    struct UnrelatedFailExtractor;
+    impl MetadataExtractor for UnrelatedFailExtractor {
+        fn extract(
+            &self,
+            _url: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
+            Box::pin(async {
+                Err(DomainError::Internal(
+                    "iframely returned HTTP 500".to_string(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_cf_error_when_later_extractor_fails_differently() {
+        let fallback = FallbackMetadataExtractor::new(vec![
+            Box::new(CfBlockedExtractor),
+            Box::new(UnrelatedFailExtractor),
+        ]);
+        let result = fallback.extract("https://example.com").await;
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains(CF_CHALLENGE_MSG),
+            "expected CF challenge error to be preserved, got: {err}"
+        );
     }
 }
