@@ -28,6 +28,9 @@ pub struct Config {
     pub s3_images_public_url: Option<String>,
     pub screenshot_backend: ScreenshotBackend,
     pub screenshot_service_url: Option<String>,
+    pub metadata_fallback_backend: MetadataFallbackBackend,
+    pub iframely_api_key: Option<String>,
+    pub opengraph_io_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +43,13 @@ pub enum ScreenshotBackend {
 pub enum StorageBackend {
     S3,
     Local,
+}
+
+#[derive(Debug, Clone)]
+pub enum MetadataFallbackBackend {
+    Iframely,
+    OpengraphIo,
+    None,
 }
 
 impl Config {
@@ -90,6 +100,16 @@ impl Config {
                 _ => ScreenshotBackend::Disabled,
             },
             screenshot_service_url: env::var("SCREENSHOT_SERVICE_URL").ok(),
+            metadata_fallback_backend: match env::var("METADATA_FALLBACK_BACKEND")
+                .unwrap_or_else(|_| "none".into())
+                .as_str()
+            {
+                "iframely" => MetadataFallbackBackend::Iframely,
+                "opengraph_io" => MetadataFallbackBackend::OpengraphIo,
+                _ => MetadataFallbackBackend::None,
+            },
+            iframely_api_key: env::var("IFRAMELY_API_KEY").ok(),
+            opengraph_io_api_key: env::var("OPENGRAPH_IO_API_KEY").ok(),
         }
     }
 }
@@ -114,7 +134,9 @@ fn llm_settings_encryption_key() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoginAdapter, ScreenshotBackend, llm_settings_encryption_key};
+    use super::{
+        llm_settings_encryption_key, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend,
+    };
 
     /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.
     /// Existing Google OAuth deployments must set LOGIN_ADAPTER=google explicitly.
@@ -170,6 +192,36 @@ mod tests {
             _ => ScreenshotBackend::Disabled,
         };
         assert!(matches!(backend, ScreenshotBackend::Playwright));
+    }
+
+    #[test]
+    fn metadata_fallback_backend_default_is_none() {
+        let backend: MetadataFallbackBackend = match "none" {
+            "iframely" => MetadataFallbackBackend::Iframely,
+            "opengraph_io" => MetadataFallbackBackend::OpengraphIo,
+            _ => MetadataFallbackBackend::None,
+        };
+        assert!(matches!(backend, MetadataFallbackBackend::None));
+    }
+
+    #[test]
+    fn metadata_fallback_backend_parses_iframely() {
+        let backend: MetadataFallbackBackend = match "iframely" {
+            "iframely" => MetadataFallbackBackend::Iframely,
+            "opengraph_io" => MetadataFallbackBackend::OpengraphIo,
+            _ => MetadataFallbackBackend::None,
+        };
+        assert!(matches!(backend, MetadataFallbackBackend::Iframely));
+    }
+
+    #[test]
+    fn metadata_fallback_backend_parses_opengraph_io() {
+        let backend: MetadataFallbackBackend = match "opengraph_io" {
+            "iframely" => MetadataFallbackBackend::Iframely,
+            "opengraph_io" => MetadataFallbackBackend::OpengraphIo,
+            _ => MetadataFallbackBackend::None,
+        };
+        assert!(matches!(backend, MetadataFallbackBackend::OpengraphIo));
     }
 
     #[test]
