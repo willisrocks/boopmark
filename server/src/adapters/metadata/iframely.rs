@@ -56,10 +56,11 @@ impl MetadataExtractor for IframelyExtractor {
     ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
         let url = url.to_string();
         Box::pin(async move {
+            let clean_url = super::validate_public_url(&url)?;
             let resp = self
                 .client
                 .get(format!("{}/api/iframely", self.base_url))
-                .query(&[("url", &url), ("api_key", &self.api_key)])
+                .query(&[("url", &clean_url), ("api_key", &self.api_key)])
                 .send()
                 .await
                 .map_err(|e| DomainError::Internal(format!("iframely fetch error: {e}")))?;

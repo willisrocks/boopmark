@@ -1,5 +1,5 @@
 use crate::domain::bookmark::UrlMetadata;
-use crate::domain::error::DomainError;
+use crate::domain::error::{CF_CHALLENGE_MSG, DomainError};
 use crate::domain::ports::metadata::MetadataExtractor;
 use std::future::Future;
 use std::pin::Pin;
@@ -23,16 +23,25 @@ impl MetadataExtractor for FallbackMetadataExtractor {
         Box::pin(async move {
             let mut last_err =
                 DomainError::Internal("no metadata extractors configured".to_string());
+            let mut cf_err: Option<DomainError> = None;
             for extractor in &self.extractors {
                 match extractor.extract(&url).await {
                     Ok(meta) => return Ok(meta),
                     Err(e) => {
                         tracing::warn!(url = %url, error = %e, "metadata extractor failed, trying next");
+                        if cf_err.is_none()
+                            && e.to_string().contains(CF_CHALLENGE_MSG)
+                        {
+                            cf_err = Some(DomainError::Internal(
+                                CF_CHALLENGE_MSG.to_string(),
+                            ));
+                        }
                         last_err = e;
                     }
                 }
             }
-            Err(last_err)
+            // Preserve CF challenge signal so BookmarkService can skip screenshots
+            Err(cf_err.unwrap_or(last_err))
         })
     }
 }
