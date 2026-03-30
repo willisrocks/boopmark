@@ -2,6 +2,8 @@ use crate::domain::bookmark::UrlMetadata;
 use crate::domain::error::DomainError;
 use crate::domain::ports::metadata::MetadataExtractor;
 use ::scraper::{Html, Selector};
+use std::future::Future;
+use std::pin::Pin;
 use url::Url;
 
 #[derive(Clone)]
@@ -22,43 +24,50 @@ impl HtmlMetadataExtractor {
 }
 
 impl MetadataExtractor for HtmlMetadataExtractor {
-    async fn extract(&self, url_str: &str) -> Result<UrlMetadata, DomainError> {
-        let parsed_url = Url::parse(url_str)
-            .map_err(|e| DomainError::InvalidInput(format!("invalid URL: {e}")))?;
+    fn extract(
+        &self,
+        url_str: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
+        let url_str = url_str.to_string();
+        Box::pin(async move {
+            let parsed_url = Url::parse(&url_str)
+                .map_err(|e| DomainError::InvalidInput(format!("invalid URL: {e}")))?;
 
-        let domain = parsed_url.host_str().map(|h| h.to_string());
+            let domain = parsed_url.host_str().map(|h| h.to_string());
 
-        let resp = self
-            .client
-            .get(url_str)
-            .send()
-            .await
-            .map_err(|e| DomainError::Internal(format!("fetch error: {e}")))?;
-        let html = resp
-            .text()
-            .await
-            .map_err(|e| DomainError::Internal(format!("read error: {e}")))?;
+            let resp = self
+                .client
+                .get(&url_str)
+                .send()
+                .await
+                .map_err(|e| DomainError::Internal(format!("fetch error: {e}")))?;
+            let html = resp
+                .text()
+                .await
+                .map_err(|e| DomainError::Internal(format!("read error: {e}")))?;
 
-        let document = Html::parse_document(&html);
+            let document = Html::parse_document(&html);
 
-        let title = select_meta(&document, "og:title").or_else(|| {
-            let sel = Selector::parse("title").ok()?;
-            document
-                .select(&sel)
-                .next()
-                .map(|el| el.text().collect::<String>())
-        });
+            let title = select_meta(&document, "og:title").or_else(|| {
+                let sel = Selector::parse("title").ok()?;
+                document
+                    .select(&sel)
+                    .next()
+                    .map(|el| el.text().collect::<String>())
+            });
 
-        let description = select_meta(&document, "og:description")
-            .or_else(|| select_meta_name(&document, "description"));
+            let description = select_meta(&document, "og:description")
+                .or_else(|| select_meta_name(&document, "description"));
 
-        let image_url = extract_image_url(&document).map(|img| resolve_url(url_str, &img));
+            let image_url =
+                extract_image_url(&document).map(|img| resolve_url(&url_str, &img));
 
-        Ok(UrlMetadata {
-            title,
-            description,
-            image_url,
-            domain,
+            Ok(UrlMetadata {
+                title,
+                description,
+                image_url,
+                domain,
+            })
         })
     }
 }

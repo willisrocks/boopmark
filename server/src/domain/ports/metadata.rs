@@ -1,7 +1,11 @@
 use crate::domain::bookmark::UrlMetadata;
 use crate::domain::error::DomainError;
+use std::future::Future;
+use std::pin::Pin;
 
-#[trait_variant::make(Send)]
 pub trait MetadataExtractor: Send + Sync {
-    async fn extract(&self, url: &str) -> Result<UrlMetadata, DomainError>;
+    fn extract(
+        &self,
+        url: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>>;
 }

@@ -488,6 +488,8 @@ mod tests {
         use crate::domain::ports::storage::ObjectStorage;
         use crate::domain::transfer::*;
         use chrono::Utc;
+        use std::future::Future;
+        use std::pin::Pin;
         use std::sync::{Arc, Mutex};
         use uuid::Uuid;
 
@@ -676,12 +678,18 @@ mod tests {
 
         struct NoopMetadata;
         impl MetadataExtractor for NoopMetadata {
-            async fn extract(&self, _url: &str) -> Result<UrlMetadata, DomainError> {
-                Ok(UrlMetadata {
-                    title: None,
-                    description: None,
-                    image_url: None,
-                    domain: None,
+            fn extract(
+                &self,
+                _url: &str,
+            ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>>
+            {
+                Box::pin(async {
+                    Ok(UrlMetadata {
+                        title: None,
+                        description: None,
+                        image_url: None,
+                        domain: None,
+                    })
                 })
             }
         }
@@ -1224,6 +1232,8 @@ mod tests {
             routing::{get, head as head_route, post},
         };
         use chrono::Utc;
+        use std::future::Future;
+        use std::pin::Pin;
         use std::sync::{Arc, Mutex};
         use tokio::sync::mpsc;
         use uuid::Uuid;
@@ -1386,12 +1396,18 @@ mod tests {
 
         struct NoopMetadata;
         impl MetadataExtractor for NoopMetadata {
-            async fn extract(&self, _url: &str) -> Result<UrlMetadata, DomainError> {
-                Ok(UrlMetadata {
-                    title: None,
-                    description: None,
-                    image_url: None,
-                    domain: None,
+            fn extract(
+                &self,
+                _url: &str,
+            ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>>
+            {
+                Box::pin(async {
+                    Ok(UrlMetadata {
+                        title: None,
+                        description: None,
+                        image_url: None,
+                        domain: None,
+                    })
                 })
             }
         }
@@ -1400,12 +1416,19 @@ mod tests {
             image_url: Option<String>,
         }
         impl MetadataExtractor for HtmlMetadata {
-            async fn extract(&self, _url: &str) -> Result<UrlMetadata, DomainError> {
-                Ok(UrlMetadata {
-                    title: None,
-                    description: None,
-                    image_url: self.image_url.clone(),
-                    domain: None,
+            fn extract(
+                &self,
+                _url: &str,
+            ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>>
+            {
+                let image_url = self.image_url.clone();
+                Box::pin(async move {
+                    Ok(UrlMetadata {
+                        title: None,
+                        description: None,
+                        image_url,
+                        domain: None,
+                    })
                 })
             }
         }
