@@ -11,3 +11,4 @@ test-results/
 .devproxy-override.yml
 .playwright-mcp/
 .superpowers/
+.litmus/

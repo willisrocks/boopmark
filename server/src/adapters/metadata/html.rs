@@ -1,7 +1,9 @@
 use crate::domain::bookmark::UrlMetadata;
-use crate::domain::error::DomainError;
+use crate::domain::error::{CF_CHALLENGE_MSG, DomainError};
 use crate::domain::ports::metadata::MetadataExtractor;
 use ::scraper::{Html, Selector};
+use std::future::Future;
+use std::pin::Pin;
 use url::Url;
 
 #[derive(Clone)]
@@ -22,45 +24,72 @@ impl HtmlMetadataExtractor {
 }
 
 impl MetadataExtractor for HtmlMetadataExtractor {
-    async fn extract(&self, url_str: &str) -> Result<UrlMetadata, DomainError> {
-        let parsed_url = Url::parse(url_str)
-            .map_err(|e| DomainError::InvalidInput(format!("invalid URL: {e}")))?;
+    fn extract(
+        &self,
+        url_str: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
+        let url_str = url_str.to_string();
+        Box::pin(async move {
+            let parsed_url = Url::parse(&url_str)
+                .map_err(|e| DomainError::InvalidInput(format!("invalid URL: {e}")))?;
 
-        let domain = parsed_url.host_str().map(|h| h.to_string());
+            let domain = parsed_url.host_str().map(|h| h.to_string());
 
-        let resp = self
-            .client
-            .get(url_str)
-            .send()
-            .await
-            .map_err(|e| DomainError::Internal(format!("fetch error: {e}")))?;
-        let html = resp
-            .text()
-            .await
-            .map_err(|e| DomainError::Internal(format!("read error: {e}")))?;
+            let resp = self
+                .client
+                .get(&url_str)
+                .send()
+                .await
+                .map_err(|e| DomainError::Internal(format!("fetch error: {e}")))?;
 
-        let document = Html::parse_document(&html);
+            // Check the CF-Mitigated header before consuming the body
+            if resp
+                .headers()
+                .get("cf-mitigated")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.eq_ignore_ascii_case("challenge"))
+            {
+                return Err(DomainError::Internal(CF_CHALLENGE_MSG.to_string()));
+            }
 
-        let title = select_meta(&document, "og:title").or_else(|| {
-            let sel = Selector::parse("title").ok()?;
-            document
-                .select(&sel)
-                .next()
-                .map(|el| el.text().collect::<String>())
-        });
+            let html = resp
+                .text()
+                .await
+                .map_err(|e| DomainError::Internal(format!("read error: {e}")))?;
 
-        let description = select_meta(&document, "og:description")
-            .or_else(|| select_meta_name(&document, "description"));
+            if is_cloudflare_challenge(&html) {
+                return Err(DomainError::Internal(CF_CHALLENGE_MSG.to_string()));
+            }
 
-        let image_url = extract_image_url(&document).map(|img| resolve_url(url_str, &img));
+            let document = Html::parse_document(&html);
 
-        Ok(UrlMetadata {
-            title,
-            description,
-            image_url,
-            domain,
+            let title = select_meta(&document, "og:title").or_else(|| {
+                let sel = Selector::parse("title").ok()?;
+                document
+                    .select(&sel)
+                    .next()
+                    .map(|el| el.text().collect::<String>())
+            });
+
+            let description = select_meta(&document, "og:description")
+                .or_else(|| select_meta_name(&document, "description"));
+
+            let image_url = extract_image_url(&document).map(|img| resolve_url(&url_str, &img));
+
+            Ok(UrlMetadata {
+                title,
+                description,
+                image_url,
+                domain,
+            })
         })
     }
+}
+
+fn is_cloudflare_challenge(body: &str) -> bool {
+    // Check for the specific CF challenge title (not body text, which could appear in articles)
+    body.contains("<title>Just a moment...</title>")
+        || body.contains("Performing security verification")
 }
 
 fn select_meta(document: &Html, property: &str) -> Option<String> {
@@ -191,5 +220,33 @@ mod tests {
     fn resolve_url_handles_data_uri() {
         let data_uri = "data:image/png;base64,iVBORw0KGgo=";
         assert_eq!(resolve_url("https://example.com/page", data_uri), data_uri);
+    }
+
+    #[test]
+    fn detects_cloudflare_challenge_by_title() {
+        let html = r#"<html><head><title>Just a moment...</title></head>
+            <body>Performing security verification</body></html>"#;
+        assert!(is_cloudflare_challenge(html));
+    }
+
+    #[test]
+    fn detects_cloudflare_challenge_by_verification_text() {
+        let html = r#"<html><head><title>Some Site</title></head>
+            <body>Performing security verification</body></html>"#;
+        assert!(is_cloudflare_challenge(html));
+    }
+
+    #[test]
+    fn does_not_flag_normal_page_as_challenge() {
+        let html = r#"<html><head><title>My Blog</title></head>
+            <body><p>Hello world</p></body></html>"#;
+        assert!(!is_cloudflare_challenge(html));
+    }
+
+    #[test]
+    fn does_not_flag_page_mentioning_moment_in_body() {
+        let html = r#"<html><head><title>Blog Post</title></head>
+            <body><p>Just a moment... let me explain.</p></body></html>"#;
+        assert!(!is_cloudflare_challenge(html));
     }
 }

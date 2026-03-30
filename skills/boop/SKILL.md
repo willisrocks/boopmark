@@ -13,11 +13,12 @@ Command-line bookmark manager for [Boopmark](https://github.com/willisrocks/boop
 |---------|-------------|
 | `boop add <url>` | Save a bookmark |
 | `boop add <url> --suggest` | Save with AI-suggested title, description, and tags |
-| `boop add <url> --title "X" --tags "a,b"` | Save with explicit metadata |
+| `boop add <url> --title "X" --description "Y" --tags "a,b"` | Save with explicit metadata |
 | `boop search <query>` | Search bookmarks |
 | `boop list` | List recent bookmarks |
 | `boop list --tags "rust,tools"` | Filter by tags |
-| `boop edit <id> --suggest` | AI-suggest metadata for existing bookmark |
+| `boop edit <id> --suggest` | LLM-suggest metadata for existing bookmark (pass a bookmark-uuid) |
+| `boop edit <id> --description "Y"` | Update bookmark description |
 | `boop suggest <url>` | Preview AI suggestions without saving |
 | `boop delete <id>` | Delete a bookmark |
 | `boop export --format jsonl` | Export bookmarks |
@@ -68,6 +69,11 @@ boop add https://example.com/article --tags "rust,async" --suggest
 **Find something you saved before:**
 ```bash
 boop search "rust error handling"
+```
+
+**Update a bookmark with AI suggestions:**
+```bash
+boop edit <bookmark-uuid> --suggest
 ```
 
 **Bulk export for backup:**

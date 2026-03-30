@@ -32,6 +32,7 @@ sha2.workspace = true
 trait-variant.workspace = true
 csv.workspace = true
 tokio-stream.workspace = true
+urlencoding.workspace = true
 base64 = "0.22"
 ring = "0.17"
 

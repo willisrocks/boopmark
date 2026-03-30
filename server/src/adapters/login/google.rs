@@ -5,7 +5,9 @@ use axum::response::Redirect;
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
-use crate::domain::ports::login_provider::{AuthenticatedIdentity, LoginPageContext, LoginProvider};
+use crate::domain::ports::login_provider::{
+    AuthenticatedIdentity, LoginPageContext, LoginProvider,
+};
 use crate::domain::ports::storage::ObjectStorage;
 use crate::web::pages::auth_shared::{handle_authenticated_identity, origin_from_headers};
 use crate::web::state::AppState;
@@ -36,10 +38,7 @@ async fn google_redirect(State(state): State<AppState>, headers: HeaderMap) -> R
     let origin = origin_from_headers(&headers, config);
     let redirect_uri = format!("{origin}/auth/google/callback");
 
-    let client_id = config
-        .google_client_id
-        .as_deref()
-        .unwrap_or_default();
+    let client_id = config.google_client_id.as_deref().unwrap_or_default();
 
     let url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile",
@@ -61,14 +60,8 @@ async fn google_callback(
     let origin = origin_from_headers(&headers, config);
     let redirect_uri = format!("{origin}/auth/google/callback");
 
-    let client_id = config
-        .google_client_id
-        .as_deref()
-        .unwrap_or_default();
-    let client_secret = config
-        .google_client_secret
-        .as_deref()
-        .unwrap_or_default();
+    let client_id = config.google_client_id.as_deref().unwrap_or_default();
+    let client_secret = config.google_client_secret.as_deref().unwrap_or_default();
 
     // Exchange code for tokens
     let client = reqwest::Client::new();

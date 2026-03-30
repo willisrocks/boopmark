@@ -126,6 +126,9 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `S3_IMAGES_PUBLIC_URL` | — | Public URL prefix for stored images |
 | `SCREENSHOT_BACKEND` | `disabled` | `disabled` or `playwright` |
 | `SCREENSHOT_SERVICE_URL` | — | Required when `SCREENSHOT_BACKEND=playwright` |
+| `METADATA_FALLBACK_BACKEND` | — | `iframely` or `opengraph_io` (optional) |
+| `IFRAMELY_API_KEY` | — | Required when `METADATA_FALLBACK_BACKEND=iframely` |
+| `OPENGRAPH_IO_API_KEY` | — | Required when `METADATA_FALLBACK_BACKEND=opengraph_io` |
 | `ENABLE_E2E_AUTH` | `0` | Set to `1` for E2E test auth bypass |
 
 ## Deployment Guides
