@@ -49,7 +49,7 @@ server/src/adapters/metadata/
 
 ### 6. Test mock signature updates
 
-Four `impl MetadataExtractor` exist in the codebase outside the scraper itself — all are test mocks in `bookmarks.rs`. They need their signatures updated from `async fn extract(...)` to `fn extract(...) -> Pin<Box<...>>` but their behavior stays identical.
+Three `impl MetadataExtractor` exist in the codebase outside the scraper itself — all are test mocks in `bookmarks.rs`. They need their signatures updated from `async fn extract(...)` to `fn extract(...) -> Pin<Box<...>>` but their behavior stays identical.
 
 ### 7. OpengraphIo test routing
 
@@ -144,7 +144,7 @@ The body of the async block stays the same — it already uses `self.client` whi
 
 - [ ] **Step 3: Update all MetadataExtractor test mock impls in bookmarks.rs**
 
-There are four `impl MetadataExtractor` in `server/src/app/bookmarks.rs` that need the same signature change. They are:
+There are three `impl MetadataExtractor` in `server/src/app/bookmarks.rs` that need the same signature change. They are:
 
 1. `NoopMetadata` at line ~678 (in `import_tests` module)
 2. `NoopMetadata` at line ~1388 (in `fix_image_tests` module)
@@ -1347,7 +1347,7 @@ Expected: No formatting issues
 
 ## Regression Risks
 
-1. **Trait signature change breaks external consumers:** The `MetadataExtractor` trait is only used within this crate. All four impls (1 production + 3 test mocks) are updated in Task 1. Risk is low.
+1. **Trait signature change breaks external consumers:** The `MetadataExtractor` trait is only used within this crate. All impls (1 production + 3 test mocks) are updated in Task 1. Risk is low.
 
 2. **Module move breaks import paths:** Two files reference `adapters::scraper::HtmlMetadataExtractor` (`main.rs` and `state.rs`). Both are updated in Task 3. No other files reference this path.
 
