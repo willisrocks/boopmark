@@ -1,5 +1,5 @@
 use crate::domain::bookmark::UrlMetadata;
-use crate::domain::error::DomainError;
+use crate::domain::error::{CF_CHALLENGE_MSG, DomainError};
 use crate::domain::ports::metadata::MetadataExtractor;
 use ::scraper::{Html, Selector};
 use std::future::Future;
@@ -41,10 +41,25 @@ impl MetadataExtractor for HtmlMetadataExtractor {
                 .send()
                 .await
                 .map_err(|e| DomainError::Internal(format!("fetch error: {e}")))?;
+
+            // Check the CF-Mitigated header before consuming the body
+            if resp
+                .headers()
+                .get("cf-mitigated")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.eq_ignore_ascii_case("challenge"))
+            {
+                return Err(DomainError::Internal(CF_CHALLENGE_MSG.to_string()));
+            }
+
             let html = resp
                 .text()
                 .await
                 .map_err(|e| DomainError::Internal(format!("read error: {e}")))?;
+
+            if is_cloudflare_challenge(&html) {
+                return Err(DomainError::Internal(CF_CHALLENGE_MSG.to_string()));
+            }
 
             let document = Html::parse_document(&html);
 
@@ -70,6 +85,12 @@ impl MetadataExtractor for HtmlMetadataExtractor {
             })
         })
     }
+}
+
+fn is_cloudflare_challenge(body: &str) -> bool {
+    // Check for the specific CF challenge title (not body text, which could appear in articles)
+    body.contains("<title>Just a moment...</title>")
+        || body.contains("Performing security verification")
 }
 
 fn select_meta(document: &Html, property: &str) -> Option<String> {
@@ -200,5 +221,33 @@ mod tests {
     fn resolve_url_handles_data_uri() {
         let data_uri = "data:image/png;base64,iVBORw0KGgo=";
         assert_eq!(resolve_url("https://example.com/page", data_uri), data_uri);
+    }
+
+    #[test]
+    fn detects_cloudflare_challenge_by_title() {
+        let html = r#"<html><head><title>Just a moment...</title></head>
+            <body>Performing security verification</body></html>"#;
+        assert!(is_cloudflare_challenge(html));
+    }
+
+    #[test]
+    fn detects_cloudflare_challenge_by_verification_text() {
+        let html = r#"<html><head><title>Some Site</title></head>
+            <body>Performing security verification</body></html>"#;
+        assert!(is_cloudflare_challenge(html));
+    }
+
+    #[test]
+    fn does_not_flag_normal_page_as_challenge() {
+        let html = r#"<html><head><title>My Blog</title></head>
+            <body><p>Hello world</p></body></html>"#;
+        assert!(!is_cloudflare_challenge(html));
+    }
+
+    #[test]
+    fn does_not_flag_page_mentioning_moment_in_body() {
+        let html = r#"<html><head><title>Blog Post</title></head>
+            <body><p>Just a moment... let me explain.</p></body></html>"#;
+        assert!(!is_cloudflare_challenge(html));
     }
 }
