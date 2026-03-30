@@ -7,8 +7,9 @@ mod web;
 use adapters::anthropic::AnthropicEnricher;
 use adapters::login::google::GoogleLoginProvider;
 use adapters::login::local_password::LocalPasswordLoginProvider;
+use adapters::metadata::fallback::FallbackMetadataExtractor;
+use adapters::metadata::html::HtmlMetadataExtractor;
 use adapters::postgres::PostgresPool;
-use adapters::scraper::HtmlMetadataExtractor;
 use adapters::screenshot::noop::NoopScreenshot;
 use adapters::screenshot::playwright::PlaywrightScreenshot;
 use adapters::storage::local::LocalStorage;
@@ -48,7 +49,12 @@ async fn main() {
 
     let db = Arc::new(PostgresPool::new(pool));
 
-    let metadata = Arc::new(HtmlMetadataExtractor::new());
+    let html_extractor = HtmlMetadataExtractor::new();
+    let extractors: Vec<Box<dyn domain::ports::metadata::MetadataExtractor>> =
+        vec![Box::new(html_extractor)];
+    // Fallback adapters are wired in Task 7 after they are implemented.
+    // For now, the chain always has just the HTML extractor.
+    let metadata = Arc::new(FallbackMetadataExtractor::new(extractors));
     let metadata_for_enrichment = metadata.clone();
 
     let screenshot: Arc<dyn ScreenshotProvider> = match config.screenshot_backend {

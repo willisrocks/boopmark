@@ -1,5 +1,5 @@
+use crate::adapters::metadata::fallback::FallbackMetadataExtractor;
 use crate::adapters::postgres::PostgresPool;
-use crate::adapters::scraper::HtmlMetadataExtractor;
 use crate::adapters::storage::local::LocalStorage;
 use crate::adapters::storage::s3::S3Storage;
 use crate::app::auth::AuthService;
@@ -26,7 +26,7 @@ pub struct AppState {
     pub auth: Arc<AuthService<PostgresPool, PostgresPool, PostgresPool>>,
     pub settings: Arc<SettingsService<PostgresPool>>,
     pub config: Arc<Config>,
-    pub enrichment: Arc<EnrichmentService<HtmlMetadataExtractor, PostgresPool>>,
+    pub enrichment: Arc<EnrichmentService<FallbackMetadataExtractor, PostgresPool>>,
     pub images_storage: ImageStorage,
     pub active_image_fix_jobs: Arc<Mutex<HashSet<Uuid>>>,
     pub login_provider: Arc<dyn LoginProvider>,
@@ -35,8 +35,8 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub enum Bookmarks {
-    Local(Arc<BookmarkService<PostgresPool, HtmlMetadataExtractor, LocalStorage>>),
-    S3(Arc<BookmarkService<PostgresPool, HtmlMetadataExtractor, S3Storage>>),
+    Local(Arc<BookmarkService<PostgresPool, FallbackMetadataExtractor, LocalStorage>>),
+    S3(Arc<BookmarkService<PostgresPool, FallbackMetadataExtractor, S3Storage>>),
 }
 
 /// Enum-based storage for avatar images, matching the pattern used by `Bookmarks`.
