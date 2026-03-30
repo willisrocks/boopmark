@@ -71,6 +71,11 @@ boop add https://example.com/article --tags "rust,async" --suggest
 boop search "rust error handling"
 ```
 
+**Update a bookmark with AI suggestions:**
+```bash
+boop edit <bookmark-uuid> --suggest
+```
+
 **Bulk export for backup:**
 ```bash
 boop export --format jsonl > bookmarks.jsonl
