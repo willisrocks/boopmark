@@ -48,6 +48,13 @@ struct ApiKeysCreatedFragment {
     api_keys: Vec<ApiKeyView>,
 }
 
+#[derive(Template)]
+#[template(path = "settings/tag_consolidation_result.html")]
+struct TagConsolidationResultFragment {
+    success_message: Option<String>,
+    error_message: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct CreateApiKeyForm {
     name: String,
@@ -255,6 +262,35 @@ async fn fix_images_stream(
     Sse::new(stream).into_response()
 }
 
+async fn consolidate_tags_htmx(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+) -> axum::response::Response {
+    match state.tag_consolidation.consolidate(user.id).await {
+        Ok(stats) => render(&TagConsolidationResultFragment {
+            success_message: Some(format!(
+                "Consolidated {} tag{tplural} into {} across {} bookmark{bplural}.",
+                stats.tags_before,
+                stats.tags_after,
+                stats.bookmarks_changed,
+                tplural = if stats.tags_before == 1 { "" } else { "s" },
+                bplural = if stats.bookmarks_changed == 1 { "" } else { "s" },
+            )),
+            error_message: None,
+        }),
+        Err(DomainError::InvalidInput(msg)) => render(&TagConsolidationResultFragment {
+            success_message: None,
+            error_message: Some(msg),
+        }),
+        Err(_) => render(&TagConsolidationResultFragment {
+            success_message: None,
+            error_message: Some(
+                "Consolidation failed. Try again.".to_string(),
+            ),
+        }),
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -272,6 +308,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/settings/fix-images/stream",
             axum::routing::get(fix_images_stream),
+        )
+        .route(
+            "/settings/consolidate-tags",
+            axum::routing::post(consolidate_tags_htmx),
         )
 }
 

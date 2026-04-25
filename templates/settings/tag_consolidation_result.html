@@ -1,0 +1,16 @@
+{% if let Some(message) = success_message %}
+<div
+    data-testid="tag-consolidation-result"
+    class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200"
+>
+    {{ message }}
+</div>
+{% endif %}
+{% if let Some(message) = error_message %}
+<div
+    data-testid="tag-consolidation-error"
+    class="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+>
+    {{ message }}
+</div>
+{% endif %}
