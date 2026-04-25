@@ -6,10 +6,7 @@ use std::collections::HashMap;
 /// - Look up its mapping. If absent or empty, treat as identity (`[tag]`).
 /// - Collect every value from every mapping output for the bookmark's tags.
 /// - Lowercase, dedupe (case-insensitive), and sort lexicographically.
-pub fn compute_new_tags(
-    current: &[String],
-    mapping: &HashMap<String, Vec<String>>,
-) -> Vec<String> {
+pub fn compute_new_tags(current: &[String], mapping: &HashMap<String, Vec<String>>) -> Vec<String> {
     use std::collections::BTreeSet;
 
     let mut acc: BTreeSet<String> = BTreeSet::new();
@@ -35,7 +32,12 @@ mod tests {
     fn map(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         pairs
             .iter()
-            .map(|(k, vs)| ((*k).to_string(), vs.iter().map(|v| (*v).to_string()).collect()))
+            .map(|(k, vs)| {
+                (
+                    (*k).to_string(),
+                    vs.iter().map(|v| (*v).to_string()).collect(),
+                )
+            })
             .collect()
     }
 
@@ -46,8 +48,7 @@ mod tests {
             ("javascript", &["javascript"]),
             ("JavaScript", &["javascript"]),
         ]);
-        let result =
-            compute_new_tags(&["js".into(), "JavaScript".into()], &mapping);
+        let result = compute_new_tags(&["js".into(), "JavaScript".into()], &mapping);
         assert_eq!(result, vec!["javascript".to_string()]);
     }
 
@@ -64,7 +65,11 @@ mod tests {
         let result = compute_new_tags(&["react".into(), "rust".into()], &mapping);
         assert_eq!(
             result,
-            vec!["frontend".to_string(), "react".to_string(), "rust".to_string()]
+            vec![
+                "frontend".to_string(),
+                "react".to_string(),
+                "rust".to_string()
+            ]
         );
     }
 
@@ -91,7 +96,11 @@ mod tests {
         let result = compute_new_tags(&["react".into(), "vue".into()], &mapping);
         assert_eq!(
             result,
-            vec!["frontend".to_string(), "react".to_string(), "vue".to_string()]
+            vec![
+                "frontend".to_string(),
+                "react".to_string(),
+                "vue".to_string()
+            ]
         );
     }
 
@@ -163,10 +172,7 @@ where
         }
     }
 
-    pub async fn consolidate(
-        &self,
-        user_id: Uuid,
-    ) -> Result<ConsolidationStats, DomainError> {
+    pub async fn consolidate(&self, user_id: Uuid) -> Result<ConsolidationStats, DomainError> {
         // 1. Get API key + model.
         let (api_key, model) = self
             .settings
@@ -216,10 +222,7 @@ where
         }
 
         // 5. Apply.
-        let bookmarks_changed = self
-            .bookmarks
-            .update_tags_bulk(user_id, &updates)
-            .await?;
+        let bookmarks_changed = self.bookmarks.update_tags_bulk(user_id, &updates).await?;
 
         Ok(ConsolidationStats {
             bookmarks_changed,
@@ -234,9 +237,7 @@ mod service_tests {
     use super::*;
     use crate::app::secrets::SecretBox;
     use crate::app::settings::SaveLlmSettingsInput;
-    use crate::domain::bookmark::{
-        Bookmark, BookmarkFilter, CreateBookmark, UpdateBookmark,
-    };
+    use crate::domain::bookmark::{Bookmark, BookmarkFilter, CreateBookmark, UpdateBookmark};
     use crate::domain::llm_settings::LlmSettings;
     use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
     use crate::domain::ports::tag_consolidator::{
@@ -275,9 +276,11 @@ mod service_tests {
             let encrypted = if clear {
                 None
             } else {
-                replace
-                    .map(|v| v.to_vec())
-                    .or_else(|| existing.as_ref().and_then(|s| s.anthropic_api_key_encrypted.clone()))
+                replace.map(|v| v.to_vec()).or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|s| s.anthropic_api_key_encrypted.clone())
+                })
             };
             let saved = LlmSettings {
                 user_id,
@@ -393,7 +396,10 @@ mod service_tests {
                 mapping: pairs
                     .iter()
                     .map(|(k, vs)| {
-                        ((*k).to_string(), vs.iter().map(|v| (*v).to_string()).collect())
+                        (
+                            (*k).to_string(),
+                            vs.iter().map(|v| (*v).to_string()).collect(),
+                        )
                     })
                     .collect(),
             }
@@ -445,13 +451,17 @@ mod service_tests {
         let consolidator = Arc::new(StubConsolidator::new(&[]));
         // No api key saved
         let llm_repo = Arc::new(StubLlmSettingsRepo::new());
-        let secret_box =
-            Arc::new(SecretBox::new("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="));
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
         let settings = Arc::new(SettingsService::new(llm_repo, secret_box));
-        let service =
-            TagConsolidationService::new(bookmark_repo, consolidator, settings);
+        let service = TagConsolidationService::new(bookmark_repo, consolidator, settings);
 
-        let err = service.consolidate(user_id).await.err().expect("should err");
+        let err = service
+            .consolidate(user_id)
+            .await
+            .err()
+            .expect("should err");
         assert!(matches!(err, DomainError::InvalidInput(_)), "got {err:?}");
     }
 
@@ -465,8 +475,9 @@ mod service_tests {
         let consolidator = Arc::new(StubConsolidator::new(&[]));
         // Save a key for THIS user_id so we get past the API-key gate
         let llm_repo = Arc::new(StubLlmSettingsRepo::new());
-        let secret_box =
-            Arc::new(SecretBox::new("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="));
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
         let settings = Arc::new(SettingsService::new(llm_repo, secret_box));
         settings
             .save(
@@ -482,7 +493,11 @@ mod service_tests {
             .expect("save");
 
         let service = TagConsolidationService::new(bookmark_repo, consolidator, settings);
-        let err = service.consolidate(user_id).await.err().expect("should err");
+        let err = service
+            .consolidate(user_id)
+            .await
+            .err()
+            .expect("should err");
         assert!(matches!(err, DomainError::InvalidInput(_)), "got {err:?}");
     }
 
@@ -517,8 +532,9 @@ mod service_tests {
         ]));
 
         let llm_repo = Arc::new(StubLlmSettingsRepo::new());
-        let secret_box =
-            Arc::new(SecretBox::new("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="));
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
         let settings = Arc::new(SettingsService::new(llm_repo, secret_box));
         settings
             .save(
@@ -533,8 +549,7 @@ mod service_tests {
             .await
             .expect("save");
 
-        let service =
-            TagConsolidationService::new(bookmark_repo.clone(), consolidator, settings);
+        let service = TagConsolidationService::new(bookmark_repo.clone(), consolidator, settings);
         let stats = service.consolidate(user_id).await.expect("ok");
 
         // 6 distinct input tags. After applying the mapping, the unique output
@@ -554,7 +569,9 @@ mod service_tests {
         );
         // The lone "javascript" bookmark unchanged.
         assert!(
-            bookmarks.iter().any(|b| b.tags == vec!["javascript".to_string()]),
+            bookmarks
+                .iter()
+                .any(|b| b.tags == vec!["javascript".to_string()]),
             "expected an unchanged javascript bookmark"
         );
         // A "js"+"react" bookmark should now be ["frontend", "javascript", "react"].

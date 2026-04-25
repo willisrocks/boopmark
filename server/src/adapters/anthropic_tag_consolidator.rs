@@ -208,8 +208,14 @@ mod tests {
         let prompt = AnthropicTagConsolidator::build_prompt(&sample_input());
         assert!(prompt.contains("\"js\""), "missing js: {prompt}");
         assert!(prompt.contains("(12)"), "missing count: {prompt}");
-        assert!(prompt.contains("Promise.all guide"), "missing sample: {prompt}");
-        assert!(prompt.contains("\"javascript\""), "missing javascript: {prompt}");
+        assert!(
+            prompt.contains("Promise.all guide"),
+            "missing sample: {prompt}"
+        );
+        assert!(
+            prompt.contains("\"javascript\""),
+            "missing javascript: {prompt}"
+        );
     }
 
     #[test]

@@ -322,17 +322,13 @@ impl BookmarkRepository for PostgresPool {
             .collect())
     }
 
-    async fn list_id_tags(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<(Uuid, Vec<String>)>, DomainError> {
-        let rows: Vec<(Uuid, Vec<String>)> = sqlx::query_as(
-            "SELECT id, tags FROM bookmarks WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DomainError::Internal(e.to_string()))?;
+    async fn list_id_tags(&self, user_id: Uuid) -> Result<Vec<(Uuid, Vec<String>)>, DomainError> {
+        let rows: Vec<(Uuid, Vec<String>)> =
+            sqlx::query_as("SELECT id, tags FROM bookmarks WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| DomainError::Internal(e.to_string()))?;
         Ok(rows)
     }
 

@@ -161,13 +161,11 @@ async fn main() {
     ));
     let tag_consolidator: Arc<dyn domain::ports::tag_consolidator::TagConsolidator> =
         Arc::new(adapters::anthropic_tag_consolidator::AnthropicTagConsolidator::new());
-    let tag_consolidation_service = Arc::new(
-        app::tag_consolidation::TagConsolidationService::new(
-            db.clone(),
-            tag_consolidator,
-            settings_service.clone(),
-        ),
-    );
+    let tag_consolidation_service = Arc::new(app::tag_consolidation::TagConsolidationService::new(
+        db.clone(),
+        tag_consolidator,
+        settings_service.clone(),
+    ));
     let invite_service = Arc::new(InviteService::new(db.clone()));
 
     let login_provider: Arc<dyn LoginProvider> = match config.login_adapter {
@@ -197,7 +195,9 @@ async fn main() {
         tag_consolidation: tag_consolidation_service,
         images_storage,
         active_image_fix_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        active_tag_consolidation_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        active_tag_consolidation_jobs: Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )),
         login_provider,
         invites: invite_service,
     };

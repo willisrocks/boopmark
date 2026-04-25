@@ -292,7 +292,11 @@ async fn consolidate_tags_htmx(
                 stats.tags_after,
                 stats.bookmarks_changed,
                 tplural = if stats.tags_before == 1 { "" } else { "s" },
-                bplural = if stats.bookmarks_changed == 1 { "" } else { "s" },
+                bplural = if stats.bookmarks_changed == 1 {
+                    ""
+                } else {
+                    "s"
+                },
             )),
             error_message: None,
         }),

@@ -684,7 +684,8 @@ mod tests {
             async fn tag_samples(
                 &self,
                 _user_id: Uuid,
-            ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError> {
+            ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError>
+            {
                 Ok(vec![])
             }
             async fn list_id_tags(
@@ -1439,7 +1440,8 @@ mod tests {
             async fn tag_samples(
                 &self,
                 _user_id: Uuid,
-            ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError> {
+            ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError>
+            {
                 Ok(vec![])
             }
             async fn list_id_tags(
