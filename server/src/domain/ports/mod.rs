@@ -8,4 +8,5 @@ pub mod metadata;
 pub mod screenshot;
 pub mod session_repo;
 pub mod storage;
+pub mod tag_consolidator;
 pub mod user_repo;
