@@ -181,6 +181,34 @@
             </script>
         </section>
 
+        <section class="space-y-5" data-testid="tag-library-section">
+            <div>
+                <h2 class="text-lg font-semibold">Tag Library</h2>
+                <p class="text-sm text-gray-400">Use AI to merge variants and add useful parent tags across your bookmarks.</p>
+            </div>
+
+            <div class="space-y-3">
+                <button
+                    id="consolidate-tags-btn"
+                    type="button"
+                    data-testid="consolidate-tags-button"
+                    hx-post="/settings/consolidate-tags"
+                    hx-target="#consolidate-tags-result"
+                    hx-swap="innerHTML"
+                    hx-disabled-elt="this"
+                    hx-indicator="#consolidate-tags-spinner"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                    {% if !has_anthropic_api_key %}disabled title="Configure an Anthropic API key first."{% endif %}
+                >
+                    <span class="inline-flex items-center gap-2">
+                        <span>Consolidate Tags</span>
+                        <span id="consolidate-tags-spinner" class="htmx-indicator">…</span>
+                    </span>
+                </button>
+                <div id="consolidate-tags-result"></div>
+            </div>
+        </section>
+
         <section class="space-y-5">
             <div>
                 <h2 class="text-lg font-semibold">Image Repair</h2>
