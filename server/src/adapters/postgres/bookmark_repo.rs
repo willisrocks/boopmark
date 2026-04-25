@@ -269,4 +269,26 @@ impl BookmarkRepository for PostgresPool {
             Ok(())
         }
     }
+
+    async fn tag_samples(
+        &self,
+        _user_id: Uuid,
+    ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError> {
+        unimplemented!("implemented in next task")
+    }
+
+    async fn list_id_tags(
+        &self,
+        _user_id: Uuid,
+    ) -> Result<Vec<(Uuid, Vec<String>)>, DomainError> {
+        unimplemented!("implemented in next task")
+    }
+
+    async fn update_tags_bulk(
+        &self,
+        _user_id: Uuid,
+        _updates: &[(Uuid, Vec<String>)],
+    ) -> Result<u64, DomainError> {
+        unimplemented!("implemented in next task")
+    }
 }
