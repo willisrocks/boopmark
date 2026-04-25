@@ -272,23 +272,104 @@ impl BookmarkRepository for PostgresPool {
 
     async fn tag_samples(
         &self,
-        _user_id: Uuid,
+        user_id: Uuid,
     ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError> {
-        unimplemented!("implemented in next task")
+        use crate::domain::ports::tag_consolidator::TagSample;
+
+        let rows: Vec<(String, i64, Vec<String>)> = sqlx::query_as(
+            "WITH expanded AS (
+                 SELECT id, title, created_at, unnest(tags) AS tag
+                 FROM bookmarks
+                 WHERE user_id = $1
+             ),
+             counts AS (
+                 SELECT tag, COUNT(*) AS count
+                 FROM expanded
+                 GROUP BY tag
+             ),
+             ranked AS (
+                 SELECT
+                     tag,
+                     title,
+                     ROW_NUMBER() OVER (PARTITION BY tag ORDER BY created_at DESC, id DESC) AS rn
+                 FROM expanded
+                 WHERE title IS NOT NULL AND title <> ''
+             )
+             SELECT
+                 c.tag,
+                 c.count,
+                 COALESCE(
+                     ARRAY_AGG(r.title ORDER BY r.rn) FILTER (WHERE r.rn IS NOT NULL),
+                     ARRAY[]::TEXT[]
+                 ) AS sample_titles
+             FROM counts c
+             LEFT JOIN ranked r ON r.tag = c.tag AND r.rn <= 3
+             GROUP BY c.tag, c.count
+             ORDER BY c.count DESC, c.tag ASC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(tag, count, sample_titles)| TagSample {
+                tag,
+                count,
+                sample_titles,
+            })
+            .collect())
     }
 
     async fn list_id_tags(
         &self,
-        _user_id: Uuid,
+        user_id: Uuid,
     ) -> Result<Vec<(Uuid, Vec<String>)>, DomainError> {
-        unimplemented!("implemented in next task")
+        let rows: Vec<(Uuid, Vec<String>)> = sqlx::query_as(
+            "SELECT id, tags FROM bookmarks WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?;
+        Ok(rows)
     }
 
     async fn update_tags_bulk(
         &self,
-        _user_id: Uuid,
-        _updates: &[(Uuid, Vec<String>)],
+        user_id: Uuid,
+        updates: &[(Uuid, Vec<String>)],
     ) -> Result<u64, DomainError> {
-        unimplemented!("implemented in next task")
+        if updates.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
+
+        let mut rows: u64 = 0;
+        for (id, new_tags) in updates {
+            let r = sqlx::query(
+                "UPDATE bookmarks
+                 SET tags = $1, updated_at = now()
+                 WHERE id = $2 AND user_id = $3",
+            )
+            .bind(new_tags)
+            .bind(id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
+            rows += r.rows_affected();
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
+        Ok(rows)
     }
 }
