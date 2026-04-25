@@ -681,6 +681,44 @@ mod tests {
                     Err(DomainError::NotFound)
                 }
             }
+            async fn tag_samples(
+                &self,
+                _user_id: Uuid,
+            ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError>
+            {
+                Ok(vec![])
+            }
+            async fn list_id_tags(
+                &self,
+                user_id: Uuid,
+            ) -> Result<Vec<(Uuid, Vec<String>)>, DomainError> {
+                Ok(self
+                    .bookmarks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|b| b.user_id == user_id)
+                    .map(|b| (b.id, b.tags.clone()))
+                    .collect())
+            }
+            async fn update_tags_bulk(
+                &self,
+                user_id: Uuid,
+                updates: &[(Uuid, Vec<String>)],
+            ) -> Result<u64, DomainError> {
+                let mut bookmarks = self.bookmarks.lock().unwrap();
+                let mut rows = 0u64;
+                for (id, new_tags) in updates {
+                    if let Some(b) = bookmarks
+                        .iter_mut()
+                        .find(|b| b.id == *id && b.user_id == user_id)
+                    {
+                        b.tags = new_tags.clone();
+                        rows += 1;
+                    }
+                }
+                Ok(rows)
+            }
         }
 
         struct NoopMetadata;
@@ -1398,6 +1436,44 @@ mod tests {
                 } else {
                     Err(DomainError::NotFound)
                 }
+            }
+            async fn tag_samples(
+                &self,
+                _user_id: Uuid,
+            ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError>
+            {
+                Ok(vec![])
+            }
+            async fn list_id_tags(
+                &self,
+                user_id: Uuid,
+            ) -> Result<Vec<(Uuid, Vec<String>)>, DomainError> {
+                Ok(self
+                    .bookmarks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|b| b.user_id == user_id)
+                    .map(|b| (b.id, b.tags.clone()))
+                    .collect())
+            }
+            async fn update_tags_bulk(
+                &self,
+                user_id: Uuid,
+                updates: &[(Uuid, Vec<String>)],
+            ) -> Result<u64, DomainError> {
+                let mut bookmarks = self.bookmarks.lock().unwrap();
+                let mut rows = 0u64;
+                for (id, new_tags) in updates {
+                    if let Some(b) = bookmarks
+                        .iter_mut()
+                        .find(|b| b.id == *id && b.user_id == user_id)
+                    {
+                        b.tags = new_tags.clone();
+                        rows += 1;
+                    }
+                }
+                Ok(rows)
             }
         }
 
