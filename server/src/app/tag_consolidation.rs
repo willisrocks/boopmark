@@ -14,8 +14,8 @@ pub fn compute_new_tags(
 
     let mut acc: BTreeSet<String> = BTreeSet::new();
     for tag in current {
-        let outputs = match mapping.get(tag) {
-            Some(values) if !values.is_empty() => values.clone(),
+        let outputs = match mapping.get(&tag.to_lowercase()) {
+            Some(values) if values.iter().any(|v| !v.trim().is_empty()) => values.clone(),
             _ => vec![tag.clone()],
         };
         for out in outputs {
@@ -100,6 +100,26 @@ mod tests {
         let mapping = map(&[("react", &["react"])]);
         let result = compute_new_tags(&[], &mapping);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn whitespace_or_empty_string_values_are_treated_as_identity() {
+        let mapping = map(&[("react", &[""])]);
+        let result = compute_new_tags(&["react".into()], &mapping);
+        assert_eq!(result, vec!["react".to_string()]);
+
+        let mapping = map(&[("react", &["   "])]);
+        let result = compute_new_tags(&["react".into()], &mapping);
+        assert_eq!(result, vec!["react".to_string()]);
+    }
+
+    #[test]
+    fn lookup_is_case_insensitive_against_lowercase_mapping_keys() {
+        // LLM returns lowercase keys (per "use lowercase" rule); bookmark tags
+        // may be stored in any case (Postgres preserves case in tag arrays).
+        let mapping = map(&[("react", &["react", "frontend"])]);
+        let result = compute_new_tags(&["React".into()], &mapping);
+        assert_eq!(result, vec!["frontend".to_string(), "react".to_string()]);
     }
 }
 

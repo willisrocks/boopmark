@@ -122,7 +122,7 @@ impl AnthropicTagConsolidator {
 
         let request_body = AnthropicRequest {
             model: model.to_string(),
-            max_tokens: 4096,
+            max_tokens: 16384,
             messages: vec![Message {
                 role: "user".to_string(),
                 content: prompt,
@@ -165,6 +165,14 @@ impl AnthropicTagConsolidator {
 
         let mapping: HashMap<String, Vec<String>> = serde_json::from_str(json_str)
             .map_err(|e| DomainError::Internal(format!("LLM JSON parse error: {e}")))?;
+
+        // Normalize keys to lowercase. The prompt asks for "exact case as given" but
+        // also "use lowercase", and LLMs tend to lowercase keys. The service-layer
+        // lookup must match, so we canonicalize here at the parse boundary.
+        let mapping = mapping
+            .into_iter()
+            .map(|(k, v)| (k.to_lowercase(), v))
+            .collect();
 
         Ok(ConsolidationOutput { mapping })
     }
