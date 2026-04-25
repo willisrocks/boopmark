@@ -1,6 +1,6 @@
 use crate::domain::error::DomainError;
 use crate::domain::ports::tag_consolidator::{
-    ConsolidationInput, ConsolidationOutput, TagConsolidator, TagSample,
+    ConsolidationInput, ConsolidationOutput, TagConsolidator,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -173,6 +173,7 @@ impl AnthropicTagConsolidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ports::tag_consolidator::TagSample;
 
     fn sample_input() -> ConsolidationInput {
         ConsolidationInput {
