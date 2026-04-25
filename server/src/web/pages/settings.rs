@@ -266,7 +266,25 @@ async fn consolidate_tags_htmx(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
 ) -> axum::response::Response {
-    match state.tag_consolidation.consolidate(user.id).await {
+    let user_id = user.id;
+
+    {
+        let mut jobs = state.active_tag_consolidation_jobs.lock().unwrap();
+        if jobs.contains(&user_id) {
+            return StatusCode::CONFLICT.into_response();
+        }
+        jobs.insert(user_id);
+    }
+
+    let result = state.tag_consolidation.consolidate(user_id).await;
+
+    state
+        .active_tag_consolidation_jobs
+        .lock()
+        .unwrap()
+        .remove(&user_id);
+
+    match result {
         Ok(stats) => render(&TagConsolidationResultFragment {
             success_message: Some(format!(
                 "Consolidated {} tag{tplural} into {} across {} bookmark{bplural}.",
@@ -284,9 +302,7 @@ async fn consolidate_tags_htmx(
         }),
         Err(_) => render(&TagConsolidationResultFragment {
             success_message: None,
-            error_message: Some(
-                "Consolidation failed. Try again.".to_string(),
-            ),
+            error_message: Some("Consolidation failed. Try again.".to_string()),
         }),
     }
 }

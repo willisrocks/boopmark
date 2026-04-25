@@ -197,6 +197,7 @@ async fn main() {
         tag_consolidation: tag_consolidation_service,
         images_storage,
         active_image_fix_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        active_tag_consolidation_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         login_provider,
         invites: invite_service,
     };

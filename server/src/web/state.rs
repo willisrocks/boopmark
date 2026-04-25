@@ -31,6 +31,7 @@ pub struct AppState {
     pub tag_consolidation: Arc<TagConsolidationService<PostgresPool, PostgresPool>>,
     pub images_storage: ImageStorage,
     pub active_image_fix_jobs: Arc<Mutex<HashSet<Uuid>>>,
+    pub active_tag_consolidation_jobs: Arc<Mutex<HashSet<Uuid>>>,
     pub login_provider: Arc<dyn LoginProvider>,
     pub invites: Arc<InviteService<PostgresPool>>,
 }
