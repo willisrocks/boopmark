@@ -24,9 +24,20 @@ impl MetadataExtractor for FallbackMetadataExtractor {
             let mut last_err =
                 DomainError::Internal("no metadata extractors configured".to_string());
             let mut cf_err: Option<DomainError> = None;
+            let mut partial: Option<UrlMetadata> = None;
             for extractor in &self.extractors {
                 match extractor.extract(&url).await {
-                    Ok(meta) => return Ok(meta),
+                    Ok(meta) => {
+                        let merged = merge_metadata(partial.take(), meta);
+                        if merged.image_url.is_some() {
+                            return Ok(merged);
+                        }
+                        partial = Some(merged);
+                        tracing::debug!(
+                            url = %url,
+                            "metadata extractor returned no image, trying next"
+                        );
+                    }
                     Err(e) => {
                         tracing::warn!(url = %url, error = %e, "metadata extractor failed, trying next");
                         if cf_err.is_none() && e.to_string().contains(CF_CHALLENGE_MSG) {
@@ -36,9 +47,25 @@ impl MetadataExtractor for FallbackMetadataExtractor {
                     }
                 }
             }
-            // Preserve CF challenge signal so BookmarkService can skip screenshots
+            if let Some(meta) = partial {
+                return Ok(meta);
+            }
+            // Preserve the CF challenge signal so callers can distinguish a
+            // blocked page from an ordinary metadata extractor failure.
             Err(cf_err.unwrap_or(last_err))
         })
+    }
+}
+
+fn merge_metadata(existing: Option<UrlMetadata>, fallback: UrlMetadata) -> UrlMetadata {
+    match existing {
+        Some(existing) => UrlMetadata {
+            title: existing.title.or(fallback.title),
+            description: existing.description.or(fallback.description),
+            image_url: existing.image_url.or(fallback.image_url),
+            domain: existing.domain.or(fallback.domain),
+        },
+        None => fallback,
     }
 }
 
@@ -58,6 +85,7 @@ mod tests {
 
     struct SuccessExtractor {
         title: Option<String>,
+        image_url: Option<String>,
     }
     impl MetadataExtractor for SuccessExtractor {
         fn extract(
@@ -65,11 +93,12 @@ mod tests {
             _url: &str,
         ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
             let title = self.title.clone();
+            let image_url = self.image_url.clone();
             Box::pin(async move {
                 Ok(UrlMetadata {
                     title,
                     description: None,
-                    image_url: Some("https://example.com/img.jpg".to_string()),
+                    image_url,
                     domain: None,
                 })
             })
@@ -82,6 +111,7 @@ mod tests {
             Box::new(FailingExtractor),
             Box::new(SuccessExtractor {
                 title: Some("Fallback Title".to_string()),
+                image_url: Some("https://example.com/img.jpg".to_string()),
             }),
         ]);
         let result = fallback.extract("https://example.com").await.unwrap();
@@ -97,13 +127,44 @@ mod tests {
         let fallback = FallbackMetadataExtractor::new(vec![
             Box::new(SuccessExtractor {
                 title: Some("First".to_string()),
+                image_url: Some("https://example.com/first.jpg".to_string()),
             }),
             Box::new(SuccessExtractor {
                 title: Some("Second".to_string()),
+                image_url: Some("https://example.com/second.jpg".to_string()),
             }),
         ]);
         let result = fallback.extract("https://example.com").await.unwrap();
         assert_eq!(result.title, Some("First".to_string()));
+        assert_eq!(
+            result.image_url,
+            Some("https://example.com/first.jpg".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn falls_back_for_image_when_first_success_has_no_image() {
+        let fallback = FallbackMetadataExtractor::new(vec![
+            Box::new(SuccessExtractor {
+                title: Some("Primary Title".to_string()),
+                image_url: None,
+            }),
+            Box::new(SuccessExtractor {
+                title: Some("Fallback Title".to_string()),
+                image_url: Some("https://example.com/fallback.jpg".to_string()),
+            }),
+        ]);
+
+        let result = fallback
+            .extract("https://medium.com/article")
+            .await
+            .unwrap();
+
+        assert_eq!(result.title, Some("Primary Title".to_string()));
+        assert_eq!(
+            result.image_url,
+            Some("https://example.com/fallback.jpg".to_string())
+        );
     }
 
     #[tokio::test]

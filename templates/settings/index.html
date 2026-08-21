@@ -287,7 +287,9 @@
                                     : 0;
                                 fill.style.width = `${pct}%`;
                                 if (data.done) {
-                                    label.textContent = `Done. Fixed ${data.fixed} images. ${data.failed} failed.`;
+                                    label.textContent = data.error
+                                        ? `Image repair failed: ${data.error}`
+                                        : `Done. Fixed ${data.fixed} images. ${data.failed} failed.`;
                                     btn.disabled = false;
                                 } else {
                                     label.textContent =

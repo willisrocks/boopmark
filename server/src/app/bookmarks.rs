@@ -1,5 +1,5 @@
 use crate::domain::bookmark::*;
-use crate::domain::error::{CF_CHALLENGE_MSG, DomainError};
+use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::BookmarkRepository;
 use crate::domain::ports::metadata::MetadataExtractor;
 use crate::domain::ports::screenshot::ScreenshotProvider;
@@ -14,6 +14,8 @@ pub struct ProgressEvent {
     pub fixed: usize,
     pub failed: usize,
     pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub struct BookmarkService<R, M, S> {
@@ -56,23 +58,23 @@ where
         mut input: CreateBookmark,
     ) -> Result<Bookmark, DomainError> {
         if needs_metadata(&input) {
-            let mut cf_blocked = false;
-            match self.metadata.extract(&input.url).await {
-                Ok(meta) => {
-                    if let Some(image_url) = merge_metadata(&mut input, meta)
-                        && let Ok(stored_url) = self.download_and_store_image(&image_url).await
-                    {
-                        input.image_url = Some(stored_url);
-                    }
-                }
-                Err(e) => {
-                    cf_blocked = e.to_string().contains(CF_CHALLENGE_MSG);
-                    tracing::warn!(url = %input.url, error = %e, "metadata extraction failed");
-                }
+            let metadata_result = self.metadata.extract(&input.url).await;
+            if let Err(error) = &metadata_result {
+                tracing::warn!(
+                    url = %input.url,
+                    error = %error,
+                    "metadata extraction failed; attempting screenshot fallback"
+                );
             }
-            // Fall back to screenshot service if still no image (skip if CF-blocked)
+            if let Ok(meta) = metadata_result
+                && let Some(image_url) = merge_metadata(&mut input, meta)
+                && let Ok(stored_url) = self.download_and_store_image(&image_url).await
+            {
+                input.image_url = Some(stored_url);
+            }
+            // Fall back to a browser screenshot whenever metadata scraping did
+            // not produce an image, including Cloudflare challenge failures.
             if input.image_url.is_none()
-                && !cf_blocked
                 && let Ok(bytes) = self.screenshot.capture(&input.url).await
             {
                 let key = format!("images/{}.jpg", Uuid::new_v4());
@@ -322,7 +324,23 @@ where
     ) {
         let bookmarks = match self.repo.export_all(user_id).await {
             Ok(b) => b,
-            Err(_) => return,
+            Err(error) => {
+                tracing::error!(%error, "failed to load bookmarks for image repair");
+                // Always close the progress stream with a terminal event. The
+                // caller otherwise waits forever when export_all fails before
+                // the per-bookmark loop starts.
+                let _ = tx
+                    .send(ProgressEvent {
+                        checked: 0,
+                        total: 0,
+                        fixed: 0,
+                        failed: 0,
+                        done: true,
+                        error: Some("failed to load bookmarks for image repair".to_string()),
+                    })
+                    .await;
+                return;
+            }
         };
 
         let total = bookmarks.len();
@@ -333,13 +351,7 @@ where
         for bookmark in bookmarks {
             let needs_fix = match &bookmark.image_url {
                 None => true,
-                Some(url) => self
-                    .http_client
-                    .head(url)
-                    .send()
-                    .await
-                    .map(|r| !r.status().is_success())
-                    .unwrap_or(true),
+                Some(url) => !self.image_url_is_valid(url).await,
             };
 
             if needs_fix {
@@ -368,6 +380,7 @@ where
                     fixed,
                     failed,
                     done: false,
+                    error: None,
                 })
                 .await;
         }
@@ -379,30 +392,72 @@ where
                 fixed,
                 failed,
                 done: true,
+                error: None,
             })
             .await;
     }
 
-    /// Try og:image scrape first; fall back to screenshot sidecar.
-    /// Skips screenshot if Cloudflare challenge was detected.
+    /// Try og:image scrape first; fall back to a screenshot sidecar.
+    ///
+    /// A Cloudflare challenge is a signal that the normal HTTP scraper cannot
+    /// see the page, not a reason to disable the browser fallback.
     async fn fetch_and_store_image(&self, page_url: &str) -> Result<String, DomainError> {
-        match self.metadata.extract(page_url).await {
-            Ok(meta) => {
-                if let Some(image_url) = meta.image_url
-                    && let Ok(stored) = self.download_and_store_image(&image_url).await
-                {
-                    return Ok(stored);
-                }
-            }
-            Err(e) if e.to_string().contains(CF_CHALLENGE_MSG) => {
-                return Err(e);
-            }
-            Err(_) => {}
+        let metadata_result = self.metadata.extract(page_url).await;
+        if let Err(error) = &metadata_result {
+            tracing::warn!(
+                url = %page_url,
+                error = %error,
+                "metadata extraction failed; attempting screenshot fallback"
+            );
+        }
+        if let Ok(meta) = metadata_result
+            && let Some(image_url) = meta.image_url
+            && let Ok(stored) = self.download_and_store_image(&image_url).await
+        {
+            return Ok(stored);
         }
 
         let bytes = self.screenshot.capture(page_url).await?;
         let key = format!("images/{}.jpg", Uuid::new_v4());
         self.storage.put(&key, bytes, "image/jpeg").await
+    }
+
+    /// Check whether a stored image is still reachable.
+    ///
+    /// Some image hosts (including common CDNs) reject HEAD while serving the
+    /// same resource over GET. In that case, fall back to a bounded GET request
+    /// and inspect only its headers; the service client's 30-second timeout
+    /// bounds the fallback without downloading the response body.
+    async fn image_url_is_valid(&self, image_url: &str) -> bool {
+        match self.http_client.head(image_url).send().await {
+            Ok(response) if response.status().is_success() => true,
+            Ok(response) => {
+                tracing::debug!(
+                    url = %image_url,
+                    status = %response.status(),
+                    "HEAD image check failed; retrying with bounded GET"
+                );
+                self.get_image_url_status(image_url).await
+            }
+            Err(error) => {
+                tracing::debug!(
+                    url = %image_url,
+                    error = %error,
+                    "HEAD image check errored; retrying with bounded GET"
+                );
+                self.get_image_url_status(image_url).await
+            }
+        }
+    }
+
+    async fn get_image_url_status(&self, image_url: &str) -> bool {
+        self.http_client
+            .get(image_url)
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()
+            .await
+            .map(|response| response.status().is_success())
+            .unwrap_or(false)
     }
 }
 
@@ -1272,6 +1327,7 @@ mod tests {
         use super::super::*;
         use crate::adapters::screenshot::noop::NoopScreenshot;
         use crate::adapters::screenshot::playwright::PlaywrightScreenshot;
+        use crate::domain::error::CF_CHALLENGE_MSG;
         use axum::{
             Router,
             routing::{get, head as head_route, post},
@@ -1287,13 +1343,31 @@ mod tests {
 
         struct MockRepo {
             bookmarks: Mutex<Vec<Bookmark>>,
+            export_error: bool,
         }
 
         impl MockRepo {
             fn new(bookmarks: Vec<Bookmark>) -> Self {
                 Self {
                     bookmarks: Mutex::new(bookmarks),
+                    export_error: false,
                 }
+            }
+
+            fn failing_export() -> Self {
+                Self {
+                    bookmarks: Mutex::new(vec![]),
+                    export_error: true,
+                }
+            }
+
+            fn image_url(&self, id: Uuid) -> Option<String> {
+                self.bookmarks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|bookmark| bookmark.id == id)
+                    .and_then(|bookmark| bookmark.image_url.clone())
             }
         }
 
@@ -1383,6 +1457,9 @@ mod tests {
                 Ok(vec![])
             }
             async fn export_all(&self, user_id: Uuid) -> Result<Vec<Bookmark>, DomainError> {
+                if self.export_error {
+                    return Err(DomainError::Internal("export failed".to_string()));
+                }
                 Ok(self
                     .bookmarks
                     .lock()
@@ -1495,6 +1572,17 @@ mod tests {
             }
         }
 
+        struct CfMetadata;
+        impl MetadataExtractor for CfMetadata {
+            fn extract(
+                &self,
+                _url: &str,
+            ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>>
+            {
+                Box::pin(async { Err(DomainError::Internal(CF_CHALLENGE_MSG.to_string())) })
+            }
+        }
+
         struct HtmlMetadata {
             image_url: Option<String>,
         }
@@ -1588,6 +1676,29 @@ mod tests {
                         axum::http::StatusCode::from_u16(image_status).unwrap()
                     }),
                 );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            addr
+        }
+
+        async fn start_image_validation_site(
+            head_status: u16,
+            get_status: u16,
+        ) -> std::net::SocketAddr {
+            let app = Router::new().route(
+                "/image.jpg",
+                get(move || async move {
+                    (
+                        axum::http::StatusCode::from_u16(get_status).unwrap(),
+                        [("Content-Type", "image/jpeg")],
+                        vec![0xFF, 0xD8, 0xFF, 0xD9],
+                    )
+                })
+                .head(move || async move {
+                    axum::http::StatusCode::from_u16(head_status).unwrap()
+                }),
+            );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1751,6 +1862,146 @@ mod tests {
             assert_eq!(last.fixed, 1, "should fix via screenshot sidecar");
             assert_eq!(last.failed, 0);
             assert!(last.done);
+        }
+
+        #[tokio::test]
+        async fn creates_bookmark_with_screenshot_when_metadata_is_cf_blocked() {
+            let screenshot_addr = start_fake_screenshot_svc().await;
+            let repo = Arc::new(MockRepo::new(vec![]));
+            let svc = BookmarkService::new(
+                repo,
+                Arc::new(CfMetadata),
+                Arc::new(NoopStorage),
+                Arc::new(PlaywrightScreenshot::new(format!(
+                    "http://{}",
+                    screenshot_addr
+                ))),
+            );
+
+            let bookmark = svc
+                .create(
+                    Uuid::new_v4(),
+                    CreateBookmark {
+                        url: "https://medium.com/data-science-collective/example".to_string(),
+                        title: None,
+                        description: None,
+                        image_url: None,
+                        domain: None,
+                        tags: None,
+                    },
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                bookmark
+                    .image_url
+                    .as_deref()
+                    .is_some_and(|url| url.contains("/images/"))
+            );
+        }
+
+        #[tokio::test]
+        async fn repairs_bookmark_with_screenshot_when_metadata_is_cf_blocked() {
+            let screenshot_addr = start_fake_screenshot_svc().await;
+            let user_id = Uuid::new_v4();
+            let bookmark = make_bookmark(
+                user_id,
+                "https://medium.com/data-science-collective/example",
+                None,
+            );
+            let bookmark_id = bookmark.id;
+            let repo = Arc::new(MockRepo::new(vec![bookmark]));
+            let svc = BookmarkService::new(
+                repo.clone(),
+                Arc::new(CfMetadata),
+                Arc::new(NoopStorage),
+                Arc::new(PlaywrightScreenshot::new(format!(
+                    "http://{}",
+                    screenshot_addr
+                ))),
+            );
+            let (tx, rx) = mpsc::channel(32);
+
+            svc.fix_missing_images(user_id, tx).await;
+
+            let events = collect_events(rx).await;
+            assert_eq!(events.last().unwrap().fixed, 1);
+            assert_eq!(events.last().unwrap().failed, 0);
+            assert!(events.last().unwrap().done);
+            assert!(repo.image_url(bookmark_id).is_some());
+        }
+
+        #[tokio::test]
+        async fn treats_head_405_as_valid_when_get_succeeds() {
+            let addr = start_image_validation_site(405, 200).await;
+            let user_id = Uuid::new_v4();
+            let image_url = format!("http://{addr}/image.jpg");
+            let bookmark = make_bookmark(user_id, "http://127.0.0.1:1/", Some(&image_url));
+            let repo = Arc::new(MockRepo::new(vec![bookmark]));
+            let svc = BookmarkService::new(
+                repo,
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+                Arc::new(NoopScreenshot),
+            );
+            let (tx, rx) = mpsc::channel(32);
+
+            svc.fix_missing_images(user_id, tx).await;
+
+            let events = collect_events(rx).await;
+            let last = events.last().unwrap();
+            assert_eq!(last.fixed, 0, "a GET-valid image should not be repaired");
+            assert_eq!(last.failed, 0);
+            assert!(last.done);
+        }
+
+        #[tokio::test]
+        async fn treats_head_403_as_valid_when_get_succeeds() {
+            let addr = start_image_validation_site(403, 200).await;
+            let user_id = Uuid::new_v4();
+            let image_url = format!("http://{addr}/image.jpg");
+            let bookmark = make_bookmark(user_id, "http://127.0.0.1:1/", Some(&image_url));
+            let svc = BookmarkService::new(
+                Arc::new(MockRepo::new(vec![bookmark])),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+                Arc::new(NoopScreenshot),
+            );
+            let (tx, rx) = mpsc::channel(32);
+
+            svc.fix_missing_images(user_id, tx).await;
+
+            let events = collect_events(rx).await;
+            let last = events.last().unwrap();
+            assert_eq!(last.fixed, 0, "a GET-valid image should not be repaired");
+            assert_eq!(last.failed, 0);
+            assert!(last.done);
+        }
+
+        #[tokio::test]
+        async fn export_failure_emits_terminal_done_event() {
+            let svc = BookmarkService::new(
+                Arc::new(MockRepo::failing_export()),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+                Arc::new(NoopScreenshot),
+            );
+            let (tx, rx) = mpsc::channel(32);
+
+            svc.fix_missing_images(Uuid::new_v4(), tx).await;
+
+            let events = collect_events(rx).await;
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].checked, 0);
+            assert_eq!(events[0].total, 0);
+            assert_eq!(events[0].fixed, 0);
+            assert_eq!(events[0].failed, 0);
+            assert!(events[0].done);
+            assert_eq!(
+                events[0].error.as_deref(),
+                Some("failed to load bookmarks for image repair")
+            );
         }
     }
 }

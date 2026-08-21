@@ -105,6 +105,8 @@ struct FixProgress {
     fixed: usize,
     failed: usize,
     done: bool,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -620,6 +622,9 @@ async fn run(cli: Cli) -> Result<(), String> {
                                     && let Ok(event) = serde_json::from_str::<FixProgress>(json_str)
                                 {
                                     if event.done {
+                                        if let Some(error) = event.error {
+                                            return Err(format!("Image repair failed: {error}"));
+                                        }
                                         println!(
                                             "\nDone. Fixed {} images. {} failed (no image found).",
                                             event.fixed, event.failed
@@ -913,5 +918,19 @@ mod tests {
             }
             _ => panic!("expected Import"),
         }
+    }
+
+    #[test]
+    fn fix_progress_error_is_optional_for_legacy_events() {
+        let legacy: FixProgress =
+            serde_json::from_str(r#"{"checked":0,"total":0,"fixed":0,"failed":0,"done":true}"#)
+                .unwrap();
+        assert!(legacy.error.is_none());
+
+        let failed: FixProgress = serde_json::from_str(
+            r#"{"checked":0,"total":0,"fixed":0,"failed":0,"done":true,"error":"load failed"}"#,
+        )
+        .unwrap();
+        assert_eq!(failed.error.as_deref(), Some("load failed"));
     }
 }
