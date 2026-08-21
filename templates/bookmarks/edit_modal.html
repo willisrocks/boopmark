@@ -1,11 +1,64 @@
 <div id="edit-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-    <div class="bg-[#1e2235] rounded-xl border border-gray-700 p-6 w-full max-w-md">
+    <div class="bg-[#1e2235] rounded-xl border border-gray-700 p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-lg font-medium">Edit Bookmark</h2>
             <button onclick="document.getElementById('edit-modal').remove()"
                     class="text-gray-500 hover:text-gray-300">&times;</button>
         </div>
-        <form hx-put="/bookmarks/{{ bookmark_id }}"
+
+        <section class="mb-6" aria-labelledby="image-override-heading">
+            <div class="flex items-center justify-between mb-2">
+                <h3 id="image-override-heading" class="text-sm font-medium text-gray-300">Card image</h3>
+                <span class="text-xs text-gray-500">40:21 crop</span>
+            </div>
+            <p class="text-xs text-gray-500 mb-3">Choose an image, then click or drag the preview to keep the important part in frame.</p>
+            <form id="image-override-form"
+                  hx-post="/bookmarks/{{ bookmark_id }}/image"
+                  hx-target="#bookmark-{{ bookmark_id }}"
+                  hx-swap="outerHTML"
+                  hx-encoding="multipart/form-data"
+                  hx-on::after-request="if(event.detail.successful) { document.getElementById('image-override-status').textContent = 'Image saved'; } else { document.getElementById('image-override-status').textContent = 'Could not save image'; }">
+                <div id="image-override-preview"
+                     data-testid="image-override-preview"
+                     class="relative aspect-[40/21] rounded-lg overflow-hidden bg-[#151827] border border-gray-700 cursor-crosshair select-none mb-3">
+                    {% if let Some(img) = image_url %}
+                    <img id="image-override-preview-image" data-testid="image-override-preview-image" src="{{ img }}" alt="Current card image" class="absolute inset-0 w-full h-full object-cover pointer-events-none">
+                    {% else %}
+                    <div id="image-override-preview-placeholder" class="absolute inset-0 flex items-center justify-center text-gray-600 text-3xl">&#128278;</div>
+                    {% endif %}
+                    <div class="absolute inset-0 border border-white/10 pointer-events-none"></div>
+                </div>
+                <input type="file"
+                       id="image-override-input"
+                       data-testid="image-override-input"
+                       name="image"
+                       accept="image/jpeg,image/png,image/gif,image/webp"
+                       class="block w-full text-sm text-gray-400 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-[#2a2d45] file:text-gray-300 hover:file:bg-[#343752]">
+                <input type="hidden" id="image-override-focal-x" name="focal_x" value="0.5">
+                <input type="hidden" id="image-override-focal-y" name="focal_y" value="0.5">
+                <div class="flex items-center gap-3 mt-3">
+                    <button type="submit"
+                            data-testid="image-override-save"
+                            class="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm">
+                        Save image
+                    </button>
+                    <button type="button"
+                            data-testid="image-override-remove"
+                            hx-delete="/bookmarks/{{ bookmark_id }}/image"
+                            hx-target="#bookmark-{{ bookmark_id }}"
+                            hx-swap="outerHTML"
+                            hx-confirm="Restore the original card image?"
+                            hx-on::after-request="if(event.detail.successful) { document.getElementById('edit-modal').remove(); }"
+                            class="px-3 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-red-300 hover:border-red-700 text-sm">
+                        {% if has_override %}Restore original{% else %}Remove override{% endif %}
+                    </button>
+                    <span id="image-override-status" data-testid="image-override-status" class="text-xs text-gray-500" role="status"></span>
+                </div>
+            </form>
+        </section>
+
+        <form id="bookmark-edit-form"
+              hx-put="/bookmarks/{{ bookmark_id }}"
               hx-target="#bookmark-{{ bookmark_id }}"
               hx-swap="outerHTML"
               hx-on::after-request="if(event.detail.successful && event.detail.elt === this) { document.getElementById('edit-modal').remove(); }">
@@ -16,7 +69,7 @@
                         hx-post="/bookmarks/{{ bookmark_id }}/suggest"
                         hx-target="#edit-suggest-target"
                         hx-swap="outerHTML"
-                        hx-include="closest form"
+                        hx-include="#bookmark-edit-form"
                         hx-indicator="#edit-suggest-spinner"
                         class="px-4 py-2 rounded-lg border border-purple-700 text-purple-400 hover:text-purple-200 hover:border-purple-500 mr-auto">
                     Suggest Edits
@@ -35,3 +88,61 @@
         </form>
     </div>
 </div>
+
+<script>
+(() => {
+    const preview = document.getElementById('image-override-preview');
+    const input = document.getElementById('image-override-input');
+    const focalX = document.getElementById('image-override-focal-x');
+    const focalY = document.getElementById('image-override-focal-y');
+    if (!preview || !input || !focalX || !focalY) return;
+
+    let objectUrl = null;
+    let dragging = false;
+
+    const setFocalPoint = (event) => {
+        const bounds = preview.getBoundingClientRect();
+        const x = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+        const y = Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height));
+        focalX.value = x.toFixed(4);
+        focalY.value = y.toFixed(4);
+        const image = document.getElementById('image-override-preview-image');
+        if (image) image.style.objectPosition = `${x * 100}% ${y * 100}%`;
+    };
+
+    input.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        objectUrl = URL.createObjectURL(file);
+        let image = document.getElementById('image-override-preview-image');
+        if (!image) {
+            image = document.createElement('img');
+            image.id = 'image-override-preview-image';
+            image.dataset.testid = 'image-override-preview-image';
+            image.alt = 'Selected card image preview';
+            image.className = 'absolute inset-0 w-full h-full object-cover pointer-events-none';
+            preview.querySelector('#image-override-preview-placeholder')?.remove();
+            preview.prepend(image);
+        }
+        image.src = objectUrl;
+        image.style.objectPosition = '50% 50%';
+        focalX.value = '0.5';
+        focalY.value = '0.5';
+    });
+
+    preview.addEventListener('pointerdown', (event) => {
+        dragging = true;
+        preview.setPointerCapture(event.pointerId);
+        setFocalPoint(event);
+    });
+    preview.addEventListener('pointermove', (event) => {
+        if (dragging) setFocalPoint(event);
+    });
+    preview.addEventListener('pointerup', (event) => {
+        dragging = false;
+        preview.releasePointerCapture?.(event.pointerId);
+    });
+    preview.addEventListener('pointercancel', () => { dragging = false; });
+})();
+</script>

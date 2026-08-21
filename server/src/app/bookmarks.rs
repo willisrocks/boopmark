@@ -116,7 +116,58 @@ where
     }
 
     pub async fn delete(&self, id: Uuid, user_id: Uuid) -> Result<(), DomainError> {
-        self.repo.delete(id, user_id).await
+        let old_override = self.repo.delete_with_override(id, user_id).await?;
+        self.delete_owned_override(user_id, old_override.as_deref())
+            .await;
+        Ok(())
+    }
+
+    /// Store and atomically replace the user-owned image override. If the
+    /// database update fails, the new object is removed; after a successful
+    /// commit, the repository returns the superseded object for cleanup.
+    pub async fn replace_image_override(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        data: Vec<u8>,
+    ) -> Result<(), DomainError> {
+        let key = format!("images/overrides/{user_id}/{}.jpg", Uuid::new_v4());
+        let stored_url = self.storage.put(&key, data, "image/jpeg").await?;
+        let old_override = match self
+            .repo
+            .replace_override_image_url(id, user_id, Some(&stored_url))
+            .await
+        {
+            Ok(old) => old,
+            Err(error) => {
+                let _ = self.storage.delete(&key).await;
+                return Err(error);
+            }
+        };
+        self.delete_owned_override(user_id, old_override.as_deref())
+            .await;
+        Ok(())
+    }
+
+    pub async fn remove_image_override(&self, id: Uuid, user_id: Uuid) -> Result<(), DomainError> {
+        let old_override = self
+            .repo
+            .replace_override_image_url(id, user_id, None)
+            .await?;
+        self.delete_owned_override(user_id, old_override.as_deref())
+            .await;
+        Ok(())
+    }
+
+    async fn delete_owned_override(&self, user_id: Uuid, image_url: Option<&str>) {
+        let Some(image_url) = image_url else { return };
+        let Some(key) = owned_override_storage_key(self.storage.as_ref(), user_id, image_url)
+        else {
+            return;
+        };
+        if let Err(error) = self.storage.delete(&key).await {
+            tracing::warn!(%error, %key, "could not remove bookmark image override");
+        }
     }
 
     pub async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError> {
@@ -226,6 +277,7 @@ where
                         title: record.title,
                         description: record.description,
                         image_url: record.image_url,
+                        override_image_url: None,
                         domain: record.domain,
                         tags: record.tags,
                         created_at,
@@ -309,6 +361,32 @@ where
         );
         self.storage.put(&key, bytes.to_vec(), &content_type).await
     }
+}
+
+fn owned_override_storage_key<S: ObjectStorage>(
+    storage: &S,
+    user_id: Uuid,
+    url: &str,
+) -> Option<String> {
+    let prefix = storage.public_url("");
+    let key = url
+        .strip_prefix(prefix.trim_end_matches('/'))
+        .map(|rest| rest.trim_start_matches('/').to_string())
+        .filter(|key| !key.is_empty())?;
+    let mut components = key.split('/');
+    let image_dir = components.next()?;
+    let override_dir = components.next()?;
+    let owner = components.next()?.parse::<Uuid>().ok()?;
+    let filename = components.next()?;
+    if components.next().is_some()
+        || image_dir != "images"
+        || override_dir != "overrides"
+        || owner != user_id
+    {
+        return None;
+    }
+    let object_id = filename.strip_suffix(".jpg")?.parse::<Uuid>().ok()?;
+    Some(format!("images/overrides/{owner}/{object_id}.jpg"))
 }
 
 impl<R, M, S> BookmarkService<R, M, S>
@@ -540,6 +618,68 @@ mod tests {
         assert_eq!(image.as_deref(), Some("https://example.com/preview.png"));
     }
 
+    struct OwnershipTestStorage;
+
+    impl ObjectStorage for OwnershipTestStorage {
+        async fn put(
+            &self,
+            _key: &str,
+            _data: Vec<u8>,
+            _content_type: &str,
+        ) -> Result<String, DomainError> {
+            unreachable!()
+        }
+
+        async fn get(&self, _key: &str) -> Result<Vec<u8>, DomainError> {
+            unreachable!()
+        }
+
+        async fn delete(&self, _key: &str) -> Result<(), DomainError> {
+            unreachable!()
+        }
+
+        fn public_url(&self, key: &str) -> String {
+            format!("https://images.example/{key}")
+        }
+    }
+
+    #[test]
+    fn override_cleanup_is_limited_to_the_current_users_namespace() {
+        let user_id = Uuid::new_v4();
+        let other_user_id = Uuid::new_v4();
+        let object_id = Uuid::new_v4();
+        let owned_url =
+            format!("https://images.example/images/overrides/{user_id}/{object_id}.jpg");
+        let other_url =
+            format!("https://images.example/images/overrides/{other_user_id}/{object_id}.jpg");
+        let expected = format!("images/overrides/{user_id}/{object_id}.jpg");
+
+        assert_eq!(
+            owned_override_storage_key(&OwnershipTestStorage, user_id, &owned_url).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            owned_override_storage_key(&OwnershipTestStorage, user_id, &other_url),
+            None
+        );
+        assert_eq!(
+            owned_override_storage_key(
+                &OwnershipTestStorage,
+                user_id,
+                "https://images.example/images/avatar.jpg"
+            ),
+            None
+        );
+        assert_eq!(
+            owned_override_storage_key(
+                &OwnershipTestStorage,
+                user_id,
+                &format!("https://images.example/images/overrides/{user_id}/../../../../.env")
+            ),
+            None
+        );
+    }
+
     mod import_tests {
         use crate::adapters::screenshot::noop::NoopScreenshot;
         use crate::app::bookmarks::BookmarkService;
@@ -592,6 +732,7 @@ mod tests {
                     title: input.title,
                     description: input.description,
                     image_url: input.image_url,
+                    override_image_url: None,
                     domain: input.domain,
                     tags: input.tags.unwrap_or_default(),
                     created_at: Utc::now(),
@@ -654,6 +795,20 @@ mod tests {
                 } else {
                     Ok(())
                 }
+            }
+            async fn delete_with_override(
+                &self,
+                id: Uuid,
+                user_id: Uuid,
+            ) -> Result<Option<String>, DomainError> {
+                let mut bookmarks = self.bookmarks.lock().unwrap();
+                let index = bookmarks
+                    .iter()
+                    .position(|b| b.id == id && b.user_id == user_id)
+                    .ok_or(DomainError::NotFound)?;
+                let old = bookmarks[index].override_image_url.clone();
+                bookmarks.remove(index);
+                Ok(old)
             }
             async fn all_tags(&self, _user_id: Uuid) -> Result<Vec<String>, DomainError> {
                 Ok(vec![])
@@ -735,6 +890,21 @@ mod tests {
                 } else {
                     Err(DomainError::NotFound)
                 }
+            }
+            async fn replace_override_image_url(
+                &self,
+                id: Uuid,
+                user_id: Uuid,
+                image_url: Option<&str>,
+            ) -> Result<Option<String>, DomainError> {
+                let mut bookmarks = self.bookmarks.lock().unwrap();
+                let bookmark = bookmarks
+                    .iter_mut()
+                    .find(|b| b.id == id && b.user_id == user_id)
+                    .ok_or(DomainError::NotFound)?;
+                let old = bookmark.override_image_url.take();
+                bookmark.override_image_url = image_url.map(str::to_string);
+                Ok(old)
             }
             async fn tag_samples(
                 &self,
@@ -845,6 +1015,7 @@ mod tests {
                 title: Some("Test".to_string()),
                 description: None,
                 image_url: None,
+                override_image_url: None,
                 domain: None,
                 tags: vec![],
                 created_at: Utc::now(),
@@ -1100,6 +1271,7 @@ mod tests {
                 title: None,
                 description: None,
                 image_url: None,
+                override_image_url: None,
                 domain: None,
                 tags: vec![],
                 created_at: Utc::now(),
@@ -1144,6 +1316,7 @@ mod tests {
                 title: None,
                 description: None,
                 image_url: None,
+                override_image_url: None,
                 domain: None,
                 tags: vec![],
                 created_at: Utc::now(),
@@ -1159,6 +1332,7 @@ mod tests {
                 title: None,
                 description: None,
                 image_url: None,
+                override_image_url: None,
                 domain: None,
                 tags: vec![],
                 created_at: Utc::now(),
@@ -1384,6 +1558,7 @@ mod tests {
                     title: input.title,
                     description: input.description,
                     image_url: input.image_url,
+                    override_image_url: None,
                     domain: input.domain,
                     tags: input.tags.unwrap_or_default(),
                     created_at: Utc::now(),
@@ -1446,6 +1621,20 @@ mod tests {
                 } else {
                     Ok(())
                 }
+            }
+            async fn delete_with_override(
+                &self,
+                id: Uuid,
+                user_id: Uuid,
+            ) -> Result<Option<String>, DomainError> {
+                let mut b = self.bookmarks.lock().unwrap();
+                let index = b
+                    .iter()
+                    .position(|bm| bm.id == id && bm.user_id == user_id)
+                    .ok_or(DomainError::NotFound)?;
+                let old = b[index].override_image_url.clone();
+                b.remove(index);
+                Ok(old)
             }
             async fn all_tags(&self, _user_id: Uuid) -> Result<Vec<String>, DomainError> {
                 Ok(vec![])
@@ -1513,6 +1702,21 @@ mod tests {
                 } else {
                     Err(DomainError::NotFound)
                 }
+            }
+            async fn replace_override_image_url(
+                &self,
+                id: Uuid,
+                user_id: Uuid,
+                image_url: Option<&str>,
+            ) -> Result<Option<String>, DomainError> {
+                let mut b = self.bookmarks.lock().unwrap();
+                let bookmark = b
+                    .iter_mut()
+                    .find(|bm| bm.id == id && bm.user_id == user_id)
+                    .ok_or(DomainError::NotFound)?;
+                let old = bookmark.override_image_url.take();
+                bookmark.override_image_url = image_url.map(str::to_string);
+                Ok(old)
             }
             async fn tag_samples(
                 &self,
@@ -1633,6 +1837,7 @@ mod tests {
                 title: Some("Test".to_string()),
                 description: None,
                 image_url: image_url.map(|s| s.to_string()),
+                override_image_url: None,
                 domain: None,
                 tags: vec![],
                 created_at: Utc::now(),

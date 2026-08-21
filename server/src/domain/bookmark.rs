@@ -10,10 +10,21 @@ pub struct Bookmark {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image_url: Option<String>,
+    pub override_image_url: Option<String>,
     pub domain: Option<String>,
     pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Bookmark {
+    /// The image shown on cards and in the edit preview. The scraped/imported
+    /// image remains intact so removing an override can restore it.
+    pub fn effective_image_url(&self) -> Option<&str> {
+        self.override_image_url
+            .as_deref()
+            .or(self.image_url.as_deref())
+    }
 }
 
 #[derive(Debug, Deserialize)]

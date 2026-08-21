@@ -7,6 +7,7 @@ mod settings;
 pub(crate) mod shared;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 
 use crate::web::extractors::MaybeUser;
@@ -22,6 +23,14 @@ pub fn routes() -> Router<AppState> {
             delete(bookmarks::delete).put(bookmarks::update),
         )
         .route("/bookmarks/{id}/edit", get(bookmarks::edit))
+        .route(
+            "/bookmarks/{id}/image",
+            post(bookmarks::upload_image)
+                .delete(bookmarks::remove_image)
+                .layer(DefaultBodyLimit::max(
+                    bookmarks::MAX_IMAGE_UPLOAD_BYTES + 1024 * 1024,
+                )),
+        )
         .route("/bookmarks/{id}/suggest", post(bookmarks::edit_suggest))
         .route("/invite/{token}", get(invite::invite_landing))
         .route("/admin", get(admin::admin_page))

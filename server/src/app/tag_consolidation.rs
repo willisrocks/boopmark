@@ -329,6 +329,13 @@ mod service_tests {
         async fn delete(&self, _: Uuid, _: Uuid) -> Result<(), DomainError> {
             unimplemented!()
         }
+        async fn delete_with_override(
+            &self,
+            _: Uuid,
+            _: Uuid,
+        ) -> Result<Option<String>, DomainError> {
+            unimplemented!()
+        }
         async fn all_tags(&self, _: Uuid) -> Result<Vec<String>, DomainError> {
             unimplemented!()
         }
@@ -348,6 +355,14 @@ mod service_tests {
             unimplemented!()
         }
         async fn update_image_url(&self, _: Uuid, _: Uuid, _: &str) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn replace_override_image_url(
+            &self,
+            _: Uuid,
+            _: Uuid,
+            _: Option<&str>,
+        ) -> Result<Option<String>, DomainError> {
             unimplemented!()
         }
         async fn tag_samples(&self, _: Uuid) -> Result<Vec<TagSample>, DomainError> {
@@ -427,6 +442,7 @@ mod service_tests {
             title: Some("t".into()),
             description: None,
             image_url: None,
+            override_image_url: None,
             domain: None,
             tags: tags.iter().map(|t| (*t).to_string()).collect(),
             created_at: Utc::now(),

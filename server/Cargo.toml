@@ -35,6 +35,7 @@ tokio-stream.workspace = true
 urlencoding.workspace = true
 base64 = "0.22"
 ring = "0.17"
+image.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

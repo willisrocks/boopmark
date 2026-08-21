@@ -1,9 +1,11 @@
 use askama::Template;
 use axum::Form;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
+use image::GenericImageView;
 use serde::Deserialize;
+use std::io::Cursor;
 use uuid::Uuid;
 
 use crate::domain::bookmark::{
@@ -14,6 +16,14 @@ use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
 use crate::web::pages::shared::UserView;
 use crate::web::state::{AppState, Bookmarks};
+
+/// Uploaded overrides are deliberately bounded before decoding. The body
+/// limit on the route is slightly larger to allow multipart field overhead.
+pub(crate) const MAX_IMAGE_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION: u32 = 10_000;
+const MAX_IMAGE_PIXELS: u64 = 20_000_000;
+const OVERRIDE_WIDTH: u32 = 1_200;
+const OVERRIDE_HEIGHT: u32 = 630;
 
 fn non_empty(value: String) -> Option<String> {
     if value.trim().is_empty() {
@@ -45,12 +55,13 @@ struct BookmarkView {
 
 impl From<Bookmark> for BookmarkView {
     fn from(b: Bookmark) -> Self {
+        let image_url = b.effective_image_url().map(str::to_string);
         Self {
             id: b.id,
             url: b.url,
             title: b.title,
             description: b.description,
-            image_url: b.image_url,
+            image_url,
             tags: b.tags,
             created_at_display: b.created_at.format("%b %d, %Y").to_string(),
         }
@@ -123,6 +134,8 @@ struct SuggestFields {
 #[template(path = "bookmarks/edit_modal.html")]
 struct EditModal {
     bookmark_id: Uuid,
+    image_url: Option<String>,
+    has_override: bool,
     suggest_title: String,
     suggest_description: String,
     suggest_tags: String,
@@ -321,11 +334,251 @@ pub async fn edit(
 
     render(&EditModal {
         bookmark_id: bookmark.id,
+        image_url: bookmark.effective_image_url().map(str::to_string),
+        has_override: bookmark.override_image_url.is_some(),
         suggest_title: bookmark.title.unwrap_or_default(),
         suggest_description: bookmark.description.unwrap_or_default(),
         suggest_tags: bookmark.tags.join(", "),
         has_llm,
     })
+}
+
+#[derive(Debug)]
+struct ImageOverrideUpload {
+    bytes: Vec<u8>,
+    focal_x: f32,
+    focal_y: f32,
+}
+
+/// Parse the small multipart form used by the image override widget. Keeping
+/// this independent from the image decoder makes it easy to reject malformed
+/// requests before doing any expensive work.
+async fn parse_image_override(
+    mut multipart: Multipart,
+) -> Result<ImageOverrideUpload, DomainError> {
+    let mut bytes = None;
+    let mut focal_x = 0.5;
+    let mut focal_y = 0.5;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| DomainError::InvalidInput(format!("invalid multipart upload: {error}")))?
+    {
+        let name = field.name().unwrap_or_default();
+        match name {
+            "image" | "file" => {
+                if bytes.is_some() {
+                    return Err(DomainError::InvalidInput(
+                        "only one image may be uploaded".to_string(),
+                    ));
+                }
+                let data = field.bytes().await.map_err(|error| {
+                    DomainError::InvalidInput(format!("could not read image upload: {error}"))
+                })?;
+                if data.is_empty() {
+                    return Err(DomainError::InvalidInput(
+                        "image upload is empty".to_string(),
+                    ));
+                }
+                if data.len() > MAX_IMAGE_UPLOAD_BYTES {
+                    return Err(DomainError::InvalidInput(format!(
+                        "image upload exceeds the {} MiB limit",
+                        MAX_IMAGE_UPLOAD_BYTES / (1024 * 1024)
+                    )));
+                }
+                bytes = Some(data.to_vec());
+            }
+            "focal_x" => {
+                let value = field.text().await.map_err(|error| {
+                    DomainError::InvalidInput(format!("invalid focal point: {error}"))
+                })?;
+                focal_x = parse_focal_point(&value, "focal_x")?;
+            }
+            "focal_y" => {
+                let value = field.text().await.map_err(|error| {
+                    DomainError::InvalidInput(format!("invalid focal point: {error}"))
+                })?;
+                focal_y = parse_focal_point(&value, "focal_y")?;
+            }
+            _ => {
+                // Ignore browser-added fields so the endpoint remains
+                // forwards-compatible with the preview widget.
+            }
+        }
+    }
+
+    let bytes = bytes.ok_or_else(|| DomainError::InvalidInput("image is required".to_string()))?;
+    Ok(ImageOverrideUpload {
+        bytes,
+        focal_x,
+        focal_y,
+    })
+}
+
+fn parse_focal_point(value: &str, name: &str) -> Result<f32, DomainError> {
+    let parsed = value
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| DomainError::InvalidInput(format!("{name} must be a number from 0 to 1")))?;
+    if !parsed.is_finite() || !(0.0..=1.0).contains(&parsed) {
+        return Err(DomainError::InvalidInput(format!(
+            "{name} must be a number from 0 to 1"
+        )));
+    }
+    Ok(parsed)
+}
+
+/// Decode, crop around the requested focal point, and re-encode every
+/// override into the same exact card dimensions. The browser preview is only
+/// a convenience; these bytes are the authoritative representation stored.
+fn process_image_override(
+    bytes: &[u8],
+    focal_x: f32,
+    focal_y: f32,
+) -> Result<Vec<u8>, DomainError> {
+    // Read the header first so a tiny compressed payload cannot expand into an
+    // unbounded bitmap before our decoded-size guard runs.
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| DomainError::InvalidInput(format!("could not identify image: {error}")))?;
+    let (header_width, header_height) = reader.into_dimensions().map_err(|error| {
+        DomainError::InvalidInput(format!("could not read image dimensions: {error}"))
+    })?;
+    validate_image_dimensions(header_width, header_height)?;
+
+    let image = image::load_from_memory(bytes)
+        .map_err(|error| DomainError::InvalidInput(format!("could not decode image: {error}")))?;
+    let (width, height) = image.dimensions();
+    validate_image_dimensions(width, height)?;
+
+    let (crop_x, crop_y, crop_width, crop_height) = crop_rect(width, height, focal_x, focal_y);
+    let cropped = image.crop_imm(crop_x, crop_y, crop_width, crop_height);
+    let resized = cropped.resize_exact(
+        OVERRIDE_WIDTH,
+        OVERRIDE_HEIGHT,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    let mut output = Cursor::new(Vec::new());
+    resized
+        .write_to(&mut output, image::ImageFormat::Jpeg)
+        .map_err(|error| DomainError::Internal(format!("could not encode image: {error}")))?;
+    Ok(output.into_inner())
+}
+
+fn validate_image_dimensions(width: u32, height: u32) -> Result<(), DomainError> {
+    let pixels = u64::from(width) * u64::from(height);
+    if width == 0
+        || height == 0
+        || width > MAX_IMAGE_DIMENSION
+        || height > MAX_IMAGE_DIMENSION
+        || pixels > MAX_IMAGE_PIXELS
+    {
+        return Err(DomainError::InvalidInput(format!(
+            "decoded image dimensions must be at most {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION} and {MAX_IMAGE_PIXELS} pixels"
+        )));
+    }
+    Ok(())
+}
+
+fn crop_rect(width: u32, height: u32, focal_x: f32, focal_y: f32) -> (u32, u32, u32, u32) {
+    // Use integer arithmetic for the crop dimensions so the crop remains
+    // deterministic across platforms. The final resize is always exact.
+    let target_width = u64::from(height) * u64::from(OVERRIDE_WIDTH) / u64::from(OVERRIDE_HEIGHT);
+    let target_height = u64::from(width) * u64::from(OVERRIDE_HEIGHT) / u64::from(OVERRIDE_WIDTH);
+    let (crop_width, crop_height) = if u64::from(width) * u64::from(OVERRIDE_HEIGHT)
+        >= u64::from(height) * u64::from(OVERRIDE_WIDTH)
+    {
+        (target_width.min(u64::from(width)) as u32, height)
+    } else {
+        (width, target_height.min(u64::from(height)) as u32)
+    };
+
+    let max_x = width.saturating_sub(crop_width);
+    let max_y = height.saturating_sub(crop_height);
+    let crop_x = ((max_x as f32) * focal_x).round() as u32;
+    let crop_y = ((max_y as f32) * focal_y).round() as u32;
+    (
+        crop_x.min(max_x),
+        crop_y.min(max_y),
+        crop_width,
+        crop_height,
+    )
+}
+
+fn image_response(bookmark: Bookmark) -> axum::response::Response {
+    render(&BookmarkCard {
+        bookmark: bookmark.into(),
+    })
+}
+
+pub async fn upload_image(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+    multipart: Multipart,
+) -> axum::response::Response {
+    if let Err(error) = with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await) {
+        return error_response(error);
+    }
+    let upload = match parse_image_override(multipart).await {
+        Ok(upload) => upload,
+        Err(error) => return error_response(error),
+    };
+    let _processing_permit = match state.image_processing_slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "image processor is busy; try again shortly",
+            )
+                .into_response();
+        }
+    };
+    let focal_x = upload.focal_x;
+    let focal_y = upload.focal_y;
+    let processed = match tokio::task::spawn_blocking(move || {
+        process_image_override(&upload.bytes, focal_x, focal_y)
+    })
+    .await
+    {
+        Ok(Ok(processed)) => processed,
+        Ok(Err(error)) => return error_response(error),
+        Err(error) => {
+            return error_response(DomainError::Internal(format!(
+                "image processing task failed: {error}"
+            )));
+        }
+    };
+
+    let update_result = with_bookmarks!(&state.bookmarks, svc => {
+        svc.replace_image_override(id, user.id, processed).await
+    });
+    if let Err(error) = update_result {
+        return error_response(error);
+    }
+
+    match with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await) {
+        Ok(bookmark) => image_response(bookmark),
+        Err(error) => error_response(error),
+    }
+}
+
+pub async fn remove_image(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    if let Err(error) = with_bookmarks!(&state.bookmarks, svc => {
+        svc.remove_image_override(id, user.id).await
+    }) {
+        return error_response(error);
+    }
+    match with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await) {
+        Ok(bookmark) => image_response(bookmark),
+        Err(error) => error_response(error),
+    }
 }
 
 #[derive(Deserialize)]
@@ -437,4 +690,64 @@ fn fill_if_blank(current: Option<String>, suggested: Option<String>) -> String {
         .and_then(non_empty)
         .or_else(|| suggested.and_then(non_empty))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(width, height, |x, y| {
+            Rgb([(x % 255) as u8, (y % 255) as u8, 80])
+        }));
+        let mut output = Cursor::new(Vec::new());
+        image.write_to(&mut output, ImageFormat::Png).unwrap();
+        output.into_inner()
+    }
+
+    #[test]
+    fn override_is_decoded_cropped_and_resized_to_card_dimensions() {
+        let output = process_image_override(&png_bytes(2_000, 1_000), 0.8, 0.2).unwrap();
+        let decoded = image::load_from_memory(&output).unwrap();
+        assert_eq!(decoded.dimensions(), (OVERRIDE_WIDTH, OVERRIDE_HEIGHT));
+        assert!(output.starts_with(&[0xff, 0xd8, 0xff]));
+    }
+
+    #[test]
+    fn crop_focal_point_moves_crop_within_source_bounds() {
+        let left = crop_rect(2_000, 1_000, 0.0, 0.5);
+        let right = crop_rect(2_000, 1_000, 1.0, 0.5);
+        assert_eq!(left.0, 0);
+        assert_eq!(
+            right.0,
+            right.2.max(1).saturating_sub(right.2) + (2_000 - right.2)
+        );
+        assert!(right.0 > left.0);
+        assert_eq!(left.1, right.1);
+    }
+
+    #[test]
+    fn invalid_bytes_are_rejected_before_storage() {
+        let error = process_image_override(b"not an image", 0.5, 0.5).unwrap_err();
+        assert!(matches!(error, DomainError::InvalidInput(message) if message.contains("image")));
+    }
+
+    #[test]
+    fn oversized_decoded_dimensions_are_rejected() {
+        let error =
+            process_image_override(&png_bytes(MAX_IMAGE_DIMENSION + 1, 1), 0.5, 0.5).unwrap_err();
+        assert!(
+            matches!(error, DomainError::InvalidInput(message) if message.contains("dimensions"))
+        );
+    }
+
+    #[test]
+    fn focal_point_values_are_strictly_bounded() {
+        assert!(parse_focal_point("0", "focal_x").is_ok());
+        assert!(parse_focal_point("1", "focal_x").is_ok());
+        assert!(parse_focal_point("-0.01", "focal_x").is_err());
+        assert!(parse_focal_point("1.01", "focal_x").is_err());
+        assert!(parse_focal_point("NaN", "focal_x").is_err());
+    }
 }

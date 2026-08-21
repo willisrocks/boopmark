@@ -18,6 +18,7 @@ pub trait BookmarkRepository: Send + Sync {
         user_id: Uuid,
         input: UpdateBookmark,
     ) -> Result<Bookmark, DomainError>;
+    #[allow(dead_code)]
     async fn delete(&self, id: Uuid, user_id: Uuid) -> Result<(), DomainError>;
     async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError>;
     async fn tags_with_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError>;
@@ -31,6 +32,20 @@ pub trait BookmarkRepository: Send + Sync {
         user_id: Uuid,
         image_url: &str,
     ) -> Result<(), DomainError>;
+    /// Atomically replace the optional user override and return the previous
+    /// override URL, if any, for safe object cleanup.
+    async fn replace_override_image_url(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        image_url: Option<&str>,
+    ) -> Result<Option<String>, DomainError>;
+    /// Delete a bookmark while returning its owned override URL, if any.
+    async fn delete_with_override(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<String>, DomainError>;
     /// Returns each distinct tag with its bookmark count and up to 3 sample titles.
     async fn tag_samples(&self, user_id: Uuid) -> Result<Vec<TagSample>, DomainError>;
     /// Returns (id, tags) for every bookmark belonging to this user.

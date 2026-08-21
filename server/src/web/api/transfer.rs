@@ -450,6 +450,7 @@ mod tests {
             title: Some("Test".to_string()),
             description: Some("Desc".to_string()),
             image_url: Some("https://example.com/img.png".to_string()),
+            override_image_url: None,
             domain: Some("example.com".to_string()),
             tags: tags.iter().map(|s| s.to_string()).collect(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),

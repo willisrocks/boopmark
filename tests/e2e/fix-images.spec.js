@@ -109,6 +109,9 @@ test.describe("fix-images API", () => {
       const url = "/api/v1/bookmarks/fix-images";
       const opts = { method: "POST", headers: { Accept: "text/event-stream" } };
       const [r1, r2] = await Promise.all([fetch(url, opts), fetch(url, opts)]);
+      // Consume the successful SSE response so its repair job reaches the
+      // terminal event and releases the per-user lock before the next test.
+      await Promise.all([r1, r2].filter((r) => r.status === 200).map((r) => r.text()));
       return [r1.status, r2.status];
     });
 

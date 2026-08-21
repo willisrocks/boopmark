@@ -10,7 +10,7 @@ impl BookmarkRepository for PostgresPool {
         sqlx::query_as::<_, Bookmark>(
             "INSERT INTO bookmarks (user_id, url, title, description, image_url, domain, tags)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
-             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
+             RETURNING id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at",
         )
         .bind(user_id)
         .bind(&input.url)
@@ -26,7 +26,7 @@ impl BookmarkRepository for PostgresPool {
 
     async fn get(&self, id: Uuid, user_id: Uuid) -> Result<Bookmark, DomainError> {
         sqlx::query_as::<_, Bookmark>(
-            "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at
+            "SELECT id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at
              FROM bookmarks WHERE id = $1 AND user_id = $2",
         )
         .bind(id)
@@ -54,7 +54,7 @@ impl BookmarkRepository for PostgresPool {
 
         // Build dynamic query since ORDER BY can't be parameterized
         let mut sql = String::from(
-            "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at FROM bookmarks WHERE user_id = $1",
+            "SELECT id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at FROM bookmarks WHERE user_id = $1",
         );
         let mut param_idx = 2;
 
@@ -105,7 +105,7 @@ impl BookmarkRepository for PostgresPool {
                 tags = COALESCE($5, tags),
                 updated_at = now()
              WHERE id = $1 AND user_id = $2
-             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
+             RETURNING id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at",
         )
         .bind(id)
         .bind(user_id)
@@ -158,7 +158,7 @@ impl BookmarkRepository for PostgresPool {
 
     async fn export_all(&self, user_id: Uuid) -> Result<Vec<Bookmark>, DomainError> {
         sqlx::query_as::<_, Bookmark>(
-            "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at
+            "SELECT id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at
              FROM bookmarks WHERE user_id = $1 ORDER BY created_at DESC",
         )
         .bind(user_id)
@@ -169,7 +169,7 @@ impl BookmarkRepository for PostgresPool {
 
     async fn find_by_url(&self, user_id: Uuid, url: &str) -> Result<Option<Bookmark>, DomainError> {
         sqlx::query_as::<_, Bookmark>(
-            "SELECT id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at
+            "SELECT id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at
              FROM bookmarks WHERE user_id = $1 AND url = $2 ORDER BY created_at ASC, id ASC LIMIT 1",
         )
         .bind(user_id)
@@ -181,9 +181,9 @@ impl BookmarkRepository for PostgresPool {
 
     async fn insert_with_id(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {
         sqlx::query_as::<_, Bookmark>(
-            "INSERT INTO bookmarks (id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
+            "INSERT INTO bookmarks (id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             RETURNING id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at",
         )
         .bind(bookmark.id)
         .bind(bookmark.user_id)
@@ -191,6 +191,7 @@ impl BookmarkRepository for PostgresPool {
         .bind(&bookmark.title)
         .bind(&bookmark.description)
         .bind(&bookmark.image_url)
+        .bind(&bookmark.override_image_url)
         .bind(&bookmark.domain)
         .bind(&bookmark.tags)
         .bind(bookmark.created_at)
@@ -209,8 +210,8 @@ impl BookmarkRepository for PostgresPool {
 
     async fn upsert_full(&self, bookmark: Bookmark) -> Result<Bookmark, DomainError> {
         sqlx::query_as::<_, Bookmark>(
-            "INSERT INTO bookmarks (id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "INSERT INTO bookmarks (id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              ON CONFLICT (id) DO UPDATE SET
                 url = EXCLUDED.url,
                 title = EXCLUDED.title,
@@ -221,7 +222,7 @@ impl BookmarkRepository for PostgresPool {
                 created_at = EXCLUDED.created_at,
                 updated_at = EXCLUDED.updated_at
              WHERE bookmarks.user_id = $2
-             RETURNING id, user_id, url, title, description, image_url, domain, tags, created_at, updated_at",
+             RETURNING id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at",
         )
         .bind(bookmark.id)
         .bind(bookmark.user_id)
@@ -229,6 +230,7 @@ impl BookmarkRepository for PostgresPool {
         .bind(&bookmark.title)
         .bind(&bookmark.description)
         .bind(&bookmark.image_url)
+        .bind(&bookmark.override_image_url)
         .bind(&bookmark.domain)
         .bind(&bookmark.tags)
         .bind(bookmark.created_at)
@@ -268,6 +270,60 @@ impl BookmarkRepository for PostgresPool {
         } else {
             Ok(())
         }
+    }
+
+    async fn replace_override_image_url(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        image_url: Option<&str>,
+    ) -> Result<Option<String>, DomainError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
+        let old = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT override_image_url FROM bookmarks WHERE id = $1 AND user_id = $2 FOR UPDATE",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?
+        .ok_or(DomainError::NotFound)?;
+
+        sqlx::query(
+            "UPDATE bookmarks SET override_image_url = $1, updated_at = now()
+             WHERE id = $2 AND user_id = $3",
+        )
+        .bind(image_url)
+        .bind(id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
+        Ok(old)
+    }
+
+    async fn delete_with_override(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<String>, DomainError> {
+        let old = sqlx::query_scalar::<_, Option<String>>(
+            "DELETE FROM bookmarks WHERE id = $1 AND user_id = $2 RETURNING override_image_url",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?
+        .ok_or(DomainError::NotFound)?;
+        Ok(old)
     }
 
     async fn tag_samples(

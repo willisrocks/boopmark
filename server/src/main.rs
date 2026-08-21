@@ -194,6 +194,7 @@ async fn main() {
         enrichment: enrichment_service,
         tag_consolidation: tag_consolidation_service,
         images_storage,
+        image_processing_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         active_image_fix_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         active_tag_consolidation_jobs: Arc::new(std::sync::Mutex::new(
             std::collections::HashSet::new(),
