@@ -1,7 +1,7 @@
 # Generated Bookmark Images — Architectural Design
 
 **Date:** 2026-08-24
-**Status:** Approved for implementation
+**Status:** Draft — awaiting captain review
 
 ## Summary
 
@@ -249,7 +249,7 @@ No production smoke step prints or screenshots a key. Screenshots of product beh
 
 ## Monitoring
 
-For the initial production window, monitor Railway/application logs, database errors, object-storage writes/deletes, and the smoke key's Google usage console. Safe structured events should distinguish generation started, succeeded, skipped, and failed, with trigger/model/duration and fixed category.
+For the initial production window, monitor production application logs, database errors, object-storage writes/deletes, and the smoke key's Google usage console. Safe structured events should distinguish generation started, succeeded, skipped, and failed, with trigger/model/duration and fixed category.
 
 Watch specifically for:
 
