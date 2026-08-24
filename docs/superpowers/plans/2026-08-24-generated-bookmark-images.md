@@ -962,18 +962,55 @@ Confirm the implementation PR has required reviews, CI is green, migration 010 h
 
 Expected: a merged approved commit; otherwise stop and report `blocked`.
 
-- [ ] **Step 2: Deploy through the repository-owned production command**
+- [ ] **Step 2: Capture and prove the exact currently deployed last-good release**
 
-From a clean checkout of the merged default branch run:
+From the Railway-linked release-control checkout, capture deployment metadata before uploading anything:
 
 ```bash
-git pull --ff-only
-just deploy
+set -euo pipefail
+CONTROL_DIR="$(pwd -P)"
+LAST_GOOD_EVIDENCE="$(mktemp)"
+railway deployment list --limit 20 --json > "$LAST_GOOD_EVIDENCE"
+LAST_GOOD_DEPLOYMENT_ID="$(jq -er '[.[] | select(.status == "SUCCESS")][0].id' "$LAST_GOOD_EVIDENCE")"
+LAST_GOOD_COMMIT="$(jq -er --arg id "$LAST_GOOD_DEPLOYMENT_ID" \
+  '.[] | select(.id == $id) | .meta.commitHash' "$LAST_GOOD_EVIDENCE")"
+test "${#LAST_GOOD_COMMIT}" -eq 40
+test "$(printf '%s' "$LAST_GOOD_COMMIT" | tr -cd '0-9a-f')" = "$LAST_GOOD_COMMIT"
+git fetch --quiet origin
+test "$(git rev-parse "$LAST_GOOD_COMMIT^{commit}")" = "$LAST_GOOD_COMMIT"
+railway logs --lines 20 "$LAST_GOOD_DEPLOYMENT_ID"
 ```
 
-Expected: CSS build succeeds and `railway up` completes successfully.
+Compare both identifiers with the prior production release record in Firstmate/release history and append the proven `LAST_GOOD_DEPLOYMENT_ID` plus `LAST_GOOD_COMMIT` to the supervised release status before proceeding. If Railway metadata lacks `.meta.commitHash`, the SHA is absent from local Git, or either identifier disagrees with the prior release record, append `blocked: exact currently deployed last-good release cannot be proved` and stop before deployment. Do not infer it from `HEAD`, `HEAD^`, branch position, or the newest local commit.
 
-- [ ] **Step 3: Verify startup and migration health**
+Expected: one successful currently deployed Railway deployment ID and its exact 40-character Git commit are independently corroborated and durably recorded outside the repository.
+
+- [ ] **Step 3: Deploy the exact approved commit from a clean isolated release copy**
+
+Set `APPROVED_MERGE_COMMIT` to the exact SHA recorded at Step 1, verify it, then clone an isolated release copy. Preserve only the Railway project linkage from the control directory; do not switch or mutate the control checkout.
+
+```bash
+set -euo pipefail
+test "${#APPROVED_MERGE_COMMIT}" -eq 40
+git fetch --quiet origin
+test "$(git rev-parse "$APPROVED_MERGE_COMMIT^{commit}")" = "$APPROVED_MERGE_COMMIT"
+RELEASE_DIR="$(mktemp -d)"
+git clone --quiet --no-checkout "$(git remote get-url origin)" "$RELEASE_DIR"
+git -C "$RELEASE_DIR" checkout --quiet --detach "$APPROVED_MERGE_COMMIT"
+test "$(git -C "$RELEASE_DIR" rev-parse HEAD)" = "$APPROVED_MERGE_COMMIT"
+test -d "$CONTROL_DIR/.railway"
+cp -R "$CONTROL_DIR/.railway" "$RELEASE_DIR/.railway"
+(
+  cd "$RELEASE_DIR"
+  test -z "$(git status --porcelain --untracked-files=no)"
+  just deploy
+)
+rm -rf "$RELEASE_DIR"
+```
+
+Expected: CSS build succeeds and `railway up` deploys the reviewed merge commit exactly; the release-control checkout remains unchanged.
+
+- [ ] **Step 4: Verify startup and migration health**
 
 Run:
 
@@ -984,19 +1021,19 @@ railway logs
 
 Expected: health returns `ok`; application logs show successful startup/migration and no generated-image schema/config errors. Do not paste secret-bearing environment output into status or PR comments.
 
-- [ ] **Step 4: Run the production web smoke with chrome-devtools-axi**
+- [ ] **Step 5: Run the production web smoke with chrome-devtools-axi**
 
 Use a dedicated smoke user in `https://boopmark.com`, save its Gemini key through the write-only field, enable Lite, and create `https://generated-image-smoke.invalid/automatic` with benign explicit title/description. The reserved `.invalid` domain deterministically makes metadata and screenshot acquisition fail without contacting a real host. Measure that the create response returns before generation completes; refresh normally until the image appears. Verify no AI/pending card text, 1200×630 JPEG, internal `image_source='generated'`, manual **Generate image** changes `override_image_url`, upload wins afterward, and Restore original reveals the base.
 
 Expected: every approved web behavior passes; the settings key is never shown or screenshotted.
 
-- [ ] **Step 5: Verify the exact production bulk cap**
+- [ ] **Step 6: Verify the exact production bulk cap**
 
 Create 12 benign eligible smoke bookmarks under unique paths on `https://generated-image-smoke.invalid/`, run Fix Missing Images once, and inspect the SSE/progress line.
 
 Expected: `Attempts: 10 / 10 (cap reached)`, no more than 10 provider calls, successful generation reported separately, and candidates 11–12 remain eligible for a later user action.
 
-- [ ] **Step 6: Run the production API smoke in iOS Simulator**
+- [ ] **Step 7: Run the production API smoke in iOS Simulator**
 
 Run:
 
@@ -1009,32 +1046,51 @@ Boot an available iPhone simulator from the displayed list and launch the alread
 
 Expected: the production-hosted generated image displays; placeholder-to-image refresh works; manual/upload override URLs display; existing bookmark API decoding remains compatible because internal `image_source` is not serialized. The iOS project/build is maintained outside this repository, so no iOS source command or fabricated bundle identifier belongs in this plan.
 
-- [ ] **Step 7: Monitor the initial release window**
+- [ ] **Step 8: Monitor the initial release window**
 
 Run `railway logs` during the supervised window and inspect production database errors, R2 write/delete behavior, and the smoke key's Google usage console. Check create latency, fixed error categories, normalization/storage failures, conditional-write skips, orphan cleanup, repeated automatic attempts, CPU/memory, and any bulk count above 10.
 
 Expected: generation remains post-response, no bookmark triggers repeated automatic calls, and no bulk run exceeds 10. Any cap breach is a release blocker.
 
-- [ ] **Step 8: Clean up production smoke data and credentials**
+- [ ] **Step 9: Clean up production smoke data and credentials**
 
 Delete the dedicated smoke bookmarks through the app/API, verify their owned override objects are removed, disable Generated Images for the smoke user, delete its saved Gemini key through Settings, and revoke the key in Google AI Studio when the smoke window is over.
 
 Expected: no smoke bookmark/object/key remains and ordinary users are unaffected.
 
-- [ ] **Step 9: Keep an exact rollback command ready**
+- [ ] **Step 10: Roll back only to the proved last-good identity from a clean isolated copy**
 
-If the release is unsafe, use a clean release worktree and run:
+If the release is unsafe, reuse the exact `LAST_GOOD_DEPLOYMENT_ID` and `LAST_GOOD_COMMIT` recorded before deployment. Refuse rollback when either value is absent, malformed, missing from Git, or no longer matches the prior release evidence. Never substitute `HEAD^` or switch the release-control checkout.
 
 ```bash
-git switch --detach "$(git rev-parse HEAD^)"
-just deploy
+set -euo pipefail
+test -n "$LAST_GOOD_DEPLOYMENT_ID"
+test "${#LAST_GOOD_COMMIT}" -eq 40
+test "$(printf '%s' "$LAST_GOOD_COMMIT" | tr -cd '0-9a-f')" = "$LAST_GOOD_COMMIT"
+git fetch --quiet origin
+test "$(git rev-parse "$LAST_GOOD_COMMIT^{commit}")" = "$LAST_GOOD_COMMIT"
+ROLLBACK_EVIDENCE="$(mktemp)"
+railway deployment list --limit 100 --json > "$ROLLBACK_EVIDENCE"
+test "$(jq -er --arg id "$LAST_GOOD_DEPLOYMENT_ID" \
+  '.[] | select(.id == $id) | .meta.commitHash' "$ROLLBACK_EVIDENCE")" = "$LAST_GOOD_COMMIT"
+ROLLBACK_DIR="$(mktemp -d)"
+git clone --quiet --no-checkout "$(git remote get-url origin)" "$ROLLBACK_DIR"
+git -C "$ROLLBACK_DIR" checkout --quiet --detach "$LAST_GOOD_COMMIT"
+test "$(git -C "$ROLLBACK_DIR" rev-parse HEAD)" = "$LAST_GOOD_COMMIT"
+test -d "$CONTROL_DIR/.railway"
+cp -R "$CONTROL_DIR/.railway" "$ROLLBACK_DIR/.railway"
+(
+  cd "$ROLLBACK_DIR"
+  test -z "$(git status --porcelain --untracked-files=no)"
+  just deploy
+)
+rm -rf "$ROLLBACK_DIR" "$ROLLBACK_EVIDENCE"
 curl --fail --silent --show-error https://boopmark.com/health
-git switch -
 ```
 
-Expected: previous application code is restored while additive migration columns remain harmless. Restart abandons process-local jobs without retry; existing generated images remain ordinary stored images. Then verify metadata/screenshot acquisition, uploads, cards, and Restore original.
+Expected: the exact pre-recorded last-good commit is redeployed through `just deploy` while additive migration columns remain in place and harmless. Restart abandons process-local jobs without retry; existing generated images remain ordinary stored images. Then verify metadata/screenshot acquisition, uploads, cards, and Restore original. If any proof command fails, stop with `blocked` instead of attempting another revision.
 
-- [ ] **Step 10: Report terminal release state**
+- [ ] **Step 11: Report terminal release state**
 
 Append one supervised Firstmate status line containing deployed commit, web result, iOS Simulator result, monitoring result, cleanup result, and either `rollback not required` or the rolled-back commit. Never include keys, prompt/page content, provider response bodies, or screenshots of secret fields.
 
@@ -1054,5 +1110,5 @@ Before implementation is declared complete, the supervising session checks every
 - [ ] Fixed errors and structured logs contain no provider body, key, prompt, excerpt, or bytes.
 - [ ] Provider images are bounded, decoded, normalized, metadata-stripped 1200×630 JPEGs.
 - [ ] Unit, Postgres, browser, isolated live-provider, production web, and iOS Simulator checks have evidence.
-- [ ] Deploy, monitoring, cleanup, and rollback checks are complete after ordinary merge approval.
+- [ ] Deploy, monitoring, cleanup, and rollback checks are complete after ordinary merge approval; rollback targets only the exact pre-deployment last-good identity proved from Railway metadata and prior release history.
 - [ ] Pre-existing scraper defects remain documented as a separate follow-up and were not bundled.
