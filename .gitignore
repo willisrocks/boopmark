@@ -11,4 +11,14 @@ test-results/
 .devproxy-override.yml
 .playwright-mcp/
 .superpowers/
+.DS_Store
+
+# iOS/Xcode generated artifacts
+mobile/ios/BoopmarkShared/.build/
+mobile/ios/BoopmarkShared/.swiftpm/
+mobile/ios/Boopmark.xcodeproj/
+mobile/ios/Boopmark.xcworkspace/
+mobile/ios/DerivedData/
+mobile/ios/archives/
+mobile/ios/AppStoreMedia/
 .litmus/

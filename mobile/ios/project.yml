@@ -1,0 +1,116 @@
+name: Boopmark
+options:
+  bundleIdPrefix: com.boopmark
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+settings:
+  base:
+    DEVELOPMENT_TEAM: KHRFG94AM8
+    CODE_SIGN_STYLE: Automatic
+packages:
+  BoopmarkShared:
+    path: BoopmarkShared
+targets:
+  Boopmark:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Boopmark
+    resources:
+      - path: Boopmark/Resources
+    dependencies:
+      - package: BoopmarkShared
+      - target: BoopmarkShareExtension
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.boopmark.ios
+        PRODUCT_NAME: Boopmark
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "4"
+        INFOPLIST_FILE: Boopmark/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Boopmark/Boopmark.entitlements
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALOG: false
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+
+  BoopmarkShareExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: BoopmarkShareExtension
+      - path: Boopmark/Views/Theme.swift
+    resources:
+      - path: Boopmark/Resources/PrivacyInfo.xcprivacy
+    dependencies:
+      - package: BoopmarkShared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.boopmark.ios.share
+        PRODUCT_NAME: Boopmark Share Extension
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "4"
+        INFOPLIST_FILE: BoopmarkShareExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: BoopmarkShareExtension/BoopmarkShareExtension.entitlements
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"
+
+  BoopmarkTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: BoopmarkTests
+    dependencies:
+      - target: Boopmark
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.boopmark.ios.tests
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "4"
+        GENERATE_INFOPLIST_FILE: true
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"
+
+  BoopmarkUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: BoopmarkUITests
+    dependencies:
+      - target: Boopmark
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.boopmark.ios.uitests
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "4"
+        GENERATE_INFOPLIST_FILE: true
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"
+
+schemes:
+  Boopmark:
+    build:
+      targets:
+        Boopmark: all
+        BoopmarkShareExtension: all
+        BoopmarkUITests: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverage: true
+      targets:
+        - BoopmarkTests
+        - BoopmarkUITests

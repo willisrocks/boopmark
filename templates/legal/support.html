@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Support — Boopmark{% endblock %}
+{% block content %}
+<main class="max-w-3xl mx-auto px-6 py-12 sm:py-16">
+    <a href="/" class="inline-flex items-center gap-3 text-white hover:text-blue-400 transition-colors">
+        <img src="/static/boopmark-logo.svg" alt="" class="w-9 h-9">
+        <span class="text-xl font-semibold">Boopmark</span>
+    </a>
+
+    <article class="mt-10 bg-[#1e2235] rounded-2xl border border-gray-700 p-6 sm:p-10 shadow-lg shadow-black/20">
+        <h1 class="text-3xl font-bold text-white">Boopmark Support</h1>
+        <p class="mt-3 text-gray-400">Help with the iPhone app, Share Extension, and hosted or self-hosted Boopmark servers.</p>
+
+        <div class="mt-8 space-y-8 text-gray-300 leading-7">
+            <section>
+                <h2 class="text-xl font-semibold text-white">Connect the iPhone app</h2>
+                <ol class="mt-3 list-decimal pl-6 space-y-2">
+                    <li>Sign in to your Boopmark server in a web browser.</li>
+                    <li>Open <strong class="text-gray-100">Settings</strong> and create an API key.</li>
+                    <li>In the iPhone app, open Settings and enter the HTTPS server URL and API key.</li>
+                    <li>Tap <strong class="text-gray-100">Save connection</strong>.</li>
+                </ol>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">Save from another app</h2>
+                <p class="mt-3">Open the system Share Sheet in Safari or another app, choose <strong class="text-gray-100">Boopmark</strong>, review the title, note, and tags, then tap Save. If Boopmark is not visible, choose <strong class="text-gray-100">More</strong> in the Share Sheet and enable it.</p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">Offline captures</h2>
+                <p class="mt-3">When a network request cannot reach the server, Boopmark can keep the capture on your device. Open Settings and use <strong class="text-gray-100">Send queued captures</strong> after reconnecting. Sending is intentionally manual to avoid duplicate bookmarks.</p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">Get more help</h2>
+                <p class="mt-3">Report a problem or request account-deletion help through <a href="https://github.com/willisrocks/boopmark/issues" class="text-blue-400 hover:text-blue-300 underline">Boopmark’s public support tracker</a>. Do not include API keys, passwords, private bookmark URLs, or other confidential information in a public issue.</p>
+            </section>
+
+            <p class="pt-2 text-sm text-gray-500">See also the <a href="/privacy" class="text-blue-400 hover:text-blue-300 underline">Boopmark Privacy Policy</a>.</p>
+        </div>
+    </article>
+</main>
+{% endblock %}

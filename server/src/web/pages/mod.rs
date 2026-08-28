@@ -3,6 +3,7 @@ mod auth;
 pub mod auth_shared;
 pub mod bookmarks;
 mod invite;
+mod legal;
 mod settings;
 pub(crate) mod shared;
 
@@ -16,6 +17,8 @@ use crate::web::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(home))
+        .route("/privacy", get(legal::privacy))
+        .route("/support", get(legal::support))
         .route("/bookmarks", get(bookmarks::list).post(bookmarks::create))
         .route("/bookmarks/suggest", post(bookmarks::suggest))
         .route(

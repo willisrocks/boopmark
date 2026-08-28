@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Privacy Policy — Boopmark{% endblock %}
+{% block content %}
+<main class="max-w-3xl mx-auto px-6 py-12 sm:py-16">
+    <a href="/" class="inline-flex items-center gap-3 text-white hover:text-blue-400 transition-colors">
+        <img src="/static/boopmark-logo.svg" alt="" class="w-9 h-9">
+        <span class="text-xl font-semibold">Boopmark</span>
+    </a>
+
+    <article class="mt-10 bg-[#1e2235] rounded-2xl border border-gray-700 p-6 sm:p-10 shadow-lg shadow-black/20">
+        <h1 class="text-3xl font-bold text-white">Privacy Policy</h1>
+        <p class="mt-2 text-sm text-gray-500">Effective August 27, 2026</p>
+
+        <div class="mt-8 space-y-8 text-gray-300 leading-7">
+            <section>
+                <h2 class="text-xl font-semibold text-white">What Boopmark handles</h2>
+                <ul class="mt-3 list-disc pl-6 space-y-2">
+                    <li><strong class="text-gray-100">Account information:</strong> information used to identify your Boopmark account, such as your email address and profile details when you sign in on the web.</li>
+                    <li><strong class="text-gray-100">Bookmark content:</strong> URLs, titles, notes, tags, images, and related metadata that you choose to save.</li>
+                    <li><strong class="text-gray-100">Connection information:</strong> API credentials are stored in the iOS Keychain on your device. Boopmark servers receive the credential when authenticating API requests but the app does not send it to advertising or analytics services.</li>
+                    <li><strong class="text-gray-100">Operational information:</strong> standard server logs and diagnostics needed to keep the service secure and reliable.</li>
+                </ul>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">How information is used</h2>
+                <p class="mt-3">We use this information only to provide and protect the service: authenticating you, saving and syncing bookmarks, generating previews, offering search, and troubleshooting failures. Boopmark does not sell personal information, track you across other companies’ apps or websites, or serve behavioral advertising.</p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">Service providers</h2>
+                <p class="mt-3">Boopmark uses infrastructure providers to host the application, database, and bookmark images. When you explicitly request AI suggestions, the bookmark URL and extracted page content needed for that request may be processed by Anthropic. Sites and metadata services contacted to create a bookmark preview can also receive the saved URL as part of that request. These providers process data on our behalf under their own security and privacy terms.</p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">Retention and control</h2>
+                <p class="mt-3">Bookmark data remains until you delete it or the associated account is removed. You can delete bookmarks in the app or web interface and revoke mobile API keys from Boopmark settings. Short-lived backups and security logs may remain for a limited period where needed for service integrity or legal compliance.</p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">Security and self-hosting</h2>
+                <p class="mt-3">Traffic to the hosted Boopmark service uses HTTPS, and the iOS app stores its API key using Apple’s Keychain. If you connect the app to a self-hosted Boopmark server, that server’s operator controls its data practices and is responsible for its own privacy disclosures and security.</p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">Children and changes</h2>
+                <p class="mt-3">Boopmark is not directed to children under 13. We may update this policy when the product or legal requirements change; the effective date above will be updated when that happens.</p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">Questions or requests</h2>
+                <p class="mt-3">For privacy questions, data-access requests, or account-deletion help, visit the <a href="/support" class="text-blue-400 hover:text-blue-300 underline">Boopmark support page</a>.</p>
+            </section>
+        </div>
+    </article>
+</main>
+{% endblock %}
