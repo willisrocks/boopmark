@@ -15,6 +15,6 @@ module.exports = defineConfig({
     command: "bash ./scripts/e2e/start-server.sh",
     url: "http://127.0.0.1:4010/health",
     reuseExistingServer: false,
-    timeout: 120_000,
+    timeout: 300_000,
   },
 });

@@ -8,6 +8,8 @@ pub enum DomainError {
     Unauthorized,
     #[error("already exists")]
     AlreadyExists,
+    #[error("operation in progress")]
+    OperationInProgress,
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("internal error: {0}")]

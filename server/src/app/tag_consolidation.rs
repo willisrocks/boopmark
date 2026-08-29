@@ -239,6 +239,7 @@ mod service_tests {
     use crate::app::settings::SaveLlmSettingsInput;
     use crate::domain::bookmark::{Bookmark, BookmarkFilter, CreateBookmark, UpdateBookmark};
     use crate::domain::llm_settings::LlmSettings;
+    use crate::domain::ports::bookmark_repo::CreateIdempotency;
     use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
     use crate::domain::ports::tag_consolidator::{
         ConsolidationInput, ConsolidationOutput, TagConsolidator, TagSample,
@@ -310,6 +311,22 @@ mod service_tests {
     }
     impl BookmarkRepository for StubBookmarkRepo {
         async fn create(&self, _: Uuid, _: CreateBookmark) -> Result<Bookmark, DomainError> {
+            unimplemented!()
+        }
+        async fn claim_create(
+            &self,
+            _: Uuid,
+            _: CreateIdempotency,
+        ) -> Result<crate::domain::ports::bookmark_repo::CreateIdempotencyClaim, DomainError>
+        {
+            unimplemented!()
+        }
+        async fn create_claimed(
+            &self,
+            _: Uuid,
+            _: CreateBookmark,
+            _: CreateIdempotency,
+        ) -> Result<Bookmark, DomainError> {
             unimplemented!()
         }
         async fn get(&self, _: Uuid, _: Uuid) -> Result<Bookmark, DomainError> {
@@ -473,11 +490,7 @@ mod service_tests {
         let settings = Arc::new(SettingsService::new(llm_repo, secret_box));
         let service = TagConsolidationService::new(bookmark_repo, consolidator, settings);
 
-        let err = service
-            .consolidate(user_id)
-            .await
-            .err()
-            .expect("should err");
+        let err = service.consolidate(user_id).await.expect_err("should err");
         assert!(matches!(err, DomainError::InvalidInput(_)), "got {err:?}");
     }
 
@@ -509,11 +522,7 @@ mod service_tests {
             .expect("save");
 
         let service = TagConsolidationService::new(bookmark_repo, consolidator, settings);
-        let err = service
-            .consolidate(user_id)
-            .await
-            .err()
-            .expect("should err");
+        let err = service.consolidate(user_id).await.expect_err("should err");
         assert!(matches!(err, DomainError::InvalidInput(_)), "got {err:?}");
     }
 

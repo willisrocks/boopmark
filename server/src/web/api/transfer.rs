@@ -27,6 +27,9 @@ fn error_response(err: DomainError) -> impl IntoResponse {
         DomainError::NotFound => (StatusCode::NOT_FOUND, "not found"),
         DomainError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
         DomainError::AlreadyExists => (StatusCode::CONFLICT, "already exists"),
+        DomainError::OperationInProgress => {
+            (StatusCode::SERVICE_UNAVAILABLE, "operation in progress")
+        }
         DomainError::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid input"),
         DomainError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     };

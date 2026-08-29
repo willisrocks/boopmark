@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Add Bookmark · Boopmark</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="popup.js"></script>
+</head>
+<body>
+  <header class="brand-row">
+    <div class="brand"><img src="logo.svg" alt="" width="28" height="32"><span>Boopmark</span></div>
+    <button id="settings-button" class="text-button" type="button">Settings</button>
+  </header>
+  <main>
+    <section id="setup" hidden aria-labelledby="setup-heading">
+      <div class="heading-row"><h1 id="setup-heading">Connect Boopmark</h1><button id="back-button" class="text-button" type="button" hidden>Back</button></div>
+      <p class="intro">Save pages to your Boopmark account, just like sharing from iOS.</p>
+      <form id="connection-form">
+        <label for="server">Server URL</label>
+        <input id="server" name="server" type="url" required value="https://boopmark.com" autocomplete="url" spellcheck="false">
+        <label for="api-key">Boopmark API key</label>
+        <input id="api-key" name="apiKey" type="password" required autocomplete="off" spellcheck="false" placeholder="Paste your Boopmark API key">
+        <p class="hint">Find your key in <a id="settings-link" href="https://boopmark.com/settings" target="_blank" rel="noreferrer">Settings → API keys</a>. This is not your AI provider key.</p>
+        <p class="privacy">Opening the popup sends the page URL to your server for metadata lookup, including AI processing when enabled in your account settings.</p>
+        <p id="connection-status" role="status" aria-live="polite"></p>
+        <div class="actions"><button id="disconnect-button" class="secondary" type="button" hidden>Disconnect</button><button id="connect-button" class="primary" type="submit">Connect</button></div>
+      </form>
+    </section>
+
+    <section id="capture" hidden aria-labelledby="capture-heading">
+      <div class="heading-row"><h1 id="capture-heading">Add Bookmark</h1><button id="close-button" class="icon-button" type="button" aria-label="Cancel and discard bookmark">×</button></div>
+      <form id="bookmark-form">
+        <label for="url">URL</label>
+        <input id="url" name="url" type="url" required placeholder="https://example.com" spellcheck="false" aria-describedby="url-error">
+        <p id="url-error" class="error" role="status" hidden></p>
+        <div class="metadata-row"><p id="metadata-status" role="status" aria-live="polite">Fetching metadata…</p><button id="autofill-button" class="text-button" type="button">Autofill</button></div>
+        <label for="title">Title <span class="optional">optional</span></label>
+        <input id="title" name="title" type="text" placeholder="Page title">
+        <label for="description">Description <span class="optional">optional</span></label>
+        <textarea id="description" name="description" rows="3" placeholder="A little context for later"></textarea>
+        <label for="tags">Tags <span class="optional">optional</span></label>
+        <input id="tags" name="tags" type="text" placeholder="design, software, tools" aria-describedby="tags-hint">
+        <p id="tags-hint" class="hint">Comma separated</p>
+        <p id="save-status" role="status" aria-live="polite"></p>
+        <div id="recovery" class="recovery" hidden><a id="library-link" href="https://boopmark.com/bookmarks" target="_blank" rel="noreferrer">Check Boopmark</a><button id="ack-button" class="text-button" type="button">I checked; dismiss this result</button></div>
+        <div class="actions"><button id="cancel-button" class="secondary" type="button">Cancel</button><button id="save-button" class="primary" type="submit">Add Bookmark</button></div>
+      </form>
+    </section>
+    <p id="fatal-error" class="error" role="alert" hidden></p>
+  </main>
+</body>
+</html>

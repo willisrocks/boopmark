@@ -2,10 +2,14 @@
   "private": true,
   "scripts": {
     "test:e2e": "playwright test",
-    "test:e2e:headed": "playwright test --headed"
+    "test:e2e:headed": "playwright test --headed",
+    "test:extension": "node --test extensions/chrome/tests/*.test.js",
+    "extension:browser": "node scripts/e2e/chrome-browser.mjs",
+    "extension:fixture": "node scripts/e2e/chrome-fixture.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.54.0",
+    "agent-browser": "0.35.1",
     "tailwindcss": "^3"
   }
 }

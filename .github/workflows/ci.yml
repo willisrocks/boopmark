@@ -14,10 +14,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Only checks the boop CLI crate — the server crate requires Postgres
-  # and has its own test infrastructure (docker compose, migrations, etc.)
   check:
-    name: Check
+    name: Rust workspace
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,11 +24,59 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format check
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy -p boop --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
-        run: cargo test -p boop
+        run: cargo test --workspace
+
+  extension:
+    name: Chrome extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:extension
+
+  idempotency-postgres:
+    name: Postgres idempotency
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: boopmark
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: boopmark
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U boopmark -d boopmark"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://boopmark:devpassword@127.0.0.1:5432/boopmark
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Postgres client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+      - name: Apply migrations
+        run: |
+          for migration in migrations/*.sql; do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+          done
+      - name: Test durable create idempotency
+        run: >-
+          cargo test -p boopmark-server
+          adapters::postgres::bookmark_repo::idempotency_tests::durable_claims_are_atomic_scoped_and_headerless_creates_remain_distinct
+          -- --ignored --exact
 
   install-script:
     name: Install script tests

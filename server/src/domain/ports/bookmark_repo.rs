@@ -3,9 +3,45 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::tag_consolidator::TagSample;
 use uuid::Uuid;
 
+/// The client-visible operation identity and the reviewed create payload it
+/// represents.  The fingerprint is calculated before any server-side
+/// metadata/enrichment is applied, so a transport replay can be compared with
+/// the exact values the user submitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateIdempotency {
+    pub key: Uuid,
+    pub fingerprint_version: i16,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum CreateIdempotencyClaim {
+    Acquired,
+    Pending,
+    Completed(Box<Bookmark>),
+    Conflict,
+}
+
 #[trait_variant::make(Send)]
 pub trait BookmarkRepository: Send + Sync {
     async fn create(&self, user_id: Uuid, input: CreateBookmark) -> Result<Bookmark, DomainError>;
+
+    /// Atomically claim an operation identity before any enrichment or other
+    /// create side effect is attempted.
+    async fn claim_create(
+        &self,
+        user_id: Uuid,
+        operation: CreateIdempotency,
+    ) -> Result<CreateIdempotencyClaim, DomainError>;
+
+    /// Insert the bookmark and finalize a previously acquired operation in
+    /// one database transaction.
+    async fn create_claimed(
+        &self,
+        user_id: Uuid,
+        input: CreateBookmark,
+        operation: CreateIdempotency,
+    ) -> Result<Bookmark, DomainError>;
     async fn get(&self, id: Uuid, user_id: Uuid) -> Result<Bookmark, DomainError>;
     async fn list(
         &self,

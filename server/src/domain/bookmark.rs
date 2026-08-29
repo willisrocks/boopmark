@@ -27,7 +27,7 @@ impl Bookmark {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateBookmark {
     pub url: String,
     pub title: Option<String>,

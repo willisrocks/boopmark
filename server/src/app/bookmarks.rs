@@ -1,6 +1,8 @@
 use crate::domain::bookmark::*;
 use crate::domain::error::DomainError;
-use crate::domain::ports::bookmark_repo::BookmarkRepository;
+use crate::domain::ports::bookmark_repo::{
+    BookmarkRepository, CreateIdempotency, CreateIdempotencyClaim,
+};
 use crate::domain::ports::metadata::MetadataExtractor;
 use crate::domain::ports::screenshot::ScreenshotProvider;
 use crate::domain::ports::storage::ObjectStorage;
@@ -55,8 +57,34 @@ where
     pub async fn create(
         &self,
         user_id: Uuid,
-        mut input: CreateBookmark,
+        input: CreateBookmark,
     ) -> Result<Bookmark, DomainError> {
+        let input = self.prepare_create(input).await;
+        self.repo.create(user_id, input).await
+    }
+
+    /// Claim an idempotent create before any server-side metadata work.
+    pub async fn claim_create(
+        &self,
+        user_id: Uuid,
+        operation: CreateIdempotency,
+    ) -> Result<CreateIdempotencyClaim, DomainError> {
+        self.repo.claim_create(user_id, operation).await
+    }
+
+    /// Complete an already claimed idempotent create.  The repository owns the
+    /// final insert/operation update transaction.
+    pub async fn create_claimed(
+        &self,
+        user_id: Uuid,
+        input: CreateBookmark,
+        operation: CreateIdempotency,
+    ) -> Result<Bookmark, DomainError> {
+        let input = self.prepare_create(input).await;
+        self.repo.create_claimed(user_id, input, operation).await
+    }
+
+    async fn prepare_create(&self, mut input: CreateBookmark) -> CreateBookmark {
         if needs_metadata(&input) {
             let metadata_result = self.metadata.extract(&input.url).await;
             if let Err(error) = &metadata_result {
@@ -91,7 +119,7 @@ where
             input.domain = parsed.host_str().map(|h| h.to_string());
         }
 
-        self.repo.create(user_id, input).await
+        input
     }
 
     pub async fn list(
@@ -618,6 +646,36 @@ mod tests {
         assert_eq!(image.as_deref(), Some("https://example.com/preview.png"));
     }
 
+    #[test]
+    fn merge_metadata_preserves_explicitly_cleared_text_and_tags() {
+        let mut input: CreateBookmark = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/article",
+            "title": "",
+            "description": "",
+            "tags": []
+        }))
+        .expect("extension create payload");
+
+        // Normal creation still scrapes for the preview image/domain. That must
+        // not undo the user's deliberate clears after pre-save suggestions.
+        assert!(needs_metadata(&input));
+        let image = merge_metadata(
+            &mut input,
+            UrlMetadata {
+                title: Some("Scraped title".into()),
+                description: Some("Scraped description".into()),
+                image_url: Some("https://example.com/image.png".into()),
+                domain: Some("example.com".into()),
+            },
+        );
+
+        assert_eq!(input.title.as_deref(), Some(""));
+        assert_eq!(input.description.as_deref(), Some(""));
+        assert_eq!(input.tags, Some(vec![]));
+        assert_eq!(input.domain.as_deref(), Some("example.com"));
+        assert_eq!(image.as_deref(), Some("https://example.com/image.png"));
+    }
+
     struct OwnershipTestStorage;
 
     impl ObjectStorage for OwnershipTestStorage {
@@ -685,7 +743,9 @@ mod tests {
         use crate::app::bookmarks::BookmarkService;
         use crate::domain::bookmark::*;
         use crate::domain::error::DomainError;
-        use crate::domain::ports::bookmark_repo::BookmarkRepository;
+        use crate::domain::ports::bookmark_repo::{
+            BookmarkRepository, CreateIdempotency, CreateIdempotencyClaim,
+        };
         use crate::domain::ports::metadata::MetadataExtractor;
         use crate::domain::ports::storage::ObjectStorage;
         use crate::domain::transfer::*;
@@ -740,6 +800,21 @@ mod tests {
                 };
                 self.bookmarks.lock().unwrap().push(b.clone());
                 Ok(b)
+            }
+            async fn claim_create(
+                &self,
+                _user_id: Uuid,
+                _operation: CreateIdempotency,
+            ) -> Result<CreateIdempotencyClaim, DomainError> {
+                Ok(CreateIdempotencyClaim::Acquired)
+            }
+            async fn create_claimed(
+                &self,
+                user_id: Uuid,
+                input: CreateBookmark,
+                _operation: CreateIdempotency,
+            ) -> Result<Bookmark, DomainError> {
+                self.create(user_id, input).await
             }
             async fn get(&self, id: Uuid, user_id: Uuid) -> Result<Bookmark, DomainError> {
                 self.bookmarks
@@ -1566,6 +1641,21 @@ mod tests {
                 };
                 self.bookmarks.lock().unwrap().push(b.clone());
                 Ok(b)
+            }
+            async fn claim_create(
+                &self,
+                _user_id: Uuid,
+                _operation: CreateIdempotency,
+            ) -> Result<CreateIdempotencyClaim, DomainError> {
+                Ok(CreateIdempotencyClaim::Acquired)
+            }
+            async fn create_claimed(
+                &self,
+                user_id: Uuid,
+                input: CreateBookmark,
+                _operation: CreateIdempotency,
+            ) -> Result<Bookmark, DomainError> {
+                self.create(user_id, input).await
             }
             async fn get(&self, id: Uuid, user_id: Uuid) -> Result<Bookmark, DomainError> {
                 self.bookmarks

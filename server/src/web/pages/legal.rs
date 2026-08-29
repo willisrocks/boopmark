@@ -30,7 +30,9 @@ mod tests {
 
     #[test]
     fn privacy_page_names_mobile_data_and_service_providers() {
-        let body = PrivacyPage.render().expect("privacy template should render");
+        let body = PrivacyPage
+            .render()
+            .expect("privacy template should render");
         assert!(body.contains("Bookmark content"));
         assert!(body.contains("Anthropic"));
         assert!(body.contains("August 27, 2026"));
@@ -38,7 +40,9 @@ mod tests {
 
     #[test]
     fn support_page_explains_connection_and_sharing() {
-        let body = SupportPage.render().expect("support template should render");
+        let body = SupportPage
+            .render()
+            .expect("support template should render");
         assert!(body.contains("Connect the iPhone app"));
         assert!(body.contains("Share Sheet"));
     }
