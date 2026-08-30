@@ -460,14 +460,14 @@ mod tests {
 
     #[test]
     fn official_models_render_only_the_three_official_options() {
-        let options = build_model_option_views("claude-sonnet-4-6");
+        let options = build_model_option_views("claude-sonnet-5");
 
         assert_eq!(options.len(), 3);
-        assert_eq!(options[0].label, "Claude Opus 4.6");
-        assert_eq!(options[0].value, "claude-opus-4-6");
+        assert_eq!(options[0].label, "Claude Opus 5");
+        assert_eq!(options[0].value, "claude-opus-5");
         assert!(!options[0].selected);
-        assert_eq!(options[1].label, "Claude Sonnet 4.6");
-        assert_eq!(options[1].value, "claude-sonnet-4-6");
+        assert_eq!(options[1].label, "Claude Sonnet 5");
+        assert_eq!(options[1].value, "claude-sonnet-5");
         assert!(options[1].selected);
         assert_eq!(options[2].label, "Claude Haiku 4.5");
         assert_eq!(options[2].value, "claude-haiku-4-5-20251001");
@@ -485,8 +485,8 @@ mod tests {
         );
         assert_eq!(options[0].value, "claude-3-7-sonnet-latest");
         assert!(options[0].selected);
-        assert_eq!(options[1].value, "claude-opus-4-6");
-        assert_eq!(options[2].value, "claude-sonnet-4-6");
+        assert_eq!(options[1].value, "claude-opus-5");
+        assert_eq!(options[2].value, "claude-sonnet-5");
         assert_eq!(options[3].value, "claude-haiku-4-5-20251001");
     }
 

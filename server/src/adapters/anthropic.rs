@@ -97,7 +97,15 @@ impl AnthropicEnricher {
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
     messages: Vec<Message>,
+}
+
+#[derive(Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
@@ -285,9 +293,18 @@ impl AnthropicEnricher {
     }
 
     fn request_body(model: &str, max_tokens: u32, content: String) -> AnthropicRequest {
+        // Opus 5 and Sonnet 5 default to adaptive thinking. These bookmark
+        // operations are intentionally short JSON tasks, so disable thinking
+        // explicitly for those exact models; unlike sampling parameters this
+        // is a supported compatibility switch on both models. Haiku 4.5 does
+        // not accept adaptive-thinking configuration, so omit the field.
+        let thinking = matches!(model, "claude-opus-5" | "claude-sonnet-5")
+            .then_some(ThinkingConfig { kind: "disabled" });
+
         AnthropicRequest {
             model: model.to_string(),
             max_tokens,
+            thinking,
             messages: vec![Message {
                 role: "user".to_string(),
                 content,
@@ -416,14 +433,15 @@ mod tests {
             Some("Use a warm palette and a close crop"),
         );
         let payload = serde_json::to_value(AnthropicEnricher::request_body(
-            "claude-sonnet-4-5",
+            "claude-sonnet-5",
             512,
             prompt.clone(),
         ))
         .unwrap();
 
-        assert_eq!(payload["model"], "claude-sonnet-4-5");
+        assert_eq!(payload["model"], "claude-sonnet-5");
         assert_eq!(payload["max_tokens"], 512);
+        assert_eq!(payload["thinking"]["type"], "disabled");
         assert_eq!(payload["messages"][0]["role"], "user");
         assert_eq!(payload["messages"][0]["content"], prompt);
         assert!(
@@ -432,5 +450,36 @@ mod tests {
                 .unwrap()
                 .contains("<authorized_user_creative_direction>")
         );
+    }
+
+    #[test]
+    fn request_body_disables_adaptive_thinking_for_opus_5_and_sonnet_5() {
+        for model in ["claude-opus-5", "claude-sonnet-5"] {
+            let payload = serde_json::to_value(AnthropicEnricher::request_body(
+                model,
+                512,
+                "{}".to_string(),
+            ))
+            .unwrap();
+
+            assert_eq!(payload["model"], model);
+            assert_eq!(payload["max_tokens"], 512);
+            assert_eq!(payload["thinking"]["type"], "disabled");
+            assert!(!payload.as_object().unwrap().contains_key("temperature"));
+            assert!(!payload.as_object().unwrap().contains_key("top_p"));
+            assert!(!payload.as_object().unwrap().contains_key("top_k"));
+        }
+    }
+
+    #[test]
+    fn request_body_keeps_haiku_compatible() {
+        let haiku = serde_json::to_value(AnthropicEnricher::request_body(
+            "claude-haiku-4-5-20251001",
+            512,
+            "{}".to_string(),
+        ))
+        .unwrap();
+        assert_eq!(haiku["max_tokens"], 512);
+        assert!(haiku.get("thinking").is_none());
     }
 }
