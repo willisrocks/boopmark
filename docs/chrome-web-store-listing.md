@@ -4,7 +4,7 @@ Release package: `dist/boopmark-chrome-0.1.0.zip`
 
 Chrome Web Store item ID: `oncfakjpmbjhmahhccdboahbhgjihgbo`
 
-Dashboard status on August 30, 2026: draft created; package, listing copy, icon, screenshot, promo tile, privacy disclosures, and public/free/all-regions distribution configured. The three limited-use certifications and final review submission require the publisher's explicit confirmation.
+Dashboard status on August 30, 2026: version 0.1.0 submitted and **Pending review**. The package, listing copy, icon, screenshot, privacy disclosures, limited-use certifications, confidential reviewer instructions, and public/free/all-regions distribution are configured. Automatic publishing is enabled for approval. The optional small promo tile was prepared but is not required for review.
 
 ## Store listing
 
