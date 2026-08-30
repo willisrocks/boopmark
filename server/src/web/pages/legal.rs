@@ -29,13 +29,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn privacy_page_names_mobile_data_and_service_providers() {
+    fn privacy_page_names_client_data_and_service_providers() {
         let body = PrivacyPage
             .render()
             .expect("privacy template should render");
         assert!(body.contains("Bookmark content"));
         assert!(body.contains("Anthropic"));
-        assert!(body.contains("August 27, 2026"));
+        assert!(body.contains("Chrome extension"));
+        assert!(body.contains("extension-local storage"));
+        assert!(body.contains("August 30, 2026"));
     }
 
     #[test]
