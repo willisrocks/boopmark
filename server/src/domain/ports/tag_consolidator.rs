@@ -1,4 +1,5 @@
 use crate::domain::error::DomainError;
+use crate::domain::llm_settings::TextProvider;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -30,4 +31,17 @@ pub trait TagConsolidator: Send + Sync {
         model: &str,
         input: ConsolidationInput,
     ) -> Pin<Box<dyn Future<Output = Result<ConsolidationOutput, DomainError>> + Send + '_>>;
+
+    /// Provider-aware entry point used by the application layer. Concrete
+    /// adapters that do not route themselves can rely on the compatibility
+    /// default; a provider router overrides it to select the proper adapter.
+    fn consolidate_with_provider(
+        &self,
+        _provider: TextProvider,
+        api_key: &str,
+        model: &str,
+        input: ConsolidationInput,
+    ) -> Pin<Box<dyn Future<Output = Result<ConsolidationOutput, DomainError>> + Send + '_>> {
+        self.consolidate(api_key, model, input)
+    }
 }

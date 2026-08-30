@@ -2,308 +2,533 @@
 {% block title %}Settings - BoopMark{% endblock %}
 {% block content %}
 {% include "components/header.html" %}
-<main class="max-w-3xl mx-auto px-6 py-8">
-    <div class="bg-[#1e2235] rounded-xl border border-gray-700 p-8 space-y-8">
-        <div>
-            <h1 class="text-2xl font-bold">Settings</h1>
-            <p class="text-sm text-gray-400 mt-1">{{ email }}</p>
-        </div>
 
-        {% if let Some(message) = success_message %}
-        <div class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
-            {{ message }}
-        </div>
-        {% endif %}
+<main class="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 sm:py-8" data-testid="settings-page">
+    <div class="mb-6">
+        <h1 class="text-2xl font-bold text-white">Settings</h1>
+        <p class="mt-1 text-sm text-gray-400">{{ email }}</p>
+    </div>
 
-        <section class="space-y-5">
-            <div>
-                <h2 class="text-lg font-semibold">LLM Integration</h2>
-                <p class="text-sm text-gray-400">Configure Anthropic access for this signed-in account.</p>
+    <div class="grid min-w-0 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)] lg:items-start">
+        <nav
+            id="settings-nav"
+            data-testid="settings-navigation"
+            aria-label="Settings sections"
+            class="-mx-4 min-w-0 border-b border-gray-800 px-4 pb-2 sm:-mx-6 sm:px-6 lg:sticky lg:top-6 lg:mx-0 lg:border-0 lg:px-0 lg:pb-0"
+        >
+            <div class="min-w-0 overflow-x-auto lg:overflow-visible">
+                <ul class="flex min-w-max gap-2 lg:min-w-0 lg:flex-col lg:gap-1" role="list">
+                    <li>
+                        <a
+                            href="#ai-models"
+                            data-settings-nav
+                            data-testid="settings-nav-ai-models"
+                            aria-current="page"
+                            class="inline-flex whitespace-nowrap rounded-lg bg-blue-600/15 px-3 py-2 text-sm font-medium text-blue-300 transition hover:bg-blue-600/25 hover:text-blue-200 lg:w-full"
+                        >AI &amp; Models</a>
+                    </li>
+                    <li>
+                        <a
+                            href="#tag-library"
+                            data-settings-nav
+                            data-testid="settings-nav-tag-library"
+                            class="inline-flex whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium text-gray-400 transition hover:bg-gray-800 hover:text-gray-200 lg:w-full"
+                        >Tag Library</a>
+                    </li>
+                    <li>
+                        <a
+                            href="#images"
+                            data-settings-nav
+                            data-testid="settings-nav-images"
+                            class="inline-flex whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium text-gray-400 transition hover:bg-gray-800 hover:text-gray-200 lg:w-full"
+                        >Images</a>
+                    </li>
+                    <li>
+                        <a
+                            href="#api-access"
+                            data-settings-nav
+                            data-testid="settings-nav-api-access"
+                            class="inline-flex whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium text-gray-400 transition hover:bg-gray-800 hover:text-gray-200 lg:w-full"
+                        >API Access</a>
+                    </li>
+                    <li>
+                        <a
+                            href="#import-export"
+                            data-settings-nav
+                            data-testid="settings-nav-import-export"
+                            class="inline-flex whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium text-gray-400 transition hover:bg-gray-800 hover:text-gray-200 lg:w-full"
+                        >Import &amp; Export</a>
+                    </li>
+                </ul>
             </div>
+        </nav>
 
-            <form method="post" action="/settings" class="space-y-5" id="settings-form">
-                <label class="flex items-center gap-3 text-sm font-medium text-gray-200">
-                    <input type="checkbox" name="llm_enabled" {% if llm_enabled %}checked{% endif %}>
-                    Enable LLM integration
-                </label>
+        <div class="min-w-0 space-y-6">
+            {% if let Some(message) = success_message %}
+            <div class="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200" role="status" data-testid="settings-success-message">
+                {{ message }}
+            </div>
+            {% endif %}
 
-                <div class="space-y-2">
-                    <label for="anthropic_api_key" class="block text-sm font-medium text-gray-200">Anthropic API key</label>
-                    {% if has_anthropic_api_key %}
-                    <div
-                        data-testid="anthropic-api-key-status"
-                        class="rounded-lg border border-gray-700 bg-[#1a1d2e] px-4 py-3"
-                    >
-                        <p class="text-sm font-medium text-gray-200">Anthropic API key saved securely.</p>
+            <section id="ai-models" data-testid="settings-section-ai-models" class="scroll-mt-6 rounded-xl border border-gray-700 bg-[#1e2235] p-5 sm:p-6">
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">AI &amp; Models</h2>
+                        <p class="mt-1 text-sm text-gray-400">Choose the providers Boopmark uses for bookmark metadata and generated images.</p>
                     </div>
-                    <label class="flex items-center gap-2 text-sm text-gray-300">
-                        <input type="checkbox" name="delete_anthropic_api_key" data-testid="delete-anthropic-api-key">
-                        <span>Delete saved key</span>
-                    </label>
-                    {% else %}
-                    <input
-                        id="anthropic_api_key"
-                        name="anthropic_api_key"
-                        type="password"
-                        autocomplete="off"
-                        class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
-                    >
-                    <p class="text-xs text-gray-400">No Anthropic API key saved yet.</p>
-                    {% endif %}
+                    <span data-testid="text-provider-status" class="inline-flex w-fit items-center rounded-full border border-gray-700 bg-[#1a1d2e] px-3 py-1 text-xs text-gray-400">
+                        {% if llm_enabled %}AI enabled{% else %}AI disabled{% endif %}
+                    </span>
                 </div>
 
-                <div class="space-y-2">
-                    <label for="anthropic_model" class="block text-sm font-medium text-gray-200">Anthropic model</label>
-                    <select
-                        id="anthropic_model"
-                        name="anthropic_model"
-                        class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
-                    >
-                        {% for option in anthropic_model_options %}
-                        <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
-                        {% endfor %}
-                    </select>
-                    <p class="text-xs text-gray-400">Default: Claude Haiku 4.5 (`claude-haiku-4-5-20251001`).</p>
-                </div>
-
-                <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
-                    Save settings
-                </button>
-            </form>
-        </section>
-
-        <section class="space-y-5">
-            <div>
-                <h2 class="text-lg font-semibold">API Keys</h2>
-                <p class="text-sm text-gray-400">Create keys to use the Boopmark API and CLI.</p>
-            </div>
-
-            <form hx-post="/settings/api-keys" hx-target="#api-keys-result" hx-swap="innerHTML" class="flex gap-3" data-testid="create-api-key-form">
-                <input
-                    type="text"
-                    name="name"
-                    placeholder="Key name (e.g. laptop, ci)"
-                    required
-                    class="flex-1 px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500 text-sm"
-                    data-testid="api-key-name-input"
-                >
-                <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium" data-testid="create-api-key-button">
-                    Create key
-                </button>
-            </form>
-
-            <div id="api-keys-result">
-                {% include "settings/api_keys_list.html" %}
-            </div>
-        </section>
-
-        <section class="space-y-5">
-            <div>
-                <h2 class="text-lg font-semibold">Import &amp; Export</h2>
-                <p class="text-sm text-gray-400">Backup or migrate your bookmarks.</p>
-            </div>
-
-            <div class="space-y-3">
-                <p class="text-sm font-medium text-gray-200">Export</p>
-                <div class="flex flex-wrap gap-2">
-                    <a href="/api/v1/bookmarks/export?format=jsonl&amp;mode=export"
-                       class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium">
-                        Export JSONL
-                    </a>
-                    <a href="/api/v1/bookmarks/export?format=csv&amp;mode=export"
-                       class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium">
-                        Export CSV
-                    </a>
-                    <a href="/api/v1/bookmarks/export?format=jsonl&amp;mode=backup"
-                       class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium">
-                        Backup JSONL
-                    </a>
-                    <a href="/api/v1/bookmarks/export?format=csv&amp;mode=backup"
-                       class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium">
-                        Backup CSV
-                    </a>
-                </div>
-            </div>
-
-            <div class="space-y-3">
-                <p class="text-sm font-medium text-gray-200">Import</p>
-                <form id="import-form" class="space-y-3">
-                    <div class="flex flex-wrap gap-3">
-                        <select name="format" class="px-3 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 text-sm">
-                            <option value="jsonl">JSONL</option>
-                            <option value="csv">CSV</option>
-                        </select>
-                        <select name="mode" class="px-3 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 text-sm">
-                            <option value="import">Import</option>
-                            <option value="restore">Restore</option>
-                        </select>
-                        <select name="strategy" class="px-3 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 text-sm">
-                            <option value="upsert">Upsert</option>
-                            <option value="skip">Skip duplicates</option>
-                        </select>
+                <form method="post" action="/settings" class="mt-6 space-y-6" id="settings-form">
+                    <div class="rounded-lg border border-gray-700 bg-[#1a1d2e] p-4">
+                        <label class="flex items-start gap-3 text-sm font-medium text-gray-200" for="llm_enabled">
+                            <input id="llm_enabled" type="checkbox" name="llm_enabled" {% if llm_enabled %}checked{% endif %} class="mt-0.5 h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500">
+                            <span>
+                                <span class="block">Enable LLM integration</span>
+                                <span class="mt-1 block text-xs font-normal text-gray-400">Use the selected text provider when you ask Boopmark to suggest metadata or consolidate tags.</span>
+                            </span>
+                        </label>
                     </div>
-                    <div class="flex gap-3 items-center">
-                        <input type="file" name="file" accept=".jsonl,.csv,.json"
-                            class="text-sm text-gray-300 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-gray-700 file:text-gray-200 hover:file:bg-gray-600">
-                        <button type="submit"
-                            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
-                            Import
+
+                    <div class="space-y-2">
+                        <label for="metadata_provider" class="block text-sm font-medium text-gray-200">Bookmark metadata provider</label>
+                        <select
+                            id="metadata_provider"
+                            name="metadata_provider"
+                            data-testid="metadata-provider"
+                            class="w-full rounded-lg border border-gray-700 bg-[#1a1d2e] px-4 py-2 text-gray-200 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        >
+                            {% for option in metadata_provider_options %}
+                                <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                            {% endfor %}
+                        </select>
+                        <p class="text-xs text-gray-400">This provider powers title, description, and tag suggestions for new and edited bookmarks.</p>
+                    </div>
+
+                    <div>
+                        <h3 class="text-base font-semibold text-gray-100">LLM Integration</h3>
+                        <p class="mt-1 text-sm text-gray-400">Keep provider credentials separate so switching models never replaces a saved key.</p>
+                    </div>
+
+                    <div class="grid gap-4 md:grid-cols-2">
+                        <div class="space-y-4 rounded-lg border border-gray-700 bg-[#1a1d2e] p-4">
+                            <div class="flex items-start justify-between gap-3">
+                                <div>
+                                    <h3 class="text-sm font-semibold text-gray-100">Anthropic</h3>
+                                    <p class="mt-1 text-xs text-gray-400">Claude models for text suggestions and tag cleanup.</p>
+                                </div>
+                                {% if has_anthropic_api_key %}
+                                <span class="whitespace-nowrap text-xs text-emerald-300">Key saved</span>
+                                {% else %}
+                                <span class="whitespace-nowrap text-xs text-amber-300">Needs key</span>
+                                {% endif %}
+                            </div>
+
+                            <div class="space-y-2">
+                                <label for="anthropic_model" class="block text-sm font-medium text-gray-200">Anthropic model</label>
+                                <select
+                                    id="anthropic_model"
+                                    name="anthropic_model"
+                                    data-testid="anthropic-model"
+                                    class="w-full rounded-lg border border-gray-700 bg-[#0f1117] px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                >
+                                    {% for option in anthropic_model_options %}
+                                    <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+
+                            <div class="space-y-2">
+                                {% if has_anthropic_api_key %}
+                                <div data-testid="anthropic-api-key-status" class="rounded-lg border border-gray-700 bg-[#151827] px-3 py-2">
+                                    <p class="text-sm font-medium text-gray-200">Anthropic API key saved securely.</p>
+                                    <p class="mt-1 text-xs text-gray-400">The key is never shown again. Enter a new key below to replace it.</p>
+                                </div>
+                                <label for="anthropic_api_key" class="block text-sm font-medium text-gray-200">Replacement key</label>
+                                <input
+                                    id="anthropic_api_key"
+                                    name="anthropic_api_key"
+                                    type="password"
+                                    autocomplete="off"
+                                    placeholder="Enter a replacement key"
+                                    aria-label="Replacement Anthropic key"
+                                    data-testid="anthropic-api-key-replacement"
+                                    class="w-full rounded-lg border border-gray-700 bg-[#0f1117] px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                >
+                                <label class="flex items-center gap-2 text-sm text-gray-300" for="delete_anthropic_api_key">
+                                    <input id="delete_anthropic_api_key" type="checkbox" name="delete_anthropic_api_key" data-testid="delete-anthropic-api-key" class="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500">
+                                    <span>Delete saved key</span>
+                                </label>
+                                {% else %}
+                                <label for="anthropic_api_key" class="block text-sm font-medium text-gray-200">Anthropic API key</label>
+                                <input
+                                    id="anthropic_api_key"
+                                    name="anthropic_api_key"
+                                    type="password"
+                                    autocomplete="off"
+                                    placeholder="sk-ant-…"
+                                    class="w-full rounded-lg border border-gray-700 bg-[#0f1117] px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                >
+                                <p class="text-xs text-gray-400">No Anthropic API key saved yet.</p>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="space-y-4 rounded-lg border border-gray-700 bg-[#1a1d2e] p-4">
+                            <div class="flex items-start justify-between gap-3">
+                                <div>
+                                    <h3 class="text-sm font-semibold text-gray-100">OpenAI</h3>
+                                    <p class="mt-1 text-xs text-gray-400">GPT models for fast, structured bookmark suggestions.</p>
+                                </div>
+                                {% if has_openai_api_key %}
+                                <span class="whitespace-nowrap text-xs text-emerald-300">Key saved</span>
+                                {% else %}
+                                <span class="whitespace-nowrap text-xs text-amber-300">Needs key</span>
+                                {% endif %}
+                            </div>
+
+                            <div class="space-y-2">
+                                <label for="openai_model" class="block text-sm font-medium text-gray-200">OpenAI model</label>
+                                <select
+                                    id="openai_model"
+                                    name="openai_model"
+                                    data-testid="openai-model"
+                                    data-current-model="{{ openai_model }}"
+                                    class="w-full rounded-lg border border-gray-700 bg-[#0f1117] px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                >
+                                    {% for option in openai_model_options %}
+                                    <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+
+                            <div class="space-y-2">
+                                {% if has_openai_api_key %}
+                                <div data-testid="openai-api-key-status" class="rounded-lg border border-gray-700 bg-[#151827] px-3 py-2">
+                                    <p class="text-sm font-medium text-gray-200">OpenAI API key saved securely.</p>
+                                    <p class="mt-1 text-xs text-gray-400">The key is never shown again. Enter a new key below to replace it.</p>
+                                </div>
+                                <label for="openai_api_key" class="block text-sm font-medium text-gray-200">Replacement key</label>
+                                <input
+                                    id="openai_api_key"
+                                    name="openai_api_key"
+                                    type="password"
+                                    autocomplete="off"
+                                    placeholder="Enter a replacement key"
+                                    aria-label="Replacement OpenAI key"
+                                    data-testid="openai-api-key-replacement"
+                                    class="w-full rounded-lg border border-gray-700 bg-[#0f1117] px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                >
+                                <label class="flex items-center gap-2 text-sm text-gray-300" for="delete_openai_api_key">
+                                    <input id="delete_openai_api_key" type="checkbox" name="delete_openai_api_key" data-testid="delete-openai-api-key" class="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500">
+                                    <span>Delete saved key</span>
+                                </label>
+                                {% else %}
+                                <label for="openai_api_key" class="block text-sm font-medium text-gray-200">OpenAI API key</label>
+                                <input
+                                    id="openai_api_key"
+                                    name="openai_api_key"
+                                    type="password"
+                                    autocomplete="off"
+                                    placeholder="sk-…"
+                                    class="w-full rounded-lg border border-gray-700 bg-[#0f1117] px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                >
+                                <p class="text-xs text-gray-400">No OpenAI API key saved yet.</p>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="rounded-lg border border-gray-700 bg-[#1a1d2e] p-4">
+                        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                            <div>
+                                <h3 class="text-sm font-semibold text-gray-100">AI images</h3>
+                                <p class="mt-1 text-xs text-gray-400">Generate or edit a bookmark card image with OpenAI's image model. Anthropic can still provide the text prompt, but an OpenAI key is required to render pixels.</p>
+                            </div>
+                            <span data-testid="image-provider-status" class="inline-flex w-fit whitespace-nowrap rounded-full border border-gray-700 bg-[#151827] px-3 py-1 text-xs {% if has_openai_api_key %}text-emerald-300{% else %}text-amber-300{% endif %}">
+                                {% if has_openai_api_key %}OpenAI ready{% else %}OpenAI key needed{% endif %}
+                            </span>
+                        </div>
+                        <div class="mt-4 grid gap-4 sm:grid-cols-2">
+                            <label class="flex items-start gap-3 text-sm text-gray-200" for="image_enabled">
+                                <input id="image_enabled" type="checkbox" name="image_generation_enabled" data-testid="image-enabled" {% if image_enabled %}checked{% endif %} class="mt-0.5 h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500">
+                                <span>
+                                    <span class="block font-medium">Enable AI image generation</span>
+                                    <span class="mt-1 block text-xs text-gray-400">Keep this off to use scraped or uploaded images only.</span>
+                                </span>
+                            </label>
+                            <div class="space-y-2">
+                                <label for="image_model" class="block text-sm font-medium text-gray-200">Image model</label>
+                                <select id="image_model" name="image_generation_model" data-testid="image-model" data-current-model="{{ image_model }}" class="w-full rounded-lg border border-gray-700 bg-[#0f1117] px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                    {% for option in image_model_options %}
+                                        <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                                    {% endfor %}
+                                </select>
+                                <p class="text-xs text-gray-400">OpenAI GPT Image 2 · optimized for bookmark card images.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col-reverse gap-3 border-t border-gray-700 pt-5 sm:flex-row sm:items-center sm:justify-between">
+                        <p class="text-xs text-gray-500">Keys are encrypted at rest and are only used for your account.</p>
+                        <button type="submit" data-testid="save-settings-button" class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-2 focus:ring-offset-[#1e2235] sm:w-auto">
+                            Save settings
                         </button>
                     </div>
                 </form>
-                <div id="import-result" class="text-sm"></div>
-            </div>
+            </section>
 
-            <script>
-                document.getElementById('import-form').addEventListener('submit', async (e) => {
-                    e.preventDefault();
-                    const form = e.target;
-                    const format = form.format.value;
-                    const mode = form.mode.value;
-                    const strategy = form.strategy.value;
-                    const file = form.file.files[0];
-                    if (!file) return;
-                    const body = new FormData();
-                    body.append('file', file);
-                    const res = await fetch(`/api/v1/bookmarks/import?format=${format}&mode=${mode}&strategy=${strategy}`, {
-                        method: 'POST', body,
-                    });
-                    const data = await res.json();
-                    const el = document.getElementById('import-result');
-                    if (res.ok) {
-                        el.className = 'text-sm text-emerald-300';
-                        el.textContent = `Created: ${data.created}, Updated: ${data.updated}, Skipped: ${data.skipped}, Errors: ${data.errors.length}`;
-                    } else {
-                        el.className = 'text-sm text-red-400';
-                        el.textContent = data.error || 'Import failed';
-                    }
-                });
-            </script>
-        </section>
-
-        <section class="space-y-5" data-testid="tag-library-section">
-            <div>
-                <h2 class="text-lg font-semibold">Tag Library</h2>
-                <p class="text-sm text-gray-400">Use AI to merge variants and add useful parent tags across your bookmarks.</p>
-            </div>
-
-            <div class="space-y-3">
-                <button
-                    id="consolidate-tags-btn"
-                    type="button"
-                    data-testid="consolidate-tags-button"
-                    hx-post="/settings/consolidate-tags"
-                    hx-target="#consolidate-tags-result"
-                    hx-swap="innerHTML"
-                    hx-disabled-elt="this"
-                    hx-indicator="#consolidate-tags-spinner"
-                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                    {% if !has_anthropic_api_key %}disabled title="Configure an Anthropic API key first."{% else if !llm_enabled %}disabled title="Enable LLM integration first."{% endif %}
-                >
-                    <span class="inline-flex items-center gap-2">
-                        <span>Consolidate Tags</span>
-                        <span id="consolidate-tags-spinner" class="htmx-indicator">…</span>
-                    </span>
-                </button>
-                <div id="consolidate-tags-result"></div>
-            </div>
-        </section>
-
-        <section class="space-y-5">
-            <div>
-                <h2 class="text-lg font-semibold">Image Repair</h2>
-                <p class="text-sm text-gray-400">Fetch missing or broken bookmark images.</p>
-            </div>
-
-            <div id="fix-images-section" class="space-y-3">
-                <button
-                    id="fix-images-btn"
-                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                    Fix Missing Images
-                </button>
-
-                <div id="fix-images-progress" class="hidden space-y-2">
-                    <div class="w-full bg-gray-700 rounded-full h-2">
-                        <div
-                            id="fix-images-fill"
-                            class="bg-blue-500 h-2 rounded-full transition-all duration-300"
-                            style="width: 0%"
-                        ></div>
-                    </div>
-                    <p id="fix-images-label" class="text-sm text-gray-400"></p>
+            <section id="tag-library" data-testid="settings-section-tag-library" class="scroll-mt-6 rounded-xl border border-gray-700 bg-[#1e2235] p-5 sm:p-6">
+                <div>
+                    <h2 class="text-lg font-semibold text-white">Tag Library</h2>
+                    <p class="mt-1 text-sm text-gray-400">Use the selected metadata provider to merge variants and add useful parent tags across your bookmarks.</p>
                 </div>
-            </div>
 
-            <script>
-                document.getElementById('fix-images-btn').addEventListener('click', async () => {
-                    const btn = document.getElementById('fix-images-btn');
-                    const progress = document.getElementById('fix-images-progress');
-                    const fill = document.getElementById('fix-images-fill');
-                    const label = document.getElementById('fix-images-label');
+                <div class="mt-5 space-y-3">
+                    <button
+                        id="consolidate-tags-btn"
+                        type="button"
+                        data-testid="consolidate-tags-button"
+                        hx-post="/settings/consolidate-tags"
+                        hx-target="#consolidate-tags-result"
+                        hx-swap="innerHTML"
+                        hx-disabled-elt="this"
+                        hx-indicator="#consolidate-tags-spinner"
+                        class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                        {% if metadata_provider == "openai" %}
+                            {% if !has_openai_api_key %}disabled title="Configure an OpenAI API key first."{% else if !llm_enabled %}disabled title="Enable AI assistance first."{% endif %}
+                        {% else %}
+                            {% if !has_anthropic_api_key %}disabled title="Configure an Anthropic API key first."{% else if !llm_enabled %}disabled title="Enable AI assistance first."{% endif %}
+                        {% endif %}
+                    >
+                        <span class="inline-flex items-center gap-2">
+                            <span>Consolidate Tags</span>
+                            <span id="consolidate-tags-spinner" class="htmx-indicator">…</span>
+                        </span>
+                    </button>
+                    <p class="text-xs text-gray-500">Boopmark keeps each operation explicit so a large tag library is never changed unexpectedly.</p>
+                    <div id="consolidate-tags-result"></div>
+                </div>
+            </section>
 
-                    btn.disabled = true;
-                    progress.classList.remove('hidden');
-                    label.textContent = 'Starting\u2026';
+            <section id="images" data-testid="settings-section-images" class="scroll-mt-6 rounded-xl border border-gray-700 bg-[#1e2235] p-5 sm:p-6">
+                <div>
+                    <h2 class="text-lg font-semibold text-white">Image Repair</h2>
+                    <p class="mt-1 text-sm text-gray-400">Fetch missing or broken bookmark images. AI generation is only used when enabled and a repair cannot find a source image.</p>
+                </div>
 
-                    let response;
-                    try {
-                        response = await fetch('/settings/fix-images/stream');
-                    } catch {
-                        label.textContent = 'Connection error.';
-                        btn.disabled = false;
-                        return;
-                    }
+                <div id="fix-images-section" class="mt-5 space-y-3">
+                    <button
+                        id="fix-images-btn"
+                        data-testid="fix-images-button"
+                        class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                    >
+                        Fix Missing Images
+                    </button>
 
-                    if (response.status === 409) {
-                        label.textContent = 'A fix-images job is already running.';
-                        btn.disabled = false;
-                        return;
-                    }
+                    <div id="fix-images-progress" class="hidden space-y-2" role="status" aria-live="polite">
+                        <div class="h-2 w-full rounded-full bg-gray-700">
+                            <div id="fix-images-fill" class="h-2 rounded-full bg-blue-500 transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                        <p id="fix-images-label" class="text-sm text-gray-400"></p>
+                    </div>
+                </div>
+            </section>
 
-                    if (!response.ok) {
-                        label.textContent = 'Server error. Please try again.';
-                        btn.disabled = false;
-                        return;
-                    }
+            <section id="api-access" data-testid="settings-section-api-access" class="scroll-mt-6 rounded-xl border border-gray-700 bg-[#1e2235] p-5 sm:p-6">
+                <div>
+                    <h2 class="text-lg font-semibold text-white">API Keys</h2>
+                    <p class="mt-1 text-sm text-gray-400">Create keys to use the Boopmark API and CLI.</p>
+                </div>
 
-                    const reader = response.body.getReader();
-                    const decoder = new TextDecoder();
-                    let buf = '';
+                <form hx-post="/settings/api-keys" hx-target="#api-keys-result" hx-swap="innerHTML" class="mt-5 flex flex-col gap-3 sm:flex-row" data-testid="create-api-key-form">
+                    <input
+                        type="text"
+                        name="name"
+                        placeholder="Key name (e.g. laptop, ci)"
+                        required
+                        class="min-w-0 flex-1 rounded-lg border border-gray-700 bg-[#1a1d2e] px-4 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        data-testid="api-key-name-input"
+                    >
+                    <button type="submit" class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 sm:w-auto" data-testid="create-api-key-button">
+                        Create key
+                    </button>
+                </form>
 
-                    try {
-                        while (true) {
-                            const { done, value } = await reader.read();
-                            if (done) break;
-                            buf += decoder.decode(value, { stream: true });
-                            const lines = buf.split('\n');
-                            buf = lines.pop();
-                            for (const line of lines) {
-                                if (!line.startsWith('data: ')) continue;
-                                let data;
-                                try { data = JSON.parse(line.slice(6)); } catch { continue; }
-                                const pct = data.total > 0
-                                    ? ((data.checked / data.total) * 100).toFixed(0)
-                                    : 0;
-                                fill.style.width = `${pct}%`;
-                                if (data.done) {
-                                    label.textContent = data.error
-                                        ? `Image repair failed: ${data.error}`
-                                        : `Done. Fixed ${data.fixed} images. ${data.failed} failed.`;
-                                    btn.disabled = false;
-                                } else {
-                                    label.textContent =
-                                        `Checking images: ${data.checked} / ${data.total} \u2014 Fixed: ${data.fixed} \u2014 Failed: ${data.failed}`;
-                                }
-                            }
-                        }
-                    } catch {
-                        label.textContent = 'Stream interrupted.';
-                        btn.disabled = false;
-                    }
-                });
-            </script>
-        </section>
+                <div id="api-keys-result" class="mt-5">
+                    {% include "settings/api_keys_list.html" %}
+                </div>
+            </section>
+
+            <section id="import-export" data-testid="settings-section-import-export" class="scroll-mt-6 rounded-xl border border-gray-700 bg-[#1e2235] p-5 sm:p-6">
+                <div>
+                    <h2 class="text-lg font-semibold text-white">Import &amp; Export</h2>
+                    <p class="mt-1 text-sm text-gray-400">Backup or migrate your bookmarks.</p>
+                </div>
+
+                <div class="mt-5 space-y-6">
+                    <div class="space-y-3">
+                        <p class="text-sm font-medium text-gray-200">Export</p>
+                        <div class="flex flex-wrap gap-2">
+                            <a href="/api/v1/bookmarks/export?format=jsonl&amp;mode=export" class="rounded-lg bg-gray-700 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-600">Export JSONL</a>
+                            <a href="/api/v1/bookmarks/export?format=csv&amp;mode=export" class="rounded-lg bg-gray-700 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-600">Export CSV</a>
+                            <a href="/api/v1/bookmarks/export?format=jsonl&amp;mode=backup" class="rounded-lg bg-gray-700 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-600">Backup JSONL</a>
+                            <a href="/api/v1/bookmarks/export?format=csv&amp;mode=backup" class="rounded-lg bg-gray-700 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-600">Backup CSV</a>
+                        </div>
+                    </div>
+
+                    <div class="space-y-3">
+                        <p class="text-sm font-medium text-gray-200">Import</p>
+                        <form id="import-form" class="space-y-3">
+                            <div class="grid gap-3 sm:grid-cols-3">
+                                <select name="format" aria-label="Import format" class="w-full rounded-lg border border-gray-700 bg-[#1a1d2e] px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                    <option value="jsonl">JSONL</option>
+                                    <option value="csv">CSV</option>
+                                </select>
+                                <select name="mode" aria-label="Import mode" class="w-full rounded-lg border border-gray-700 bg-[#1a1d2e] px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                    <option value="import">Import</option>
+                                    <option value="restore">Restore</option>
+                                </select>
+                                <select name="strategy" aria-label="Duplicate strategy" class="w-full rounded-lg border border-gray-700 bg-[#1a1d2e] px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                    <option value="upsert">Upsert</option>
+                                    <option value="skip">Skip duplicates</option>
+                                </select>
+                            </div>
+                            <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+                                <input type="file" name="file" accept=".jsonl,.csv,.json" class="min-w-0 text-sm text-gray-300 file:mr-3 file:rounded-lg file:border-0 file:bg-gray-700 file:px-4 file:py-2 file:text-sm file:font-medium file:text-gray-200 hover:file:bg-gray-600">
+                                <button type="submit" class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 sm:w-auto">Import</button>
+                            </div>
+                        </form>
+                        <div id="import-result" class="text-sm" role="status" aria-live="polite"></div>
+                    </div>
+                </div>
+            </section>
+        </div>
     </div>
 </main>
+
+<script>
+(() => {
+    const links = Array.from(document.querySelectorAll('[data-settings-nav]'));
+    const sections = Array.from(document.querySelectorAll('[data-testid^="settings-section-"]'));
+    const activeClasses = ['bg-blue-600/15', 'text-blue-300'];
+    const inactiveClasses = ['text-gray-400'];
+
+    const setActive = (id) => {
+        links.forEach((link) => {
+            const active = link.getAttribute('href') === `#${id}`;
+            link.toggleAttribute('aria-current', active);
+            if (active) link.setAttribute('aria-current', 'page');
+            activeClasses.forEach((name) => link.classList.toggle(name, active));
+            inactiveClasses.forEach((name) => link.classList.toggle(name, !active));
+        });
+    };
+
+    links.forEach((link) => {
+        link.addEventListener('click', () => setActive(link.getAttribute('href').slice(1)));
+    });
+
+    const initial = window.location.hash && document.getElementById(window.location.hash.slice(1));
+    setActive(initial ? initial.id : 'ai-models');
+
+    if ('IntersectionObserver' in window) {
+        const observer = new IntersectionObserver((entries) => {
+            const visible = entries
+                .filter((entry) => entry.isIntersecting)
+                .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+            if (visible) setActive(visible.target.id);
+        }, { rootMargin: '-12% 0px -72% 0px', threshold: [0.1, 0.35, 0.7] });
+        sections.forEach((section) => observer.observe(section));
+    }
+})();
+
+document.getElementById('import-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const format = form.format.value;
+    const mode = form.mode.value;
+    const strategy = form.strategy.value;
+    const file = form.file.files[0];
+    if (!file) return;
+    const body = new FormData();
+    body.append('file', file);
+    const result = document.getElementById('import-result');
+    try {
+        const res = await fetch(`/api/v1/bookmarks/import?format=${format}&mode=${mode}&strategy=${strategy}`, { method: 'POST', body });
+        const data = await res.json();
+        if (res.ok) {
+            result.className = 'text-sm text-emerald-300';
+            result.textContent = `Created: ${data.created}, Updated: ${data.updated}, Skipped: ${data.skipped}, Errors: ${data.errors.length}`;
+        } else {
+            result.className = 'text-sm text-red-400';
+            result.textContent = data.error || 'Import failed';
+        }
+    } catch {
+        result.className = 'text-sm text-red-400';
+        result.textContent = 'Import failed';
+    }
+});
+
+document.getElementById('fix-images-btn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('fix-images-btn');
+    const progress = document.getElementById('fix-images-progress');
+    const fill = document.getElementById('fix-images-fill');
+    const label = document.getElementById('fix-images-label');
+
+    btn.disabled = true;
+    progress.classList.remove('hidden');
+    label.textContent = 'Starting…';
+
+    let response;
+    try {
+        response = await fetch('/settings/fix-images/stream');
+    } catch {
+        label.textContent = 'Connection error.';
+        btn.disabled = false;
+        return;
+    }
+
+    if (response.status === 409) {
+        label.textContent = 'A fix-images job is already running.';
+        btn.disabled = false;
+        return;
+    }
+    if (!response.ok) {
+        label.textContent = 'Server error. Please try again.';
+        btn.disabled = false;
+        return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop();
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                let data;
+                try { data = JSON.parse(line.slice(6)); } catch { continue; }
+                const pct = data.total > 0 ? ((data.checked / data.total) * 100).toFixed(0) : 0;
+                fill.style.width = `${pct}%`;
+                if (data.done) {
+                    label.textContent = data.error ? `Image repair failed: ${data.error}` : `Done. Fixed ${data.fixed} images. ${data.failed} failed.`;
+                    btn.disabled = false;
+                } else {
+                    label.textContent = `Checking images: ${data.checked} / ${data.total} — Fixed: ${data.fixed} — Failed: ${data.failed}`;
+                }
+            }
+        }
+    } catch {
+        label.textContent = 'Stream interrupted.';
+        btn.disabled = false;
+    }
+});
+</script>
 {% endblock %}

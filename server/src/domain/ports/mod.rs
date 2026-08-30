@@ -1,7 +1,9 @@
 pub mod api_key_repo;
 pub mod bookmark_repo;
+pub mod image_generator;
 pub mod invite_repo;
 pub mod llm_enricher;
+pub mod llm_prompt_assistant;
 pub mod llm_settings_repo;
 pub mod login_provider;
 pub mod metadata;

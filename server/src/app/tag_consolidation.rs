@@ -25,9 +25,97 @@ pub fn compute_new_tags(current: &[String], mapping: &HashMap<String, Vec<String
     acc.into_iter().collect()
 }
 
+const MAX_CONSOLIDATION_MAPPING_ENTRIES: usize = 500;
+const MAX_CONSOLIDATION_VALUES_PER_TAG: usize = 32;
+const MAX_CONSOLIDATED_TAG_CHARS: usize = 100;
+
+/// Validate an LLM mapping before it can influence bookmark writes. Mapping
+/// keys must refer to tags sent in the request; output values are bounded and
+/// cannot contain control characters. Missing submitted keys remain safe and
+/// are handled as identity mappings by `compute_new_tags`.
+fn validate_consolidation_mapping(
+    mapping: HashMap<String, Vec<String>>,
+    samples: &[crate::domain::ports::tag_consolidator::TagSample],
+) -> Result<HashMap<String, Vec<String>>, DomainError> {
+    use std::collections::HashSet;
+
+    if mapping.len() > MAX_CONSOLIDATION_MAPPING_ENTRIES {
+        return Err(DomainError::InvalidInput(
+            "AI returned too many tag mappings".to_string(),
+        ));
+    }
+
+    let submitted_tags: HashSet<String> = samples
+        .iter()
+        .map(|sample| sample.tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    let mut validated = HashMap::with_capacity(mapping.len());
+
+    for (raw_key, values) in mapping {
+        let key = validate_tag_text(raw_key, "mapping key")?.to_lowercase();
+        if !submitted_tags.contains(&key) {
+            return Err(DomainError::InvalidInput(
+                "AI returned a mapping for an unknown tag".to_string(),
+            ));
+        }
+        if values.len() > MAX_CONSOLIDATION_VALUES_PER_TAG {
+            return Err(DomainError::InvalidInput(
+                "AI returned too many replacement tags".to_string(),
+            ));
+        }
+
+        let mut normalized_values = values
+            .into_iter()
+            .map(|value| validate_tag_text(value, "replacement tag"))
+            .collect::<Result<Vec<_>, _>>()?;
+        normalized_values.sort();
+        normalized_values.dedup();
+        // Case-insensitive aliases such as `JavaScript` and `javascript` can
+        // legitimately appear as separate submitted tags. They share one
+        // lookup key, so accept duplicate normalized mappings only when their
+        // normalized values agree; conflicting outputs are ambiguous and are
+        // rejected before any bookmark write.
+        if let Some(existing_values) = validated.get(&key) {
+            if existing_values != &normalized_values {
+                return Err(DomainError::InvalidInput(
+                    "AI returned conflicting tag mappings".to_string(),
+                ));
+            }
+        } else {
+            // Preserve an empty output vector as the service's intentional
+            // identity fallback; non-empty values are normalized above.
+            validated.insert(key, normalized_values);
+        }
+    }
+
+    Ok(validated)
+}
+
+fn validate_tag_text(value: String, field: &str) -> Result<String, DomainError> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return Err(DomainError::InvalidInput(format!(
+            "AI returned an empty {field}"
+        )));
+    }
+    if normalized.chars().count() > MAX_CONSOLIDATED_TAG_CHARS {
+        return Err(DomainError::InvalidInput(format!(
+            "AI returned an oversized {field}"
+        )));
+    }
+    if normalized.chars().any(char::is_control) {
+        return Err(DomainError::InvalidInput(format!(
+            "AI returned malformed {field}"
+        )));
+    }
+    Ok(normalized.to_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ports::tag_consolidator::TagSample;
 
     fn map(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         pairs
@@ -130,6 +218,67 @@ mod tests {
         let result = compute_new_tags(&["React".into()], &mapping);
         assert_eq!(result, vec!["frontend".to_string(), "react".to_string()]);
     }
+
+    #[test]
+    fn mapping_validation_rejects_unknown_keys() {
+        let error = validate_consolidation_mapping(
+            map(&[("unsubmitted", &["safe"])]),
+            &samples_for_validation(&["react"]),
+        )
+        .expect_err("unknown mapping key should be rejected");
+        assert!(matches!(error, DomainError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn mapping_validation_rejects_oversized_or_control_values() {
+        let oversized = "x".repeat(MAX_CONSOLIDATED_TAG_CHARS + 1);
+        let error = validate_consolidation_mapping(
+            map(&[("react", &[oversized.as_str()])]),
+            &samples_for_validation(&["react"]),
+        )
+        .expect_err("oversized replacement should be rejected");
+        assert!(matches!(error, DomainError::InvalidInput(_)));
+
+        let error = validate_consolidation_mapping(
+            map(&[("react", &["safe\nvalue"])]),
+            &samples_for_validation(&["react"]),
+        )
+        .expect_err("control characters should be rejected");
+        assert!(matches!(error, DomainError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn mapping_validation_normalizes_case_and_whitespace() {
+        let validated = validate_consolidation_mapping(
+            map(&[(" React ", &[" Frontend ", "REACT"])]),
+            &samples_for_validation(&["react"]),
+        )
+        .expect("safe mapping");
+        assert_eq!(
+            validated.get("react"),
+            Some(&vec!["frontend".to_string(), "react".to_string()])
+        );
+    }
+
+    #[test]
+    fn mapping_validation_rejects_conflicting_case_aliases() {
+        let error = validate_consolidation_mapping(
+            map(&[("React", &["react"]), ("react", &["frontend"])]),
+            &samples_for_validation(&["react"]),
+        )
+        .expect_err("conflicting aliases should be rejected");
+        assert!(matches!(error, DomainError::InvalidInput(_)));
+    }
+
+    fn samples_for_validation(tags: &[&str]) -> Vec<TagSample> {
+        tags.iter()
+            .map(|tag| TagSample {
+                tag: (*tag).to_string(),
+                count: 1,
+                sample_titles: Vec::new(),
+            })
+            .collect()
+    }
 }
 
 use crate::app::settings::SettingsService;
@@ -173,14 +322,14 @@ where
     }
 
     pub async fn consolidate(&self, user_id: Uuid) -> Result<ConsolidationStats, DomainError> {
-        // 1. Get API key + model.
-        let (api_key, model) = self
+        // 1. Get the selected provider's key + model.
+        let credentials = self
             .settings
-            .get_decrypted_api_key(user_id)
+            .get_text_provider_credentials(user_id)
             .await?
             .ok_or_else(|| {
                 DomainError::InvalidInput(
-                    "No Anthropic API key configured. Save one in Settings first.".to_string(),
+                    "No AI provider API key configured. Save one in Settings first.".to_string(),
                 )
             })?;
 
@@ -197,15 +346,23 @@ where
         // 3. Ask the LLM.
         let output = self
             .consolidator
-            .consolidate(&api_key, &model, ConsolidationInput { tags: samples })
+            .consolidate_with_provider(
+                credentials.provider,
+                &credentials.api_key,
+                &credentials.model,
+                ConsolidationInput {
+                    tags: samples.clone(),
+                },
+            )
             .await?;
+        let mapping = validate_consolidation_mapping(output.mapping, &samples)?;
 
         // 4. Compute per-bookmark new tags.
         let id_tags = self.bookmarks.list_id_tags(user_id).await?;
         let mut updates: Vec<(Uuid, Vec<String>)> = Vec::new();
         let mut after_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for (id, current) in id_tags {
-            let new_tags = compute_new_tags(&current, &output.mapping);
+            let new_tags = compute_new_tags(&current, &mapping);
             for t in &new_tags {
                 after_set.insert(t.clone());
             }
@@ -268,26 +425,31 @@ mod service_tests {
         async fn upsert(
             &self,
             user_id: Uuid,
-            enabled: bool,
-            replace: Option<&[u8]>,
-            clear: bool,
-            model: &str,
+            update: crate::domain::ports::llm_settings_repo::LlmSettingsUpdate,
         ) -> Result<LlmSettings, DomainError> {
             let existing = self.stored.lock().unwrap().clone();
-            let encrypted = if clear {
+            let encrypted = if update.clear_anthropic_api_key {
                 None
             } else {
-                replace.map(|v| v.to_vec()).or_else(|| {
-                    existing
-                        .as_ref()
-                        .and_then(|s| s.anthropic_api_key_encrypted.clone())
-                })
+                update
+                    .replace_anthropic_api_key_encrypted
+                    .clone()
+                    .or_else(|| {
+                        existing
+                            .as_ref()
+                            .and_then(|s| s.anthropic_api_key_encrypted.clone())
+                    })
             };
             let saved = LlmSettings {
                 user_id,
-                enabled,
+                enabled: update.enabled,
+                metadata_provider: update.metadata_provider,
                 anthropic_api_key_encrypted: encrypted,
-                anthropic_model: model.to_string(),
+                anthropic_model: update.anthropic_model,
+                openai_api_key_encrypted: update.replace_openai_api_key_encrypted,
+                openai_model: update.openai_model,
+                image_generation_enabled: update.image_generation_enabled,
+                image_generation_model: update.image_generation_model,
                 created_at: existing.map(|s| s.created_at).unwrap_or_else(Utc::now),
                 updated_at: Utc::now(),
             };
@@ -516,6 +678,7 @@ mod service_tests {
                     anthropic_api_key: Some("sk-ant-x".into()),
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("claude-haiku-4-5-20251001".into()),
+                    ..Default::default()
                 },
             )
             .await
@@ -569,6 +732,7 @@ mod service_tests {
                     anthropic_api_key: Some("sk-ant-x".into()),
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("claude-haiku-4-5-20251001".into()),
+                    ..Default::default()
                 },
             )
             .await
