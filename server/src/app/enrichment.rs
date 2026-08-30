@@ -24,7 +24,6 @@ mod tests {
     use crate::domain::error::DomainError;
     use crate::domain::llm_settings::{DEFAULT_ANTHROPIC_MODEL, LlmSettings};
     use crate::domain::ports::llm_enricher::EnrichmentOutput;
-    use chrono::Utc;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -43,6 +42,11 @@ mod tests {
             _replace_anthropic_api_key_encrypted: Option<&[u8]>,
             _clear_anthropic_api_key: bool,
             _anthropic_model: &str,
+            _image_generation_enabled: bool,
+            _replace_gemini_api_key_encrypted: Option<&[u8]>,
+            _clear_gemini_api_key: bool,
+            _image_generation_model: &str,
+            _image_generation_art_style: &str,
         ) -> Result<LlmSettings, DomainError> {
             panic!("suggestions must not modify account settings")
         }
@@ -125,8 +129,7 @@ mod tests {
                     .expect("encrypt fake key")
             }),
             anthropic_model: DEFAULT_ANTHROPIC_MODEL.into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            ..Default::default()
         });
         let settings = Arc::new(SettingsService::new(
             Arc::new(FakeSettings(stored)),

@@ -66,6 +66,76 @@
                     <p class="text-xs text-gray-400">Default: Claude Haiku 4.5 (`claude-haiku-4-5-20251001`).</p>
                 </div>
 
+                <div class="border-t border-gray-700 pt-5 space-y-5" data-testid="image-generation-settings">
+                    <div>
+                        <h3 class="text-base font-semibold text-gray-200">AI image generation</h3>
+                        <p class="text-sm text-gray-400 mt-1">Generate clear, social-sharing images from each bookmark's title and summary when an image cannot be found, or when you choose AI during creation or editing.</p>
+                    </div>
+
+                    <label class="flex items-center gap-3 text-sm font-medium text-gray-200">
+                        <input
+                            type="checkbox"
+                            name="image_generation_enabled"
+                            data-testid="image-generation-enabled"
+                            {% if image_generation_enabled %}checked{% endif %}
+                        >
+                        Enable AI image generation and use it as an image fallback
+                    </label>
+
+                    <div class="space-y-2">
+                        <label for="gemini_api_key" class="block text-sm font-medium text-gray-200">Gemini API key</label>
+                        {% if has_gemini_api_key %}
+                        <div
+                            data-testid="gemini-api-key-status"
+                            class="rounded-lg border border-gray-700 bg-[#1a1d2e] px-4 py-3"
+                        >
+                            <p class="text-sm font-medium text-gray-200">Gemini API key saved securely.</p>
+                        </div>
+                        <label class="flex items-center gap-2 text-sm text-gray-300">
+                            <input type="checkbox" name="delete_gemini_api_key" data-testid="delete-gemini-api-key">
+                            <span>Delete saved key</span>
+                        </label>
+                        {% else %}
+                        <input
+                            id="gemini_api_key"
+                            name="gemini_api_key"
+                            type="password"
+                            autocomplete="off"
+                            data-testid="gemini-api-key"
+                            class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
+                        >
+                        <p class="text-xs text-gray-400">No Gemini API key saved yet. Create one in Google AI Studio.</p>
+                        {% endif %}
+                    </div>
+
+                    <div class="space-y-2">
+                        <label for="image_generation_model" class="block text-sm font-medium text-gray-200">Image model</label>
+                        <select
+                            id="image_generation_model"
+                            name="image_generation_model"
+                            data-testid="image-generation-model"
+                            class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
+                        >
+                            {% for option in image_generation_model_options %}
+                            <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                            {% endfor %}
+                        </select>
+                        <p class="text-xs text-gray-400">Currently available: Nano Banana 2 Lite. Images are generated at a wide social-sharing aspect ratio.</p>
+                    </div>
+
+                    <div class="space-y-2">
+                        <label for="image_generation_art_style" class="block text-sm font-medium text-gray-200">AI image art style</label>
+                        <textarea
+                            id="image_generation_art_style"
+                            name="image_generation_art_style"
+                            data-testid="image-generation-art-style"
+                            rows="3"
+                            class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 focus:outline-none focus:border-blue-500"
+                        >{{ image_generation_art_style }}</textarea>
+                        <p class="text-xs text-gray-400">This style is inserted into the image prompt so you can keep generated images consistent. The default is bold, simple, and poppy editorial illustration.</p>
+                    </div>
+                </div>
+
                 <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
                     Save settings
                 </button>

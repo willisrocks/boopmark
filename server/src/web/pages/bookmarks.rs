@@ -104,6 +104,7 @@ struct GridPage {
     #[allow(dead_code)]
     suggest_preview_image_url: Option<String>,
     suggest_tags: String,
+    can_generate_ai_images: bool,
 }
 
 #[derive(Template)]
@@ -140,6 +141,7 @@ struct EditModal {
     suggest_description: String,
     suggest_tags: String,
     has_llm: bool,
+    can_generate_ai_images: bool,
 }
 
 #[derive(Template)]
@@ -221,6 +223,13 @@ pub async fn list(
             sort: sort_str,
         })
     } else {
+        let can_generate_ai_images = state
+            .settings
+            .get_image_generation_settings(user.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
         render(&GridPage {
             user: Some(user.into()),
             header_shows_bookmark_actions: true,
@@ -231,6 +240,7 @@ pub async fn list(
             suggest_description: String::new(),
             suggest_preview_image_url: None,
             suggest_tags: String::new(),
+            can_generate_ai_images,
         })
     }
 }
@@ -241,6 +251,7 @@ pub struct CreateForm {
     title: Option<String>,
     description: Option<String>,
     tags_input: Option<String>,
+    generate_ai_image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -270,7 +281,15 @@ pub async fn create(
         tags,
     };
 
-    match with_bookmarks!(&state.bookmarks, svc => svc.create(user.id, input).await) {
+    let generate_ai_image = form.generate_ai_image.is_some();
+    let result = with_bookmarks!(&state.bookmarks, svc => {
+        if generate_ai_image {
+            svc.create_with_ai_image(user.id, input).await
+        } else {
+            svc.create(user.id, input).await
+        }
+    });
+    match result {
         Ok(bookmark) => render(&BookmarkCard {
             bookmark: bookmark.into(),
         }),
@@ -331,6 +350,13 @@ pub async fn edit(
         .ok()
         .flatten()
         .is_some();
+    let can_generate_ai_images = state
+        .settings
+        .get_image_generation_settings(user.id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
 
     render(&EditModal {
         bookmark_id: bookmark.id,
@@ -340,6 +366,7 @@ pub async fn edit(
         suggest_description: bookmark.description.unwrap_or_default(),
         suggest_tags: bookmark.tags.join(", "),
         has_llm,
+        can_generate_ai_images,
     })
 }
 
@@ -576,6 +603,19 @@ pub async fn remove_image(
         return error_response(error);
     }
     match with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await) {
+        Ok(bookmark) => image_response(bookmark),
+        Err(error) => error_response(error),
+    }
+}
+
+pub async fn generate_image(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    match with_bookmarks!(&state.bookmarks, svc => {
+        svc.generate_image_override(id, user.id).await
+    }) {
         Ok(bookmark) => image_response(bookmark),
         Err(error) => error_response(error),
     }

@@ -272,6 +272,11 @@ mod service_tests {
             replace: Option<&[u8]>,
             clear: bool,
             model: &str,
+            _image_generation_enabled: bool,
+            _replace_gemini_api_key_encrypted: Option<&[u8]>,
+            _clear_gemini_api_key: bool,
+            _image_generation_model: &str,
+            _image_generation_art_style: &str,
         ) -> Result<LlmSettings, DomainError> {
             let existing = self.stored.lock().unwrap().clone();
             let encrypted = if clear {
@@ -288,8 +293,7 @@ mod service_tests {
                 enabled,
                 anthropic_api_key_encrypted: encrypted,
                 anthropic_model: model.to_string(),
-                created_at: existing.map(|s| s.created_at).unwrap_or_else(Utc::now),
-                updated_at: Utc::now(),
+                ..Default::default()
             };
             *self.stored.lock().unwrap() = Some(saved.clone());
             Ok(saved)
@@ -516,6 +520,7 @@ mod service_tests {
                     anthropic_api_key: Some("sk-ant-x".into()),
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("claude-haiku-4-5-20251001".into()),
+                    ..Default::default()
                 },
             )
             .await
@@ -569,6 +574,7 @@ mod service_tests {
                     anthropic_api_key: Some("sk-ant-x".into()),
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("claude-haiku-4-5-20251001".into()),
+                    ..Default::default()
                 },
             )
             .await

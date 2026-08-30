@@ -21,6 +21,16 @@ async function resetSettings(page) {
     await enableLlm.uncheck();
   }
 
+  const deleteGeminiKey = page.getByTestId("delete-gemini-api-key");
+  if (await deleteGeminiKey.count()) {
+    await deleteGeminiKey.check();
+  }
+
+  const enableImageGeneration = page.getByTestId("image-generation-enabled");
+  if (await enableImageGeneration.isChecked()) {
+    await enableImageGeneration.uncheck();
+  }
+
   await page
     .getByLabel("Anthropic model")
     .selectOption("claude-haiku-4-5-20251001");
@@ -107,6 +117,53 @@ test("settings page supports add and delete key flows", async ({ page }) => {
   await expect(page.getByLabel("Anthropic API key")).toBeEditable();
   await expect(page.getByTestId("anthropic-api-key-status")).toHaveCount(0);
   await expect(page.getByTestId("delete-anthropic-api-key")).toHaveCount(0);
+});
+
+test("Gemini image settings enable create and edit generation controls", async ({
+  page,
+}) => {
+  await signIn(page);
+  await resetSettings(page);
+  await page.goto("/settings");
+
+  await page.getByTestId("image-generation-enabled").check();
+  await page.getByTestId("gemini-api-key").fill("test-gemini-key-not-called");
+  await page
+    .getByTestId("image-generation-model")
+    .selectOption("gemini-3.1-flash-lite-image");
+  await page
+    .getByTestId("image-generation-art-style")
+    .fill("Poppy paper-cut collage with cobalt, coral, and cream");
+  await page.getByRole("button", { name: "Save settings" }).click();
+
+  await expect(page).toHaveURL(/\/settings\?saved=1$/);
+  await expect(page.getByTestId("gemini-api-key-status")).toBeVisible();
+  await expect(page.getByTestId("image-generation-enabled")).toBeChecked();
+  await expect(page.getByTestId("image-generation-model")).toHaveValue(
+    "gemini-3.1-flash-lite-image",
+  );
+  await expect(page.getByTestId("image-generation-art-style")).toHaveValue(
+    "Poppy paper-cut collage with cobalt, coral, and cream",
+  );
+
+  await page.goto("/bookmarks");
+  await page.getByTestId("open-add-bookmark-modal").click();
+  await expect(page.getByTestId("generate-ai-image-toggle")).toBeEnabled();
+  await page.getByTestId("generate-ai-image-toggle").check();
+
+  const created = await page.request.post("/api/v1/bookmarks", {
+    data: {
+      url: `https://ai-image-controls.example/${Date.now()}`,
+      title: "AI image controls",
+      description: "Deterministic UI coverage",
+      image_url: "https://example.com/existing.jpg",
+    },
+  });
+  expect(created.ok()).toBeTruthy();
+  const bookmark = await created.json();
+
+  await page.goto(`/bookmarks/${bookmark.id}/edit`);
+  await expect(page.getByTestId("generate-ai-image-button")).toBeVisible();
 });
 
 test("settings page shows API Keys section", async ({ page }) => {
