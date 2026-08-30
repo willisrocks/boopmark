@@ -1,0 +1,102 @@
+name: Chrome extension artifacts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chrome-extension-artifacts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Test and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out requested revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run extension tests
+        run: npm run test:extension
+
+      - name: Build Web Store package
+        id: package
+        run: |
+          npm run extension:package
+          VERSION=$(node -p "require('./extensions/chrome/manifest.json').version")
+          ARCHIVE="dist/boopmark-chrome-${VERSION}.zip"
+          test -f "$ARCHIVE"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Validate package contents
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          EXPECTED=$(printf '%s\n' \
+            api.js \
+            core.js \
+            icons/ \
+            icons/128.png \
+            icons/16.png \
+            icons/32.png \
+            icons/48.png \
+            logo.svg \
+            manifest.json \
+            popup.html \
+            popup.js \
+            styles.css \
+            worker.js | sort)
+          ACTUAL=$(unzip -Z1 "$ARCHIVE" | sort)
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "Unexpected Chrome package contents:" >&2
+            diff -u <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$ACTUAL") || true
+            exit 1
+          fi
+
+          UNPACKED="dist/boopmark-chrome-unpacked-${VERSION}"
+          mkdir -p "$UNPACKED"
+          unzip -q "$ARCHIVE" -d "$UNPACKED"
+          node -e "const m=require('./$UNPACKED/manifest.json'); if(m.manifest_version!==3 || m.version!==process.env.VERSION) process.exit(1)"
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+          {
+            echo "version=$VERSION"
+            echo "commit=$GITHUB_SHA"
+            echo "workflow_run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > dist/chrome-extension-build.txt
+
+      - name: Upload Chrome Web Store artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boopmark-chrome-web-store-${{ steps.package.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+            dist/chrome-extension-build.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload unpacked sideload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boopmark-chrome-sideload-${{ steps.package.outputs.version }}
+          path: |
+            dist/boopmark-chrome-unpacked-${{ steps.package.outputs.version }}/
+            dist/chrome-extension-build.txt
+          if-no-files-found: error
+          retention-days: 90

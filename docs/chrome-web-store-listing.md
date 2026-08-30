@@ -63,3 +63,12 @@ Boopmark does not sell or transfer this data for advertising, creditworthiness, 
 - Store icon, 128×128: `extensions/chrome/icons/128.png`
 
 Regenerate artwork from the latest production E2E capture with `npm run extension:store-assets`. Create the upload archive with `npm run extension:package`; the archive intentionally excludes tests, documentation, and store artwork.
+
+## CI release artifacts
+
+Run **Actions → Chrome extension artifacts → Run workflow** on the exact revision intended for release. The workflow runs all extension tests and creates:
+
+- `boopmark-chrome-web-store-<version>`: the upload-ready ZIP, SHA-256 checksum, and build metadata.
+- `boopmark-chrome-sideload-<version>`: the unpacked extension directory and build metadata. Download and unzip the GitHub artifact, then select its unpacked extension directory with Chrome's **Load unpacked** control.
+
+The build reads the release version from `extensions/chrome/manifest.json`, rejects any package entry outside the production allowlist, records the source commit and workflow run, and retains both artifacts for 90 days.
