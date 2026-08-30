@@ -8,6 +8,7 @@ bookmarks.jsonl
 uploads/
 playwright-report/
 test-results/
+dist/
 .cache/boopmark-extension/
 .devproxy-override.yml
 .playwright-mcp/

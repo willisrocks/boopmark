@@ -9,7 +9,7 @@
 
     <article class="mt-10 bg-[#1e2235] rounded-2xl border border-gray-700 p-6 sm:p-10 shadow-lg shadow-black/20">
         <h1 class="text-3xl font-bold text-white">Privacy Policy</h1>
-        <p class="mt-2 text-sm text-gray-500">Effective August 27, 2026</p>
+        <p class="mt-2 text-sm text-gray-500">Effective August 30, 2026</p>
 
         <div class="mt-8 space-y-8 text-gray-300 leading-7">
             <section>
@@ -17,9 +17,14 @@
                 <ul class="mt-3 list-disc pl-6 space-y-2">
                     <li><strong class="text-gray-100">Account information:</strong> information used to identify your Boopmark account, such as your email address and profile details when you sign in on the web.</li>
                     <li><strong class="text-gray-100">Bookmark content:</strong> URLs, titles, notes, tags, images, and related metadata that you choose to save.</li>
-                    <li><strong class="text-gray-100">Connection information:</strong> API credentials are stored in the iOS Keychain on your device. Boopmark servers receive the credential when authenticating API requests but the app does not send it to advertising or analytics services.</li>
+                    <li><strong class="text-gray-100">Connection information:</strong> API credentials are stored in the iOS Keychain or Chrome's extension-local storage on your device. Boopmark servers receive the credential when authenticating API requests, but Boopmark does not send it to advertising or analytics services.</li>
                     <li><strong class="text-gray-100">Operational information:</strong> standard server logs and diagnostics needed to keep the service secure and reliable.</li>
                 </ul>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-white">Chrome extension</h2>
+                <p class="mt-3">The Boopmark Chrome extension reads the active tab's URL and title only when you open the extension. It does not read page contents, cookies, or browsing history and does not collect data while it is closed. The extension sends the selected URL and the bookmark fields you review to your configured Boopmark server for metadata lookup and saving. If AI is enabled in your Boopmark account, that server may automatically use its configured AI provider to suggest a title, description, and tags. Your Boopmark API key is stored locally by Chrome and sent only to the Boopmark server you choose.</p>
             </section>
 
             <section>
@@ -39,7 +44,7 @@
 
             <section>
                 <h2 class="text-xl font-semibold text-white">Security and self-hosting</h2>
-                <p class="mt-3">Traffic to the hosted Boopmark service uses HTTPS, and the iOS app stores its API key using Apple’s Keychain. If you connect the app to a self-hosted Boopmark server, that server’s operator controls its data practices and is responsible for its own privacy disclosures and security.</p>
+                <p class="mt-3">Traffic to the hosted Boopmark service uses HTTPS. The iOS app stores its API key using Apple’s Keychain, and the Chrome extension uses Chrome's extension-local storage. If you connect an app or extension to a self-hosted Boopmark server, that server’s operator controls its data practices and is responsible for its own privacy disclosures and security.</p>
             </section>
 
             <section>
