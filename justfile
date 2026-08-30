@@ -59,7 +59,8 @@ setup:
     command -v sqlx > /dev/null 2>&1 || cargo install sqlx-cli --no-default-features --features postgres,rustls
     echo "==> Running migrations"
     source .env
-    sqlx migrate run --source migrations
+    # Worktrees may share a development database that has migrations from another branch.
+    sqlx migrate run --source migrations --ignore-missing
     echo "==> Installing npm dependencies"
     npm install
     echo "==> Building Tailwind CSS"
