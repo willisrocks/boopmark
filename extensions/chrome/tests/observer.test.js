@@ -18,11 +18,12 @@ test('observer request projection excludes headers, payload fields, GETs, and ot
   const { projectRequest } = await observer;
   const request = {
     method: 'POST', url: 'https://boopmark.com/api/v1/bookmarks?suggest=true',
-    headers: { Authorization: 'Bearer must-not-leak' },
+    headers: { Authorization: 'Bearer must-not-leak', 'Idempotency-Key': '123e4567-e89b-42d3-a456-426614174000' },
     postData: JSON.stringify({ url: fixture, title: 'Not a reported request field', secret: 'must-not-leak' }),
   };
   const result = projectRequest(request, fixture);
   assert.equal(result.query, '?suggest=true');
+  assert.deepEqual(result.idempotencyKey, { present: true, validUuid: true });
   assert.equal(JSON.stringify(result).includes('must-not-leak'), false);
   assert.equal(JSON.stringify(result).includes('reported request'), false);
   assert.equal(projectRequest({ ...request, method: 'GET' }, fixture), null);
@@ -30,6 +31,10 @@ test('observer request projection excludes headers, payload fields, GETs, and ot
   assert.equal(projectRequest({ ...request, url: 'https://elsewhere.example/api/v1/bookmarks' }, fixture), null);
   const unexpected = projectRequest({ ...request, url: 'https://boopmark.com/api/v1/bookmarks?token=must-not-leak' }, fixture);
   assert.equal(unexpected.query, '[redacted unexpected query]');
+  const missing = projectRequest({ ...request, headers: {} }, fixture);
+  assert.deepEqual(missing.idempotencyKey, { present: false, validUuid: false });
+  const suggestion = projectRequest({ ...request, url: 'https://boopmark.com/api/v1/bookmarks/suggest' }, fixture);
+  assert.equal(suggestion.idempotencyKey, null);
 });
 
 test('observer response projection reports only suggestion fields or a created UUID', async () => {

@@ -39,7 +39,11 @@ export function projectRequest(request, fixture) {
   const suggest = url.searchParams.get('suggest');
   const query = !url.search ? '' : url.searchParams.size === 1 && ['true', 'false'].includes(suggest)
     ? `?suggest=${suggest}` : '[redacted unexpected query]';
-  return { method: 'POST', path: url.pathname, query, status: null, failed: false, bodyCaptured: false };
+  const header = Object.entries(request.headers || {}).find(([name]) => name.toLowerCase() === 'idempotency-key')?.[1];
+  const idempotencyKey = url.pathname === '/api/v1/bookmarks'
+    ? { present: typeof header === 'string', validUuid: typeof header === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(header) }
+    : null;
+  return { method: 'POST', path: url.pathname, query, idempotencyKey, status: null, failed: false, bodyCaptured: false };
 }
 
 export function projectBody(path, value) {

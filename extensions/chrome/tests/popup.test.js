@@ -23,6 +23,7 @@ async function setup() {
   let openOverride;
   let connectError;
   let saveError;
+  let permissionError;
   let updateGate;
   let permissionGranted = true;
   const removed = [];
@@ -50,7 +51,10 @@ async function setup() {
   const chrome = {
     tabs: { query: async () => [{ id: 1, url: 'https://example.com', title: 'Before edit' }] },
     permissions: {
-      request: async () => permissionGranted,
+      request: () => {
+        if (permissionError) throw new Error(permissionError);
+        return Promise.resolve(permissionGranted);
+      },
       remove: async value => { removed.push(value); },
     },
     runtime: {
@@ -82,6 +86,7 @@ async function setup() {
     override: fn => { openOverride = fn; },
     failConnect: message => { connectError = message; },
     failSave: message => { saveError = message; },
+    failPermission: message => { permissionError = message; },
     delayUpdates: promise => { updateGate = promise; },
     denyPermission: () => { permissionGranted = false; },
   };
@@ -136,6 +141,20 @@ test('denied host permission neither connects nor revokes an existing origin', a
   assert.deepEqual(ui.messages, ['OPEN']);
   assert.equal(ui.removed.length, 0);
   assert.match(ui.elements['connection-status'].textContent, /not granted/);
+});
+
+test('synchronous host-permission failure restores the connect form and reports the error', async () => {
+  const ui = await setup();
+  ui.elements.server.value = 'https://selfhost.example';
+  ui.elements['api-key'].value = 'public-test-key';
+  ui.failPermission('Permission API unavailable');
+
+  await ui.fire('connection-form', 'submit');
+
+  assert.match(ui.elements['connection-status'].textContent, /Permission API unavailable/);
+  assert.equal(ui.elements.server.disabled, false);
+  assert.equal(ui.elements['api-key'].disabled, false);
+  assert.deepEqual(ui.messages, ['OPEN']);
 });
 
 test('settings edits and link survive state refresh while API key is focused', async () => {

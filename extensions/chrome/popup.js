@@ -184,14 +184,16 @@ $('connection-form').addEventListener('submit', async event => {
   const formerServer = state.connection?.server;
   let granted = false;
   let connected = false;
-  // Keep permission request directly within the Connect user gesture.
-  const grant = chrome.permissions.request({ origins: [permissionPattern(server)] });
   connecting = true;
   $('connect-button').disabled = true;
   for (const id of ['server', 'api-key', 'disconnect-button', 'back-button']) $(id).disabled = true;
   $('connection-status').classList.remove('error');
   $('connection-status').textContent = 'Connecting…';
   try {
+    // Keep permission request directly within the Connect user gesture. It
+    // can throw synchronously in a restricted/invalid Chrome context, so it
+    // must remain inside this handler's recovery path as well.
+    const grant = chrome.permissions.request({ origins: [permissionPattern(server)] });
     granted = await grant;
     if (!granted) throw new Error('Server access was not granted. Click Connect to try again.');
     await send({ type: 'CONNECT', server, apiKey });
