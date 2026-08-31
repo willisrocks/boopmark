@@ -24,6 +24,7 @@ mod tests {
     use crate::domain::error::DomainError;
     use crate::domain::llm_settings::{DEFAULT_ANTHROPIC_MODEL, LlmSettings};
     use crate::domain::ports::llm_enricher::EnrichmentOutput;
+    use chrono::Utc;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,15 +39,7 @@ mod tests {
         async fn upsert(
             &self,
             _user_id: Uuid,
-            _enabled: bool,
-            _replace_anthropic_api_key_encrypted: Option<&[u8]>,
-            _clear_anthropic_api_key: bool,
-            _anthropic_model: &str,
-            _image_generation_enabled: bool,
-            _replace_gemini_api_key_encrypted: Option<&[u8]>,
-            _clear_gemini_api_key: bool,
-            _image_generation_model: &str,
-            _image_generation_art_style: &str,
+            _update: crate::domain::ports::llm_settings_repo::LlmSettingsUpdate,
         ) -> Result<LlmSettings, DomainError> {
             panic!("suggestions must not modify account settings")
         }
@@ -123,13 +116,20 @@ mod tests {
         let stored = configuration.map(|(enabled, has_key)| LlmSettings {
             user_id,
             enabled,
+            metadata_provider: "anthropic".into(),
             anthropic_api_key_encrypted: has_key.then(|| {
                 secret_box
                     .encrypt("fake-provider-key")
                     .expect("encrypt fake key")
             }),
             anthropic_model: DEFAULT_ANTHROPIC_MODEL.into(),
-            ..Default::default()
+            openai_api_key_encrypted: None,
+            openai_model: crate::domain::llm_settings::DEFAULT_OPENAI_MODEL.into(),
+            image_generation_enabled: false,
+            image_generation_model: crate::domain::llm_settings::DEFAULT_IMAGE_GENERATION_MODEL
+                .into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         });
         let settings = Arc::new(SettingsService::new(
             Arc::new(FakeSettings(stored)),
@@ -308,8 +308,8 @@ where
         metadata: &Option<crate::domain::bookmark::UrlMetadata>,
         existing_tags: Option<Vec<(String, i64)>>,
     ) -> Option<crate::domain::ports::llm_enricher::EnrichmentOutput> {
-        let (api_key, model) = match self.settings.get_decrypted_api_key(user_id).await {
-            Ok(Some(pair)) => pair,
+        let credentials = match self.settings.get_text_provider_credentials(user_id).await {
+            Ok(Some(credentials)) => credentials,
             Ok(None) => return None,
             Err(e) => {
                 tracing::warn!(user_id = %user_id, error = %e, "failed to load LLM settings for enrichment");
@@ -324,7 +324,16 @@ where
             existing_tags,
         };
 
-        match self.enricher.enrich(&api_key, &model, input).await {
+        match self
+            .enricher
+            .enrich_with_provider(
+                credentials.provider,
+                &credentials.api_key,
+                &credentials.model,
+                input,
+            )
+            .await
+        {
             Ok(output) => Some(output),
             Err(e) => {
                 tracing::warn!(user_id = %user_id, url = %url, error = %e, "LLM enrichment failed, falling back to scrape-only");

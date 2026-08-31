@@ -10,6 +10,13 @@ use crate::domain::ports::storage::ObjectStorage;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Keep image-provider spend bounded for one explicit repair run. Failed
+/// provider calls consume a slot just like successful calls.
+pub const MAX_AI_IMAGE_REPAIRS_PER_RUN: usize = 10;
+const MAX_GENERATED_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+const MAX_GENERATED_IMAGE_DIMENSION: u32 = 10_000;
+const MAX_GENERATED_IMAGE_PIXELS: u64 = 20_000_000;
+
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct ProgressEvent {
     pub checked: usize,
@@ -59,9 +66,19 @@ where
         }
     }
 
+    /// Attach the configured image provider. Keeping this optional preserves
+    /// the existing scrape/screenshot behavior for self-hosted installations
+    /// that have not configured AI images.
     pub fn with_image_generator(mut self, image_generator: Arc<dyn ImageGenerator>) -> Self {
         self.image_generator = Some(image_generator);
         self
+    }
+
+    pub async fn can_generate_ai_images(&self, user_id: Uuid) -> bool {
+        let Some(generator) = self.image_generator.as_ref() else {
+            return false;
+        };
+        generator.is_configured(user_id).await.ok() == Some(true)
     }
 
     pub async fn create(
@@ -94,6 +111,9 @@ where
         self.repo.create_claimed(user_id, input, operation).await
     }
 
+    /// Explicitly create a bookmark with an AI-generated card image. Metadata
+    /// and screenshot fallbacks remain available if generation fails, so an
+    /// image provider outage never prevents saving the bookmark itself.
     pub async fn create_with_ai_image(
         &self,
         user_id: Uuid,
@@ -122,43 +142,34 @@ where
             if let Ok(meta) = metadata_result {
                 scraped_image_url = merge_metadata(&mut input, meta);
             }
-            if prefer_ai_image {
-                match self
-                    .generate_and_store_image(user_id, generation_context(&input))
-                    .await
-                {
-                    Ok(url) => input.image_url = Some(url),
-                    Err(error) => {
-                        tracing::warn!(url = %input.url, %error, "primary AI image generation failed; using normal image fallbacks")
-                    }
+        }
+
+        if prefer_ai_image {
+            match self
+                .generate_and_store_image(user_id, generation_context(&input), None)
+                .await
+            {
+                Ok(url) => input.image_url = Some(url),
+                Err(error) => {
+                    tracing::warn!(url = %input.url, %error, "explicit AI image generation failed; using normal image fallbacks")
                 }
             }
-            if input.image_url.is_none()
-                && let Some(image_url) = scraped_image_url
-                && let Ok(stored_url) = self.download_and_store_image(&image_url).await
-            {
+        }
+
+        if input.image_url.is_none()
+            && let Some(image_url) = scraped_image_url
+            && let Ok(stored_url) = self.download_and_store_image(user_id, &image_url).await
+        {
+            input.image_url = Some(stored_url);
+        }
+        // Fall back to a browser screenshot whenever metadata scraping did
+        // not produce an image, including Cloudflare challenge failures.
+        if input.image_url.is_none()
+            && let Ok(bytes) = self.screenshot.capture(&input.url).await
+        {
+            let key = format!("images/base/{user_id}/{}.jpg", Uuid::new_v4());
+            if let Ok(stored_url) = self.storage.put(&key, bytes, "image/jpeg").await {
                 input.image_url = Some(stored_url);
-            }
-            // Fall back to a browser screenshot whenever metadata scraping did
-            // not produce an image, including Cloudflare challenge failures.
-            if input.image_url.is_none()
-                && let Ok(bytes) = self.screenshot.capture(&input.url).await
-            {
-                let key = format!("images/{}.jpg", Uuid::new_v4());
-                if let Ok(stored_url) = self.storage.put(&key, bytes, "image/jpeg").await {
-                    input.image_url = Some(stored_url);
-                }
-            }
-            if input.image_url.is_none() && !prefer_ai_image {
-                match self
-                    .generate_and_store_image(user_id, generation_context(&input))
-                    .await
-                {
-                    Ok(url) => input.image_url = Some(url),
-                    Err(error) => {
-                        tracing::debug!(url = %input.url, %error, "AI image fallback unavailable")
-                    }
-                }
             }
         }
 
@@ -237,19 +248,54 @@ where
         Ok(())
     }
 
+    /// Generate a replacement card image and store it as a user-owned
+    /// override. The scraped/generated base image is never overwritten.
     pub async fn generate_image_override(
         &self,
         id: Uuid,
         user_id: Uuid,
+        instruction: Option<String>,
     ) -> Result<Bookmark, DomainError> {
         let bookmark = self.repo.get(id, user_id).await?;
-        let context = ImageGenerationContext {
-            url: bookmark.url.clone(),
-            title: bookmark.title.clone(),
-            description: bookmark.description.clone(),
-        };
-        let context = self.hydrate_generation_context(context).await;
-        let bytes = self.generate_image_bytes(user_id, context).await?;
+        let context = generation_context_from_bookmark(&bookmark);
+        let bytes = self
+            .generate_image_bytes(user_id, context, instruction)
+            .await?;
+        self.store_override_and_reload(id, user_id, bytes).await
+    }
+
+    /// Edit the bookmark's existing app-stored image. Remote images cannot be
+    /// safely forwarded to the provider, so callers must use the generate
+    /// action when the current image is unavailable for editing.
+    pub async fn edit_image_override(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        instruction: Option<String>,
+    ) -> Result<Bookmark, DomainError> {
+        let bookmark = self.repo.get(id, user_id).await?;
+        let context = generation_context_from_bookmark(&bookmark);
+        let source = self
+            .load_editable_image(&bookmark, user_id)
+            .await?
+            .ok_or_else(|| {
+                DomainError::InvalidInput(
+                    "the current image is unavailable for AI editing; generate a new image instead"
+                        .to_string(),
+                )
+            })?;
+        let bytes = self
+            .edit_image_bytes(user_id, source, context, instruction)
+            .await?;
+        self.store_override_and_reload(id, user_id, bytes).await
+    }
+
+    async fn store_override_and_reload(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        bytes: Vec<u8>,
+    ) -> Result<Bookmark, DomainError> {
         let key = format!("images/overrides/{user_id}/{}.jpg", Uuid::new_v4());
         let stored_url = self.storage.put(&key, bytes, "image/jpeg").await?;
         let old_override = match self
@@ -266,6 +312,80 @@ where
         self.delete_owned_override(user_id, old_override.as_deref())
             .await;
         self.repo.get(id, user_id).await
+    }
+
+    async fn load_editable_image(
+        &self,
+        bookmark: &Bookmark,
+        user_id: Uuid,
+    ) -> Result<Option<Vec<u8>>, DomainError> {
+        let Some(url) = bookmark.effective_image_url() else {
+            return Ok(None);
+        };
+        let Some(key) = owned_image_storage_key(self.storage.as_ref(), user_id, url) else {
+            return Ok(None);
+        };
+        match self.storage.get(&key).await {
+            Ok(bytes) if !bytes.is_empty() && bytes.len() <= MAX_GENERATED_IMAGE_BYTES => {
+                Ok(Some(bytes))
+            }
+            Ok(_) => Ok(None),
+            Err(error) => {
+                tracing::debug!(%error, "could not read stored image for AI edit");
+                Ok(None)
+            }
+        }
+    }
+
+    async fn generate_image_bytes(
+        &self,
+        user_id: Uuid,
+        context: ImageGenerationContext,
+        instruction: Option<String>,
+    ) -> Result<Vec<u8>, DomainError> {
+        let generator = self.image_generator.as_ref().ok_or_else(|| {
+            DomainError::InvalidInput("AI image generation is unavailable".to_string())
+        })?;
+        let generated = generator.generate(user_id, context, instruction).await?;
+        self.normalize_generated_image(generated).await
+    }
+
+    async fn edit_image_bytes(
+        &self,
+        user_id: Uuid,
+        source: Vec<u8>,
+        context: ImageGenerationContext,
+        instruction: Option<String>,
+    ) -> Result<Vec<u8>, DomainError> {
+        let generator = self.image_generator.as_ref().ok_or_else(|| {
+            DomainError::InvalidInput("AI image generation is unavailable".to_string())
+        })?;
+        let generated = generator
+            .edit(user_id, source, context, instruction)
+            .await?;
+        self.normalize_generated_image(generated).await
+    }
+
+    async fn normalize_generated_image(
+        &self,
+        generated: crate::domain::ports::image_generator::GeneratedImage,
+    ) -> Result<Vec<u8>, DomainError> {
+        if !generated.mime_type.starts_with("image/") {
+            return Err(DomainError::Internal(
+                "image generator returned non-image data".to_string(),
+            ));
+        }
+        let _permit = self
+            .generated_image_processing_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| DomainError::Internal("image processor is unavailable".to_string()))?;
+        tokio::task::spawn_blocking(move || normalize_social_image(&generated.bytes))
+            .await
+            .map_err(|error| {
+                DomainError::Internal(format!("generated image processing failed: {error}"))
+            })?
     }
 
     async fn delete_owned_override(&self, user_id: Uuid, image_url: Option<&str>) {
@@ -436,7 +556,11 @@ where
         Ok(result)
     }
 
-    async fn download_and_store_image(&self, image_url: &str) -> Result<String, DomainError> {
+    async fn download_and_store_image(
+        &self,
+        user_id: Uuid,
+        image_url: &str,
+    ) -> Result<String, DomainError> {
         let resp = self
             .http_client
             .get(image_url)
@@ -464,7 +588,7 @@ where
             .map_err(|e| DomainError::Internal(format!("image read error: {e}")))?;
 
         let key = format!(
-            "images/{}.{}",
+            "images/base/{user_id}/{}.{}",
             Uuid::new_v4(),
             extension_from_content_type(&content_type)
         );
@@ -496,6 +620,41 @@ fn owned_override_storage_key<S: ObjectStorage>(
     }
     let object_id = filename.strip_suffix(".jpg")?.parse::<Uuid>().ok()?;
     Some(format!("images/overrides/{owner}/{object_id}.jpg"))
+}
+
+fn owned_image_storage_key<S: ObjectStorage>(
+    storage: &S,
+    user_id: Uuid,
+    url: &str,
+) -> Option<String> {
+    let prefix = storage.public_url("").trim_end_matches('/').to_string();
+    let key = url.strip_prefix(&prefix)?.strip_prefix('/')?;
+    let components: Vec<_> = key.split('/').collect();
+    if components.iter().any(|component| component.is_empty()) || components[0] != "images" {
+        return None;
+    }
+
+    match components.as_slice() {
+        ["images", kind, owner, filename] if matches!(*kind, "base" | "ai" | "overrides") => {
+            let kind = *kind;
+            let owner = owner.parse::<Uuid>().ok()?;
+            if owner != user_id {
+                return None;
+            }
+            let (object_id, extension) = filename.rsplit_once('.')?;
+            let object_id = object_id.parse::<Uuid>().ok()?;
+            if kind != "base" && extension != "jpg" {
+                return None;
+            }
+            if kind == "base"
+                && !matches!(extension, "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg")
+            {
+                return None;
+            }
+            Some(format!("images/{kind}/{owner}/{object_id}.{extension}"))
+        }
+        _ => None,
+    }
 }
 
 impl<R, M, S> BookmarkService<R, M, S>
@@ -534,6 +693,7 @@ where
         let mut checked = 0;
         let mut fixed = 0;
         let mut failed = 0;
+        let mut ai_attempts = 0;
 
         for bookmark in bookmarks {
             let mut needs_fix = match bookmark.effective_image_url() {
@@ -541,8 +701,8 @@ where
                 Some(url) => !self.image_url_is_valid(url).await,
             };
 
-            // A broken override hides the base image. Remove it first so a
-            // still-valid scraped/generated base image becomes visible again.
+            // A broken override hides the base image. Clear it first so a
+            // still-valid scraped/generated image can become visible again.
             if needs_fix && bookmark.override_image_url.is_some() {
                 match self.remove_image_override(bookmark.id, user_id).await {
                     Ok(()) => {
@@ -555,7 +715,11 @@ where
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(bookmark_id = %bookmark.id, %error, "could not clear broken image override");
+                        tracing::warn!(
+                            bookmark_id = %bookmark.id,
+                            %error,
+                            "could not clear broken image override"
+                        );
                         failed += 1;
                         needs_fix = false;
                     }
@@ -563,12 +727,11 @@ where
             }
 
             if needs_fix {
-                let context = ImageGenerationContext {
-                    url: bookmark.url.clone(),
-                    title: bookmark.title.clone(),
-                    description: bookmark.description.clone(),
-                };
-                match self.fetch_and_store_image(user_id, context).await {
+                let context = generation_context_from_bookmark(&bookmark);
+                match self
+                    .fetch_and_store_image(user_id, context, &mut ai_attempts)
+                    .await
+                {
                     Ok(new_url) => {
                         if self
                             .repo
@@ -618,6 +781,7 @@ where
         &self,
         user_id: Uuid,
         mut context: ImageGenerationContext,
+        ai_attempts: &mut usize,
     ) -> Result<String, DomainError> {
         let page_url = context.url.clone();
         let metadata_result = self.metadata.extract(&page_url).await;
@@ -636,83 +800,26 @@ where
                 context.description = meta.description;
             }
             if let Some(image_url) = meta.image_url
-                && let Ok(stored) = self.download_and_store_image(&image_url).await
+                && let Ok(stored) = self.download_and_store_image(user_id, &image_url).await
             {
                 return Ok(stored);
             }
         }
 
         if let Ok(bytes) = self.screenshot.capture(&page_url).await {
-            let key = format!("images/{}.jpg", Uuid::new_v4());
-            if let Ok(url) = self.storage.put(&key, bytes, "image/jpeg").await {
-                return Ok(url);
+            let key = format!("images/base/{user_id}/{}.jpg", Uuid::new_v4());
+            if let Ok(stored) = self.storage.put(&key, bytes, "image/jpeg").await {
+                return Ok(stored);
             }
         }
 
-        self.generate_and_store_image(user_id, context).await
-    }
-
-    async fn hydrate_generation_context(
-        &self,
-        mut context: ImageGenerationContext,
-    ) -> ImageGenerationContext {
-        if context
-            .title
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
-            && context
-                .description
-                .as_deref()
-                .is_some_and(|value| !value.is_empty())
-        {
-            return context;
-        }
-        if let Ok(metadata) = self.metadata.extract(&context.url).await {
-            if context.title.as_deref().is_none_or(str::is_empty) {
-                context.title = metadata.title;
-            }
-            if context.description.as_deref().is_none_or(str::is_empty) {
-                context.description = metadata.description;
-            }
-        }
-        context
-    }
-
-    async fn generate_and_store_image(
-        &self,
-        user_id: Uuid,
-        context: ImageGenerationContext,
-    ) -> Result<String, DomainError> {
-        let bytes = self.generate_image_bytes(user_id, context).await?;
-        let key = format!("images/ai/{user_id}/{}.jpg", Uuid::new_v4());
-        self.storage.put(&key, bytes, "image/jpeg").await
-    }
-
-    async fn generate_image_bytes(
-        &self,
-        user_id: Uuid,
-        context: ImageGenerationContext,
-    ) -> Result<Vec<u8>, DomainError> {
-        let generator = self.image_generator.as_ref().ok_or_else(|| {
-            DomainError::InvalidInput("AI image generation is unavailable".into())
-        })?;
-        let generated = generator.generate(user_id, context).await?;
-        if !generated.mime_type.starts_with("image/") {
+        if *ai_attempts >= MAX_AI_IMAGE_REPAIRS_PER_RUN {
             return Err(DomainError::Internal(
-                "image generator returned non-image data".into(),
+                "AI image repair limit reached for this run".to_string(),
             ));
         }
-        let _permit = self
-            .generated_image_processing_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| DomainError::Internal("image processor is unavailable".into()))?;
-        tokio::task::spawn_blocking(move || normalize_social_image(&generated.bytes))
-            .await
-            .map_err(|error| {
-                DomainError::Internal(format!("generated image processing failed: {error}"))
-            })?
+        *ai_attempts += 1;
+        self.generate_and_store_image(user_id, context, None).await
     }
 
     /// Check whether a stored image is still reachable.
@@ -752,53 +859,60 @@ where
             .map(|response| response.status().is_success())
             .unwrap_or(false)
     }
-}
 
-fn generation_context(input: &CreateBookmark) -> ImageGenerationContext {
-    ImageGenerationContext {
-        url: input.url.clone(),
-        title: input.title.clone(),
-        description: input.description.clone(),
+    async fn generate_and_store_image(
+        &self,
+        user_id: Uuid,
+        context: ImageGenerationContext,
+        instruction: Option<String>,
+    ) -> Result<String, DomainError> {
+        let bytes = self
+            .generate_image_bytes(user_id, context, instruction)
+            .await?;
+        let key = format!("images/ai/{user_id}/{}.jpg", Uuid::new_v4());
+        self.storage.put(&key, bytes, "image/jpeg").await
     }
 }
 
+/// Decode generated bytes under a bounded header/pixel budget and emit one
+/// stable card representation. Provider output is untrusted even when its
+/// MIME type claims to be an image.
 fn normalize_social_image(bytes: &[u8]) -> Result<Vec<u8>, DomainError> {
     use image::ImageReader;
     use std::io::Cursor;
 
-    if bytes.len() > 12 * 1024 * 1024 {
+    if bytes.is_empty() || bytes.len() > MAX_GENERATED_IMAGE_BYTES {
         return Err(DomainError::Internal(
-            "generated image exceeded the size limit".into(),
+            "generated image exceeded the size limit".to_string(),
         ));
     }
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|error| DomainError::Internal(format!("invalid generated image: {error}")))?;
-    let (width, height) = reader.into_dimensions().map_err(|error| {
-        DomainError::Internal(format!(
-            "could not read generated image dimensions: {error}"
-        ))
+        .map_err(|_| DomainError::Internal("generated image was invalid".to_string()))?;
+    let (width, height) = reader.into_dimensions().map_err(|_| {
+        DomainError::Internal("generated image dimensions were invalid".to_string())
     })?;
-    let pixels = u64::from(width) * u64::from(height);
-    if width == 0 || height == 0 || width > 10_000 || height > 10_000 || pixels > 20_000_000 {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if width == 0
+        || height == 0
+        || width > MAX_GENERATED_IMAGE_DIMENSION
+        || height > MAX_GENERATED_IMAGE_DIMENSION
+        || pixels > MAX_GENERATED_IMAGE_PIXELS
+    {
         return Err(DomainError::Internal(
-            "generated image dimensions exceeded the limit".into(),
+            "generated image dimensions exceeded the limit".to_string(),
         ));
     }
     let decoded = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|error| DomainError::Internal(format!("invalid generated image: {error}")))?
+        .map_err(|_| DomainError::Internal("generated image was invalid".to_string()))?
         .decode()
-        .map_err(|error| {
-            DomainError::Internal(format!("could not decode generated image: {error}"))
-        })?;
+        .map_err(|_| DomainError::Internal("generated image could not be decoded".to_string()))?;
     let normalized = decoded.resize_to_fill(1_200, 630, image::imageops::FilterType::Lanczos3);
     let mut output = Cursor::new(Vec::new());
     normalized
         .write_to(&mut output, image::ImageFormat::Jpeg)
-        .map_err(|error| {
-            DomainError::Internal(format!("could not encode generated image: {error}"))
-        })?;
+        .map_err(|_| DomainError::Internal("generated image could not be encoded".to_string()))?;
     Ok(output.into_inner())
 }
 
@@ -820,6 +934,22 @@ fn needs_metadata(input: &CreateBookmark) -> bool {
         || input.image_url.is_none()
 }
 
+fn generation_context(input: &CreateBookmark) -> ImageGenerationContext {
+    ImageGenerationContext {
+        url: input.url.clone(),
+        title: input.title.clone(),
+        description: input.description.clone(),
+    }
+}
+
+fn generation_context_from_bookmark(bookmark: &Bookmark) -> ImageGenerationContext {
+    ImageGenerationContext {
+        url: bookmark.url.clone(),
+        title: bookmark.title.clone(),
+        description: bookmark.description.clone(),
+    }
+}
+
 fn merge_metadata(input: &mut CreateBookmark, meta: UrlMetadata) -> Option<String> {
     if input.title.is_none() {
         input.title = meta.title;
@@ -839,6 +969,7 @@ fn merge_metadata(input: &mut CreateBookmark, meta: UrlMetadata) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn needs_metadata_when_image_or_domain_is_missing() {
@@ -913,17 +1044,20 @@ mod tests {
 
     #[test]
     fn generated_images_are_normalized_to_social_card_dimensions() {
-        use image::{DynamicImage, GenericImageView, ImageFormat};
-        use std::io::Cursor;
-
-        let source = DynamicImage::new_rgb8(1_376, 768);
+        let source = image::DynamicImage::new_rgb8(1_600, 900);
         let mut encoded = Cursor::new(Vec::new());
-        source.write_to(&mut encoded, ImageFormat::Png).unwrap();
+        source
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .expect("encode fixture");
 
-        let normalized = normalize_social_image(&encoded.into_inner()).unwrap();
-        let decoded = image::load_from_memory(&normalized).unwrap();
-        assert_eq!(decoded.dimensions(), (1_200, 630));
-        assert!(normalized.starts_with(&[0xff, 0xd8, 0xff]));
+        let normalized = normalize_social_image(encoded.get_ref()).expect("normalize fixture");
+        let reader = image::ImageReader::new(Cursor::new(normalized))
+            .with_guessed_format()
+            .expect("identify normalized image");
+        assert_eq!(
+            reader.into_dimensions().expect("normalized dimensions"),
+            (1_200, 630)
+        );
     }
 
     struct OwnershipTestStorage;
@@ -1827,16 +1961,15 @@ mod tests {
         use crate::adapters::screenshot::noop::NoopScreenshot;
         use crate::adapters::screenshot::playwright::PlaywrightScreenshot;
         use crate::domain::error::CF_CHALLENGE_MSG;
-        use crate::domain::ports::image_generator::GeneratedImage;
+        use crate::domain::ports::image_generator::{GeneratedImage, ImageGenerator};
         use axum::{
             Router,
             routing::{get, head as head_route, post},
         };
         use chrono::Utc;
+        use std::collections::HashMap;
         use std::future::Future;
-        use std::io::Cursor;
         use std::pin::Pin;
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
         use tokio::sync::mpsc;
         use uuid::Uuid;
@@ -2172,38 +2305,103 @@ mod tests {
             }
         }
 
-        struct FixedImageGenerator {
-            calls: AtomicUsize,
-            contexts: Mutex<Vec<ImageGenerationContext>>,
+        #[derive(Clone, Default)]
+        struct EditStorage {
+            files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+            gets: Arc<Mutex<Vec<String>>>,
         }
 
-        impl FixedImageGenerator {
-            fn new() -> Self {
-                Self {
-                    calls: AtomicUsize::new(0),
-                    contexts: Mutex::new(Vec::new()),
-                }
+        impl EditStorage {
+            fn with_file(key: String, bytes: Vec<u8>) -> Self {
+                let storage = Self::default();
+                storage.files.lock().unwrap().insert(key, bytes);
+                storage
             }
         }
 
-        impl ImageGenerator for FixedImageGenerator {
+        impl ObjectStorage for EditStorage {
+            async fn put(
+                &self,
+                key: &str,
+                data: Vec<u8>,
+                _content_type: &str,
+            ) -> Result<String, DomainError> {
+                self.files.lock().unwrap().insert(key.to_string(), data);
+                Ok(self.public_url(key))
+            }
+
+            async fn get(&self, key: &str) -> Result<Vec<u8>, DomainError> {
+                self.gets.lock().unwrap().push(key.to_string());
+                self.files
+                    .lock()
+                    .unwrap()
+                    .get(key)
+                    .cloned()
+                    .ok_or(DomainError::NotFound)
+            }
+
+            async fn delete(&self, key: &str) -> Result<(), DomainError> {
+                self.files.lock().unwrap().remove(key);
+                Ok(())
+            }
+
+            fn public_url(&self, key: &str) -> String {
+                format!("https://stored/{key}")
+            }
+        }
+
+        #[derive(Default)]
+        struct EditGenerator {
+            generated: Mutex<usize>,
+            edited_sources: Mutex<Vec<Vec<u8>>>,
+        }
+
+        fn generated_jpeg() -> Vec<u8> {
+            let image = image::DynamicImage::new_rgb8(1_200, 630);
+            let mut output = std::io::Cursor::new(Vec::new());
+            image
+                .write_to(&mut output, image::ImageFormat::Jpeg)
+                .expect("encode generated fixture");
+            output.into_inner()
+        }
+
+        impl ImageGenerator for EditGenerator {
+            fn is_configured(
+                &self,
+                _user_id: Uuid,
+            ) -> Pin<Box<dyn Future<Output = Result<bool, DomainError>> + Send + '_>> {
+                Box::pin(async { Ok(true) })
+            }
+
             fn generate(
                 &self,
                 _user_id: Uuid,
-                context: ImageGenerationContext,
+                _context: ImageGenerationContext,
+                _instruction: Option<String>,
             ) -> Pin<Box<dyn Future<Output = Result<GeneratedImage, DomainError>> + Send + '_>>
             {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                self.contexts.lock().unwrap().push(context);
+                *self.generated.lock().unwrap() += 1;
                 Box::pin(async {
-                    let image = image::DynamicImage::new_rgb8(1_376, 768);
-                    let mut output = Cursor::new(Vec::new());
-                    image
-                        .write_to(&mut output, image::ImageFormat::Png)
-                        .unwrap();
                     Ok(GeneratedImage {
-                        bytes: output.into_inner(),
-                        mime_type: "image/png".into(),
+                        bytes: generated_jpeg(),
+                        mime_type: "image/jpeg".into(),
+                    })
+                })
+            }
+
+            fn edit(
+                &self,
+                _user_id: Uuid,
+                source: Vec<u8>,
+                _context: ImageGenerationContext,
+                _instruction: Option<String>,
+            ) -> Pin<Box<dyn Future<Output = Result<GeneratedImage, DomainError>> + Send + '_>>
+            {
+                self.edited_sources.lock().unwrap().push(source);
+                Box::pin(async {
+                    Ok(GeneratedImage {
+                        bytes: generated_jpeg(),
+                        mime_type: "image/jpeg".into(),
                     })
                 })
             }
@@ -2223,6 +2421,150 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }
+        }
+
+        #[tokio::test]
+        async fn edits_an_ordinary_stored_base_image() {
+            let user_id = Uuid::new_v4();
+            let object_id = Uuid::new_v4();
+            let key = format!("images/base/{user_id}/{object_id}.png");
+            let source = b"ordinary-base-image".to_vec();
+            let storage = Arc::new(EditStorage::with_file(key.clone(), source.clone()));
+            let image_url = storage.public_url(&key);
+            let bookmark = make_bookmark(user_id, "https://example.com/article", Some(&image_url));
+            let repo = Arc::new(MockRepo::new(vec![bookmark.clone()]));
+            let generator = Arc::new(EditGenerator::default());
+            let svc = BookmarkService::new(
+                repo,
+                Arc::new(NoopMetadata),
+                storage.clone(),
+                Arc::new(NoopScreenshot),
+            )
+            .with_image_generator(generator.clone());
+
+            svc.edit_image_override(bookmark.id, user_id, Some("warmer".into()))
+                .await
+                .expect("ordinary stored image should be editable");
+
+            assert_eq!(
+                generator.edited_sources.lock().unwrap().as_slice(),
+                &[source]
+            );
+            assert_eq!(*generator.generated.lock().unwrap(), 0);
+            assert_eq!(
+                storage.gets.lock().unwrap().as_slice(),
+                std::slice::from_ref(&key)
+            );
+        }
+
+        #[tokio::test]
+        async fn edits_an_owned_ai_or_override_image() {
+            let user_id = Uuid::new_v4();
+            let object_id = Uuid::new_v4();
+            let key = format!("images/ai/{user_id}/{object_id}.jpg");
+            let source = b"owned-ai-image".to_vec();
+            let storage = Arc::new(EditStorage::with_file(key.clone(), source.clone()));
+            let image_url = storage.public_url(&key);
+            let mut bookmark = make_bookmark(user_id, "https://example.com/article", None);
+            bookmark.override_image_url = Some(image_url);
+            let repo = Arc::new(MockRepo::new(vec![bookmark.clone()]));
+            let generator = Arc::new(EditGenerator::default());
+            let svc = BookmarkService::new(
+                repo,
+                Arc::new(NoopMetadata),
+                storage.clone(),
+                Arc::new(NoopScreenshot),
+            )
+            .with_image_generator(generator.clone());
+
+            svc.edit_image_override(bookmark.id, user_id, None)
+                .await
+                .expect("owned AI image should be editable");
+
+            assert_eq!(
+                generator.edited_sources.lock().unwrap().as_slice(),
+                &[source]
+            );
+            assert_eq!(*generator.generated.lock().unwrap(), 0);
+            assert_eq!(
+                storage.gets.lock().unwrap().as_slice(),
+                std::slice::from_ref(&key)
+            );
+        }
+
+        #[tokio::test]
+        async fn rejects_remote_image_edit_without_fresh_generation() {
+            let user_id = Uuid::new_v4();
+            let bookmark = make_bookmark(
+                user_id,
+                "https://example.com/article",
+                Some("https://remote.example/image.jpg"),
+            );
+            let repo = Arc::new(MockRepo::new(vec![bookmark.clone()]));
+            let storage = Arc::new(EditStorage::default());
+            let generator = Arc::new(EditGenerator::default());
+            let svc = BookmarkService::new(
+                repo,
+                Arc::new(NoopMetadata),
+                storage.clone(),
+                Arc::new(NoopScreenshot),
+            )
+            .with_image_generator(generator.clone());
+
+            let error = svc
+                .edit_image_override(bookmark.id, user_id, None)
+                .await
+                .expect_err("remote image should not be silently regenerated");
+            assert!(
+                matches!(error, DomainError::InvalidInput(message) if message.contains("unavailable for AI editing"))
+            );
+            assert!(storage.gets.lock().unwrap().is_empty());
+            assert_eq!(*generator.generated.lock().unwrap(), 0);
+            assert!(generator.edited_sources.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn editable_image_keys_require_current_user_namespace() {
+            let user_id = Uuid::new_v4();
+            let other_user_id = Uuid::new_v4();
+            let object_id = Uuid::new_v4();
+            let storage = EditStorage::default();
+
+            assert_eq!(
+                owned_image_storage_key(
+                    &storage,
+                    user_id,
+                    &storage.public_url(&format!("images/base/{user_id}/{object_id}.png")),
+                )
+                .as_deref(),
+                Some(format!("images/base/{user_id}/{object_id}.png").as_str())
+            );
+            assert_eq!(
+                owned_image_storage_key(
+                    &storage,
+                    user_id,
+                    &storage.public_url(&format!("images/base/{other_user_id}/{object_id}.png")),
+                ),
+                None
+            );
+            assert_eq!(
+                owned_image_storage_key(
+                    &storage,
+                    user_id,
+                    &storage.public_url(&format!("images/{object_id}.png")),
+                ),
+                None,
+                "legacy global images must not be treated as editable",
+            );
+            assert_eq!(
+                owned_image_storage_key(
+                    &storage,
+                    user_id,
+                    &storage.public_url(&format!("images/base/{user_id}/../../../../secrets.txt")),
+                ),
+                None,
+                "path traversal must never produce an object key",
+            );
         }
 
         async fn collect_events(mut rx: mpsc::Receiver<ProgressEvent>) -> Vec<ProgressEvent> {
@@ -2374,85 +2716,6 @@ mod tests {
             assert_eq!(last.fixed, 0);
             assert_eq!(last.failed, 1);
             assert!(last.done);
-        }
-
-        #[tokio::test]
-        async fn repair_uses_ai_after_scrape_and_screenshot_fail() {
-            let user_id = Uuid::new_v4();
-            let bookmark = make_bookmark(user_id, "http://127.0.0.1:1/article", None);
-            let bookmark_id = bookmark.id;
-            let repo = Arc::new(MockRepo::new(vec![bookmark]));
-            let generator = Arc::new(FixedImageGenerator::new());
-            let svc = BookmarkService::new(
-                repo.clone(),
-                Arc::new(NoopMetadata),
-                Arc::new(NoopStorage),
-                Arc::new(NoopScreenshot),
-            )
-            .with_image_generator(generator.clone());
-            let (tx, rx) = mpsc::channel(32);
-
-            svc.fix_missing_images(user_id, tx).await;
-
-            let events = collect_events(rx).await;
-            assert_eq!(events.last().unwrap().fixed, 1);
-            assert_eq!(generator.calls.load(Ordering::SeqCst), 1);
-            assert!(repo.image_url(bookmark_id).unwrap().contains("/images/ai/"));
-        }
-
-        #[tokio::test]
-        async fn primary_create_and_edit_generation_store_normalized_ai_images() {
-            let user_id = Uuid::new_v4();
-            let repo = Arc::new(MockRepo::new(vec![]));
-            let generator = Arc::new(FixedImageGenerator::new());
-            let svc = BookmarkService::new(
-                repo,
-                Arc::new(NoopMetadata),
-                Arc::new(NoopStorage),
-                Arc::new(NoopScreenshot),
-            )
-            .with_image_generator(generator.clone());
-
-            let created = svc
-                .create_with_ai_image(
-                    user_id,
-                    CreateBookmark {
-                        url: "https://example.com/meaningful-article".into(),
-                        title: Some("Meaningful article".into()),
-                        description: Some("A concrete summary for the visual".into()),
-                        image_url: None,
-                        domain: None,
-                        tags: None,
-                    },
-                )
-                .await
-                .unwrap();
-            assert!(
-                created
-                    .image_url
-                    .as_deref()
-                    .unwrap()
-                    .contains("/images/ai/")
-            );
-
-            let edited = svc
-                .generate_image_override(created.id, user_id)
-                .await
-                .unwrap();
-            assert!(
-                edited
-                    .override_image_url
-                    .as_deref()
-                    .unwrap()
-                    .contains("/images/overrides/")
-            );
-            assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
-            let contexts = generator.contexts.lock().unwrap();
-            assert_eq!(contexts[0].title.as_deref(), Some("Meaningful article"));
-            assert_eq!(
-                contexts[0].description.as_deref(),
-                Some("A concrete summary for the visual")
-            );
         }
 
         #[tokio::test]

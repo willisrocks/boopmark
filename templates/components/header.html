@@ -1,10 +1,10 @@
-<header class="flex items-center justify-between gap-4 px-6 py-3 border-b border-gray-800" role="banner">
+<header class="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-800 sm:flex-nowrap sm:gap-4 sm:px-6" role="banner">
     <a href="/bookmarks" class="flex items-center gap-2">
         <img src="/static/boopmark-logo.svg" alt="BoopMark" class="w-7 h-7">
         <span class="font-bold text-lg">BoopMark</span>
     </a>
     {% if header_shows_bookmark_actions %}
-    <div class="flex-1 max-w-xl mx-8">
+    <div class="order-3 w-full flex-none sm:order-none sm:flex-1 sm:max-w-xl sm:mx-8">
         <input type="search"
                name="search"
                placeholder="Search bookmarks..."
@@ -57,14 +57,14 @@
         {% endif %}
     </div>
     {% else %}
-    <form action="/bookmarks" method="get" class="flex-1 max-w-xl mx-8">
+    <form action="/bookmarks" method="get" class="order-3 w-full flex-none sm:order-none sm:flex-1 sm:max-w-xl sm:mx-8">
         <input type="search"
                name="search"
                placeholder="Search bookmarks..."
                class="w-full px-4 py-2 rounded-lg bg-[#1a1d2e] border border-gray-700 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500">
     </form>
     <div class="flex items-center gap-4">
-        <a href="/bookmarks" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium">
+        <a href="/bookmarks" class="whitespace-nowrap px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium sm:px-4">
             Back to bookmarks
         </a>
         {% if let Some(user) = user %}

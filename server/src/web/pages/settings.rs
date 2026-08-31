@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 use crate::app::bookmarks::ProgressEvent;
 use crate::domain::error::DomainError;
-use crate::domain::llm_settings::{ANTHROPIC_MODEL_OPTIONS, IMAGE_GENERATION_MODEL_OPTIONS};
+use crate::domain::llm_settings::{
+    ANTHROPIC_MODEL_OPTIONS, IMAGE_GENERATION_MODEL_OPTIONS, OPENAI_MODEL_OPTIONS,
+};
 use crate::web::extractors::AuthUser;
 use crate::web::pages::shared::UserView;
 use crate::web::state::{AppState, Bookmarks};
@@ -66,6 +68,12 @@ struct ModelOptionView {
     selected: bool,
 }
 
+struct ProviderOptionView {
+    label: String,
+    value: String,
+    selected: bool,
+}
+
 #[derive(Template)]
 #[template(path = "settings/index.html")]
 struct SettingsPage {
@@ -73,12 +81,16 @@ struct SettingsPage {
     header_shows_bookmark_actions: bool,
     email: String,
     llm_enabled: bool,
+    metadata_provider: String,
     has_anthropic_api_key: bool,
     anthropic_model_options: Vec<ModelOptionView>,
-    image_generation_enabled: bool,
-    has_gemini_api_key: bool,
-    image_generation_model_options: Vec<ModelOptionView>,
-    image_generation_art_style: String,
+    has_openai_api_key: bool,
+    openai_model: String,
+    openai_model_options: Vec<ModelOptionView>,
+    image_enabled: bool,
+    image_model: String,
+    image_model_options: Vec<ModelOptionView>,
+    metadata_provider_options: Vec<ProviderOptionView>,
     success_message: Option<String>,
     api_keys: Vec<ApiKeyView>,
 }
@@ -98,14 +110,19 @@ struct SettingsQuery {
 #[derive(Deserialize)]
 struct SettingsForm {
     llm_enabled: Option<String>,
+    metadata_provider: Option<String>,
     delete_anthropic_api_key: Option<String>,
     anthropic_api_key: Option<String>,
     anthropic_model: Option<String>,
+    delete_openai_api_key: Option<String>,
+    openai_api_key: Option<String>,
+    openai_model: Option<String>,
+    /// `image_enabled`/`image_model` are the current template names. The
+    /// `image_generation_*` aliases keep older clients/forms compatible.
+    image_enabled: Option<String>,
+    image_model: Option<String>,
     image_generation_enabled: Option<String>,
-    delete_gemini_api_key: Option<String>,
-    gemini_api_key: Option<String>,
     image_generation_model: Option<String>,
-    image_generation_art_style: Option<String>,
 }
 
 fn build_model_option_views(current_model: &str) -> Vec<ModelOptionView> {
@@ -135,13 +152,61 @@ fn build_model_option_views(current_model: &str) -> Vec<ModelOptionView> {
     options
 }
 
-fn build_image_model_option_views(current_model: &str) -> Vec<ModelOptionView> {
-    IMAGE_GENERATION_MODEL_OPTIONS
+fn build_openai_model_option_views(current_model: &str) -> Vec<ModelOptionView> {
+    let mut options = Vec::new();
+    let is_official = OPENAI_MODEL_OPTIONS
         .iter()
-        .map(|option| ModelOptionView {
-            label: option.label.to_string(),
-            value: option.value.to_string(),
-            selected: option.value == current_model,
+        .any(|option| option.value == current_model);
+
+    if !is_official {
+        options.push(ModelOptionView {
+            label: format!("Keep current saved model ({current_model})"),
+            value: current_model.to_string(),
+            selected: true,
+        });
+    }
+
+    options.extend(OPENAI_MODEL_OPTIONS.iter().map(|option| ModelOptionView {
+        label: option.label.to_string(),
+        value: option.value.to_string(),
+        selected: option.value == current_model,
+    }));
+    options
+}
+
+fn build_image_model_option_views(current_model: &str) -> Vec<ModelOptionView> {
+    let mut options = Vec::new();
+    let is_official = IMAGE_GENERATION_MODEL_OPTIONS
+        .iter()
+        .any(|option| option.value == current_model);
+
+    if !is_official {
+        options.push(ModelOptionView {
+            label: format!("Keep current saved model ({current_model})"),
+            value: current_model.to_string(),
+            selected: true,
+        });
+    }
+
+    options.extend(
+        IMAGE_GENERATION_MODEL_OPTIONS
+            .iter()
+            .map(|option| ModelOptionView {
+                label: option.label.to_string(),
+                value: option.value.to_string(),
+                selected: option.value == current_model,
+            }),
+    );
+    options
+}
+
+fn build_provider_option_views(current_provider: &str) -> Vec<ProviderOptionView> {
+    [("Anthropic", "anthropic"), ("OpenAI", "openai")]
+        .into_iter()
+        .map(|(label, value)| ProviderOptionView {
+            label: label.to_string(),
+            value: value.to_string(),
+            selected: value == current_provider,
         })
         .collect()
 }
@@ -157,8 +222,10 @@ async fn settings_page(
     match (settings_result, keys_result) {
         (Ok(settings), Ok(keys)) => {
             let email = user.email.clone();
-            let anthropic_model = settings.anthropic_model.clone();
-            let image_generation_model = settings.image_generation_model.clone();
+            let anthropic_model = settings.anthropic_model;
+            let openai_model = settings.openai_model.clone();
+            let image_model = settings.image_generation_model.clone();
+            let metadata_provider = settings.metadata_provider.clone();
             let api_keys: Vec<ApiKeyView> = keys.into_iter().map(Into::into).collect();
 
             render(&SettingsPage {
@@ -166,14 +233,16 @@ async fn settings_page(
                 header_shows_bookmark_actions: false,
                 email,
                 llm_enabled: settings.enabled,
+                metadata_provider: metadata_provider.clone(),
                 has_anthropic_api_key: settings.has_anthropic_api_key,
                 anthropic_model_options: build_model_option_views(&anthropic_model),
-                image_generation_enabled: settings.image_generation_enabled,
-                has_gemini_api_key: settings.has_gemini_api_key,
-                image_generation_model_options: build_image_model_option_views(
-                    &image_generation_model,
-                ),
-                image_generation_art_style: settings.image_generation_art_style,
+                has_openai_api_key: settings.has_openai_api_key,
+                openai_model: openai_model.clone(),
+                openai_model_options: build_openai_model_option_views(&openai_model),
+                image_enabled: settings.image_generation_enabled,
+                image_model: image_model.clone(),
+                image_model_options: build_image_model_option_views(&image_model),
+                metadata_provider_options: build_provider_option_views(&metadata_provider),
                 success_message: query
                     .saved
                     .filter(|value| value == "1")
@@ -191,6 +260,7 @@ async fn save_settings(
     Form(form): Form<SettingsForm>,
 ) -> axum::response::Response {
     let enabled = form.llm_enabled.is_some();
+    let metadata_provider = form.metadata_provider;
     let delete_key = form.delete_anthropic_api_key.is_some();
     let submitted_api_key = form
         .anthropic_api_key
@@ -202,14 +272,18 @@ async fn save_settings(
         (submitted_api_key, false)
     };
 
-    let image_generation_enabled = form.image_generation_enabled.is_some();
-    let delete_gemini_key = form.delete_gemini_api_key.is_some();
-    let submitted_gemini_api_key = form.gemini_api_key.filter(|value| !value.trim().is_empty());
-    let (gemini_api_key, clear_gemini_api_key) = if delete_gemini_key {
+    let delete_openai_key = form.delete_openai_api_key.is_some();
+    let submitted_openai_api_key = form.openai_api_key.filter(|value| !value.trim().is_empty());
+    let (openai_api_key, clear_openai_api_key) = if delete_openai_key {
         (None, true)
     } else {
-        (submitted_gemini_api_key, false)
+        (submitted_openai_api_key, false)
     };
+    let image_enabled = form
+        .image_generation_enabled
+        .or(form.image_enabled)
+        .is_some();
+    let image_model = form.image_generation_model.or(form.image_model);
 
     match state
         .settings
@@ -217,14 +291,15 @@ async fn save_settings(
             user.id,
             crate::app::settings::SaveLlmSettingsInput {
                 enabled,
+                metadata_provider,
                 anthropic_api_key,
                 clear_anthropic_api_key,
                 anthropic_model: form.anthropic_model,
-                image_generation_enabled,
-                gemini_api_key,
-                clear_gemini_api_key,
-                image_generation_model: form.image_generation_model,
-                image_generation_art_style: form.image_generation_art_style,
+                openai_api_key,
+                clear_openai_api_key,
+                openai_model: form.openai_model,
+                image_generation_enabled: image_enabled,
+                image_generation_model: image_model,
             },
         )
         .await
@@ -378,7 +453,10 @@ pub fn routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_image_model_option_views, build_model_option_views};
+    use super::{
+        build_image_model_option_views, build_model_option_views, build_openai_model_option_views,
+        build_provider_option_views,
+    };
 
     #[test]
     fn official_models_render_only_the_three_official_options() {
@@ -413,15 +491,33 @@ mod tests {
     }
 
     #[test]
-    fn image_generation_model_selector_contains_only_nano_banana_2_lite() {
-        let options = build_image_model_option_views("gemini-3.1-flash-lite-image");
+    fn openai_models_render_the_three_requested_gpt_56_options() {
+        let options = build_openai_model_option_views("gpt-5.6-terra");
 
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].value, "gpt-5.6-luna");
+        assert!(!options[0].selected);
+        assert_eq!(options[1].value, "gpt-5.6-terra");
+        assert!(options[1].selected);
+        assert_eq!(options[2].value, "gpt-5.6-sol");
+        assert!(!options[2].selected);
+    }
+
+    #[test]
+    fn image_models_render_gpt_image_2() {
+        let options = build_image_model_option_views("gpt-image-2");
         assert_eq!(options.len(), 1);
-        assert_eq!(
-            options[0].label,
-            "Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)"
-        );
-        assert_eq!(options[0].value, "gemini-3.1-flash-lite-image");
+        assert_eq!(options[0].value, "gpt-image-2");
         assert!(options[0].selected);
+    }
+
+    #[test]
+    fn provider_options_include_anthropic_and_openai() {
+        let options = build_provider_option_views("openai");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].value, "anthropic");
+        assert!(!options[0].selected);
+        assert_eq!(options[1].value, "openai");
+        assert!(options[1].selected);
     }
 }

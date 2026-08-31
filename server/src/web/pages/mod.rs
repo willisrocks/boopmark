@@ -36,7 +36,11 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/bookmarks/{id}/image/generate",
-            post(bookmarks::generate_image),
+            post(bookmarks::generate_image).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/bookmarks/{id}/image/edit",
+            post(bookmarks::edit_image).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/bookmarks/{id}/suggest", post(bookmarks::edit_suggest))
         .route("/invite/{token}", get(invite::invite_landing))

@@ -1,8 +1,10 @@
 pub mod anthropic;
 pub mod anthropic_tag_consolidator;
-pub mod gemini_image;
+pub mod llm_router;
 pub mod login;
 pub mod metadata;
+pub mod openai;
+pub mod openai_image;
 pub mod postgres;
 pub mod screenshot;
 pub mod storage;

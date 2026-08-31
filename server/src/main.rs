@@ -5,13 +5,16 @@ mod domain;
 mod web;
 
 use adapters::anthropic::AnthropicEnricher;
-use adapters::gemini_image::GeminiImageGenerator;
+use adapters::anthropic_tag_consolidator::AnthropicTagConsolidator;
+use adapters::llm_router::{LlmEnricherRouter, LlmPromptAssistantRouter, TagConsolidatorRouter};
 use adapters::login::google::GoogleLoginProvider;
 use adapters::login::local_password::LocalPasswordLoginProvider;
 use adapters::metadata::fallback::FallbackMetadataExtractor;
 use adapters::metadata::html::HtmlMetadataExtractor;
 use adapters::metadata::iframely::IframelyExtractor;
 use adapters::metadata::opengraph_io::OpengraphIoExtractor;
+use adapters::openai::OpenAiProvider;
+use adapters::openai_image::OpenAiImageGenerator;
 use adapters::postgres::PostgresPool;
 use adapters::screenshot::noop::NoopScreenshot;
 use adapters::screenshot::playwright::PlaywrightScreenshot;
@@ -22,9 +25,11 @@ use app::bookmarks::BookmarkService;
 use app::enrichment::EnrichmentService;
 use app::invite::InviteService;
 use app::secrets::SecretBox;
-use app::settings::SettingsService;
+use app::settings::{ConfiguredImageAiSettingsProvider, SettingsService};
 use config::{Config, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, StorageBackend};
+use domain::ports::image_generator::{ImageAiSettingsProvider, ImageGenerator};
 use domain::ports::llm_enricher::LlmEnricher;
+use domain::ports::llm_prompt_assistant::LlmPromptAssistant;
 use domain::ports::login_provider::LoginProvider;
 use domain::ports::screenshot::ScreenshotProvider;
 use sqlx::postgres::PgPoolOptions;
@@ -53,7 +58,6 @@ async fn main() {
     let db = Arc::new(PostgresPool::new(pool));
     let secret_box = Arc::new(SecretBox::new(&config.llm_settings_encryption_key));
     let settings_service = Arc::new(SettingsService::new(db.clone(), secret_box));
-    let image_generator = Arc::new(GeminiImageGenerator::new(settings_service.clone()));
 
     let html_extractor = HtmlMetadataExtractor::new();
     let mut extractors: Vec<Box<dyn domain::ports::metadata::MetadataExtractor>> =
@@ -91,6 +95,20 @@ async fn main() {
         }
         ScreenshotBackend::Disabled => Arc::new(NoopScreenshot),
     };
+
+    let anthropic_adapter = Arc::new(AnthropicEnricher::new());
+    let openai_adapter = Arc::new(OpenAiProvider::new());
+    let anthropic_prompt_assistant: Arc<dyn LlmPromptAssistant> = anthropic_adapter.clone();
+    let openai_prompt_assistant: Arc<dyn LlmPromptAssistant> = openai_adapter.clone();
+    let prompt_assistant: Arc<dyn LlmPromptAssistant> = Arc::new(LlmPromptAssistantRouter::new(
+        anthropic_prompt_assistant,
+        openai_prompt_assistant,
+    ));
+    let image_settings: Arc<dyn ImageAiSettingsProvider> = Arc::new(
+        ConfiguredImageAiSettingsProvider::new(settings_service.clone(), prompt_assistant),
+    );
+    let image_generator: Arc<dyn ImageGenerator> =
+        Arc::new(OpenAiImageGenerator::new(image_settings));
 
     let (bookmarks, images_storage) = match config.storage_backend {
         StorageBackend::Local => {
@@ -143,7 +161,7 @@ async fn main() {
             (
                 Bookmarks::S3(Arc::new(
                     BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
-                        .with_image_generator(image_generator),
+                        .with_image_generator(image_generator.clone()),
                 )),
                 images,
             )
@@ -151,14 +169,23 @@ async fn main() {
     };
 
     let auth_service = Arc::new(AuthService::new(db.clone(), db.clone(), db.clone()));
-    let enricher: Arc<dyn LlmEnricher> = Arc::new(AnthropicEnricher::new());
+    let anthropic_enricher: Arc<dyn LlmEnricher> = anthropic_adapter;
+    let enricher: Arc<dyn LlmEnricher> = Arc::new(LlmEnricherRouter::new(
+        anthropic_enricher,
+        openai_adapter.clone(),
+    ));
     let enrichment_service = Arc::new(EnrichmentService::new(
         metadata_for_enrichment,
         enricher,
         settings_service.clone(),
     ));
-    let tag_consolidator: Arc<dyn domain::ports::tag_consolidator::TagConsolidator> =
-        Arc::new(adapters::anthropic_tag_consolidator::AnthropicTagConsolidator::new());
+    let anthropic_tag_consolidator: Arc<dyn domain::ports::tag_consolidator::TagConsolidator> =
+        Arc::new(AnthropicTagConsolidator::new());
+    let openai_tag_consolidator: Arc<dyn domain::ports::tag_consolidator::TagConsolidator> =
+        openai_adapter;
+    let tag_consolidator: Arc<dyn domain::ports::tag_consolidator::TagConsolidator> = Arc::new(
+        TagConsolidatorRouter::new(anthropic_tag_consolidator, openai_tag_consolidator),
+    );
     let tag_consolidation_service = Arc::new(app::tag_consolidation::TagConsolidationService::new(
         db.clone(),
         tag_consolidator,

@@ -52,21 +52,51 @@
                             class="px-3 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-red-300 hover:border-red-700 text-sm">
                         {% if has_override %}Restore original{% else %}Remove override{% endif %}
                     </button>
-                    {% if can_generate_ai_images %}
+                    <span id="image-override-status" data-testid="image-override-status" class="text-xs text-gray-500" role="status"></span>
+                </div>
+            </form>
+            {% if can_generate_ai_images %}
+            <form id="ai-image-form" class="mt-4 space-y-3">
+                <div>
+                    <label for="ai-image-instruction" class="block text-xs font-medium text-gray-400 mb-1">AI image direction <span class="font-normal text-gray-600">(optional)</span></label>
+                    <input id="ai-image-instruction"
+                           name="instruction"
+                           type="text"
+                           maxlength="2000"
+                           placeholder="e.g. make the focal idea warmer and more playful"
+                           class="w-full px-3 py-2 rounded-lg bg-[#0f1117] border border-gray-700 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-purple-500 text-sm">
+                </div>
+                <div class="flex flex-wrap gap-3 items-center">
                     <button type="button"
                             data-testid="generate-ai-image-button"
                             hx-post="/bookmarks/{{ bookmark_id }}/image/generate"
                             hx-target="#bookmark-{{ bookmark_id }}"
                             hx-swap="outerHTML"
+                            hx-include="#ai-image-form"
+                            hx-encoding="application/x-www-form-urlencoded"
                             hx-disabled-elt="this"
                             hx-on::after-request="if(event.detail.successful) { document.getElementById('edit-modal').remove(); } else { document.getElementById('image-override-status').textContent = 'Could not generate image'; }"
                             class="px-3 py-2 rounded-lg border border-purple-700 text-purple-300 hover:text-purple-100 hover:border-purple-500 text-sm disabled:opacity-50">
                         Generate with AI
                     </button>
+                    {% if image_url.is_some() %}
+                    <button type="button"
+                            data-testid="edit-ai-image-button"
+                            hx-post="/bookmarks/{{ bookmark_id }}/image/edit"
+                            hx-target="#bookmark-{{ bookmark_id }}"
+                            hx-swap="outerHTML"
+                            hx-include="#ai-image-form"
+                            hx-encoding="application/x-www-form-urlencoded"
+                            hx-disabled-elt="this"
+                            hx-on::after-request="if(event.detail.successful) { document.getElementById('edit-modal').remove(); } else { document.getElementById('image-override-status').textContent = 'Could not edit image'; }"
+                            class="px-3 py-2 rounded-lg border border-indigo-700 text-indigo-300 hover:text-indigo-100 hover:border-indigo-500 text-sm disabled:opacity-50">
+                        Edit current image
+                    </button>
                     {% endif %}
-                    <span id="image-override-status" data-testid="image-override-status" class="text-xs text-gray-500" role="status"></span>
+                    <span class="text-xs text-gray-500" role="status" aria-live="polite">AI images use your configured OpenAI image model.</span>
                 </div>
             </form>
+            {% endif %}
         </section>
 
         <form id="bookmark-edit-form"

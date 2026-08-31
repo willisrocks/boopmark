@@ -11,9 +11,11 @@ async function signIn(page) {
 async function resetSettings(page) {
   await page.goto("/settings");
 
-  const deleteKey = page.getByTestId("delete-anthropic-api-key");
-  if (await deleteKey.count()) {
-    await deleteKey.check();
+  for (const id of ["delete-anthropic-api-key", "delete-openai-api-key"]) {
+    const deleteKey = page.getByTestId(id);
+    if (await deleteKey.count()) {
+      await deleteKey.check();
+    }
   }
 
   const enableLlm = page.getByLabel("Enable LLM integration");
@@ -21,19 +23,17 @@ async function resetSettings(page) {
     await enableLlm.uncheck();
   }
 
-  const deleteGeminiKey = page.getByTestId("delete-gemini-api-key");
-  if (await deleteGeminiKey.count()) {
-    await deleteGeminiKey.check();
-  }
-
-  const enableImageGeneration = page.getByTestId("image-generation-enabled");
-  if (await enableImageGeneration.isChecked()) {
-    await enableImageGeneration.uncheck();
-  }
-
   await page
     .getByLabel("Anthropic model")
     .selectOption("claude-haiku-4-5-20251001");
+  const metadataProvider = page.getByTestId("metadata-provider");
+  if (await metadataProvider.count()) {
+    await metadataProvider.selectOption("anthropic");
+  }
+  const imageEnabled = page.getByTestId("image-enabled");
+  if ((await imageEnabled.count()) && (await imageEnabled.isChecked())) {
+    await imageEnabled.uncheck();
+  }
   await page.getByRole("button", { name: "Save settings" }).click();
   await expect(page).toHaveURL(/\/settings\?saved=1$/);
 }
@@ -104,6 +104,7 @@ test("settings page supports add and delete key flows", async ({ page }) => {
   await expect(page.getByTestId("anthropic-api-key-status")).toBeVisible();
   await expect(page.getByText("Anthropic API key saved securely")).toBeVisible();
   await expect(page.getByLabel("Anthropic API key")).toHaveCount(0);
+  expect(await page.content()).not.toContain(anthropicApiKey);
   await expect(page.getByTestId("delete-anthropic-api-key")).toBeVisible();
   await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-sonnet-4-6");
 
@@ -119,51 +120,29 @@ test("settings page supports add and delete key flows", async ({ page }) => {
   await expect(page.getByTestId("delete-anthropic-api-key")).toHaveCount(0);
 });
 
-test("Gemini image settings enable create and edit generation controls", async ({
+test("settings stores an OpenAI key without rehydrating the secret", async ({
   page,
 }) => {
   await signIn(page);
   await resetSettings(page);
   await page.goto("/settings");
 
-  await page.getByTestId("image-generation-enabled").check();
-  await page.getByTestId("gemini-api-key").fill("test-gemini-key-not-called");
-  await page
-    .getByTestId("image-generation-model")
-    .selectOption("gemini-3.1-flash-lite-image");
-  await page
-    .getByTestId("image-generation-art-style")
-    .fill("Poppy paper-cut collage with cobalt, coral, and cream");
+  const openaiApiKey = "sk-openai-settings-e2e";
+  await page.getByLabel("Enable LLM integration").check();
+  await page.getByTestId("metadata-provider").selectOption("openai");
+  await page.getByLabel("OpenAI API key").fill(openaiApiKey);
+  await page.getByTestId("openai-model").selectOption("gpt-5.6-sol");
   await page.getByRole("button", { name: "Save settings" }).click();
 
   await expect(page).toHaveURL(/\/settings\?saved=1$/);
-  await expect(page.getByTestId("gemini-api-key-status")).toBeVisible();
-  await expect(page.getByTestId("image-generation-enabled")).toBeChecked();
-  await expect(page.getByTestId("image-generation-model")).toHaveValue(
-    "gemini-3.1-flash-lite-image",
-  );
-  await expect(page.getByTestId("image-generation-art-style")).toHaveValue(
-    "Poppy paper-cut collage with cobalt, coral, and cream",
-  );
+  await expect(page.getByTestId("openai-api-key-status")).toBeVisible();
+  await expect(page.getByLabel("OpenAI API key")).toHaveCount(0);
+  expect(await page.content()).not.toContain(openaiApiKey);
+  await expect(page.getByTestId("delete-openai-api-key")).toBeVisible();
+  await expect(page.getByTestId("openai-model")).toHaveValue("gpt-5.6-sol");
 
-  await page.goto("/bookmarks");
-  await page.getByTestId("open-add-bookmark-modal").click();
-  await expect(page.getByTestId("generate-ai-image-toggle")).toBeEnabled();
-  await page.getByTestId("generate-ai-image-toggle").check();
-
-  const created = await page.request.post("/api/v1/bookmarks", {
-    data: {
-      url: `https://ai-image-controls.example/${Date.now()}`,
-      title: "AI image controls",
-      description: "Deterministic UI coverage",
-      image_url: "https://example.com/existing.jpg",
-    },
-  });
-  expect(created.ok()).toBeTruthy();
-  const bookmark = await created.json();
-
-  await page.goto(`/bookmarks/${bookmark.id}/edit`);
-  await expect(page.getByTestId("generate-ai-image-button")).toBeVisible();
+  await resetSettings(page);
+  await expect(page.getByTestId("openai-api-key-status")).toHaveCount(0);
 });
 
 test("settings page shows API Keys section", async ({ page }) => {
@@ -214,4 +193,145 @@ test("settings rejects forged unsupported anthropic model submissions with 400",
   });
 
   expect(status).toBe(400);
+});
+
+test("settings exposes provider controls and stable section navigation", async ({
+  page,
+}) => {
+  await signIn(page);
+  await resetSettings(page);
+  await page.goto("/settings");
+
+  const navigation = page.getByTestId("settings-navigation");
+  await expect(navigation).toBeVisible();
+  await expect(page.getByTestId("settings-nav-ai-models")).toHaveAttribute(
+    "href",
+    "#ai-models",
+  );
+  await expect(page.getByTestId("settings-nav-tag-library")).toHaveAttribute(
+    "href",
+    "#tag-library",
+  );
+  await expect(page.getByTestId("settings-nav-images")).toHaveAttribute(
+    "href",
+    "#images",
+  );
+  await expect(page.getByTestId("settings-nav-api-access")).toHaveAttribute(
+    "href",
+    "#api-access",
+  );
+  await expect(page.getByTestId("settings-nav-import-export")).toHaveAttribute(
+    "href",
+    "#import-export",
+  );
+
+  for (const id of [
+    "settings-section-ai-models",
+    "settings-section-tag-library",
+    "settings-section-images",
+    "settings-section-api-access",
+    "settings-section-import-export",
+  ]) {
+    await expect(page.getByTestId(id)).toBeVisible();
+  }
+
+  await expect(page.getByTestId("metadata-provider")).toBeVisible();
+  await expect(page.locator("#metadata_provider option")).toHaveCount(2);
+  await expect(page.locator("#metadata_provider option").nth(0)).toHaveAttribute(
+    "value",
+    "anthropic",
+  );
+  await expect(page.locator("#metadata_provider option").nth(1)).toHaveAttribute(
+    "value",
+    "openai",
+  );
+  await expect(page.getByTestId("openai-model")).toBeVisible();
+  await expect(page.getByTestId("openai-model")).toContainText("GPT-5.6");
+  await expect(page.locator("#openai_model option")).toHaveCount(3);
+  await expect(page.locator("#openai_model option").nth(0)).toHaveAttribute(
+    "value",
+    "gpt-5.6-luna",
+  );
+  await expect(page.locator("#openai_model option").nth(1)).toHaveAttribute(
+    "value",
+    "gpt-5.6-terra",
+  );
+  await expect(page.locator("#openai_model option").nth(2)).toHaveAttribute(
+    "value",
+    "gpt-5.6-sol",
+  );
+  await expect(page.getByTestId("image-enabled")).toBeVisible();
+  await expect(page.getByTestId("image-model")).toHaveValue("gpt-image-2");
+  await expect(page.getByTestId("text-provider-status")).toBeVisible();
+  await expect(page.getByTestId("image-provider-status")).toBeVisible();
+});
+
+test("settings provider controls submit independent text and image choices", async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.goto("/settings");
+
+  await page.getByTestId("metadata-provider").selectOption("openai");
+  await page.getByTestId("openai-model").selectOption("gpt-5.6-terra");
+  await page.getByTestId("image-enabled").check();
+  await page.getByTestId("image-model").selectOption("gpt-image-2");
+
+  const payload = await page.locator("#settings-form").evaluate((form) => {
+    const values = {};
+    for (const [name, value] of new FormData(form)) {
+      values[name] = value;
+    }
+    return values;
+  });
+
+  expect(payload.metadata_provider).toBe("openai");
+  expect(payload.openai_model).toBe("gpt-5.6-terra");
+  expect(payload.image_generation_enabled).toBe("on");
+  expect(payload.image_generation_model).toBe("gpt-image-2");
+  expect(payload.anthropic_api_key).toBe("");
+  expect(payload.openai_api_key).toBe("");
+});
+
+test("settings sidebar is sticky on desktop", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await signIn(page);
+  await page.goto("/settings");
+
+  const navigation = page.getByTestId("settings-navigation");
+  await expect(navigation).toBeVisible();
+  await expect(navigation).toHaveCSS("position", "sticky");
+
+  const navigationBox = await navigation.boundingBox();
+  const contentBox = await page.getByTestId("settings-section-ai-models").boundingBox();
+  if (!navigationBox || !contentBox) {
+    throw new Error("expected settings navigation and content bounding boxes");
+  }
+  expect(contentBox.x).toBeGreaterThan(navigationBox.x + navigationBox.width);
+});
+
+test("settings navigation and controls fit a mobile viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await signIn(page);
+  await page.goto("/settings");
+
+  const dimensions = await page.evaluate(() => ({
+    viewportWidth: window.innerWidth,
+    documentWidth: document.documentElement.scrollWidth,
+  }));
+  expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
+
+  const navigation = page.getByTestId("settings-navigation");
+  await expect(navigation).toBeVisible();
+  await expect(page.getByTestId("settings-nav-images")).toBeVisible();
+  await expect(page.getByTestId("metadata-provider")).toBeVisible();
+  await expect(page.getByTestId("save-settings-button")).toBeVisible();
+
+  await page.getByTestId("settings-nav-images").click();
+  await expect(page).toHaveURL(/\/settings#images$/);
+  await expect(page.getByTestId("settings-section-images")).toBeInViewport();
+  await expect(page.getByTestId("settings-nav-images")).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
 });

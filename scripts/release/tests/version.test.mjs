@@ -68,3 +68,21 @@ test('synchronizes Chrome, Rust, and every iOS version source', async () => {
     await rm(fixture, { recursive: true, force: true });
   }
 });
+
+test('release workflow builds immutable source and promotes latest after production', async () => {
+  const repository = resolve(import.meta.dirname, '../../..');
+  const dispatcher = await readFile(resolve(repository, '.github/workflows/release.yml'), 'utf8');
+  const workflow = await readFile(resolve(repository, '.github/workflows/release-candidate.yml'), 'utf8');
+
+  assert.match(dispatcher, /gh workflow run release-candidate\.yml --ref "release\/v\$VERSION" -f prepared_sha="\$SHA"/);
+  assert.doesNotMatch(workflow, /needs\.prepare\.outputs\.sha/);
+  assert.doesNotMatch(workflow, /ref:.*needs\./);
+  assert.match(workflow, /test "\$GITHUB_SHA" = "\$PREPARED_SHA"/);
+  assert.match(workflow, /git merge-base --is-ancestor "\$PARENT"/);
+  assert.match(workflow, /cargo metadata --format-version=1 --locked/);
+  assert.match(dispatcher, /--force-with-lease="\$RELEASE_REF:\$REMOTE_SHA"/);
+  assert.match(workflow, /container:\n[\s\S]*?needs: \[metadata, quality\]/);
+  assert.match(workflow, /promote:\n[\s\S]*?needs: \[metadata, deploy\]/);
+  assert.match(workflow, /docker buildx imagetools create[\s\S]*?:latest/);
+  assert.match(workflow, /publish:\n[\s\S]*?needs: \[metadata, deploy, promote\]/);
+});

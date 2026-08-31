@@ -223,13 +223,9 @@ pub async fn list(
             sort: sort_str,
         })
     } else {
-        let can_generate_ai_images = state
-            .settings
-            .get_image_generation_settings(user.id)
-            .await
-            .ok()
-            .flatten()
-            .is_some();
+        let can_generate_ai_images = with_bookmarks!(&state.bookmarks, svc => {
+            svc.can_generate_ai_images(user.id).await
+        });
         render(&GridPage {
             user: Some(user.into()),
             header_shows_bookmark_actions: true,
@@ -281,14 +277,14 @@ pub async fn create(
         tags,
     };
 
-    let generate_ai_image = form.generate_ai_image.is_some();
     let result = with_bookmarks!(&state.bookmarks, svc => {
-        if generate_ai_image {
+        if form.generate_ai_image.is_some() {
             svc.create_with_ai_image(user.id, input).await
         } else {
             svc.create(user.id, input).await
         }
     });
+
     match result {
         Ok(bookmark) => render(&BookmarkCard {
             bookmark: bookmark.into(),
@@ -350,13 +346,9 @@ pub async fn edit(
         .ok()
         .flatten()
         .is_some();
-    let can_generate_ai_images = state
-        .settings
-        .get_image_generation_settings(user.id)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
+    let can_generate_ai_images = with_bookmarks!(&state.bookmarks, svc => {
+        svc.can_generate_ai_images(user.id).await
+    });
 
     render(&EditModal {
         bookmark_id: bookmark.id,
@@ -608,13 +600,35 @@ pub async fn remove_image(
     }
 }
 
+#[derive(Deserialize, Default)]
+pub struct AiImageForm {
+    instruction: Option<String>,
+}
+
 pub async fn generate_image(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
+    Form(form): Form<AiImageForm>,
 ) -> axum::response::Response {
+    let instruction = form.instruction.and_then(non_empty);
     match with_bookmarks!(&state.bookmarks, svc => {
-        svc.generate_image_override(id, user.id).await
+        svc.generate_image_override(id, user.id, instruction).await
+    }) {
+        Ok(bookmark) => image_response(bookmark),
+        Err(error) => error_response(error),
+    }
+}
+
+pub async fn edit_image(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+    Form(form): Form<AiImageForm>,
+) -> axum::response::Response {
+    let instruction = form.instruction.and_then(non_empty);
+    match with_bookmarks!(&state.bookmarks, svc => {
+        svc.edit_image_override(id, user.id, instruction).await
     }) {
         Ok(bookmark) => image_response(bookmark),
         Err(error) => error_response(error),
