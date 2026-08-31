@@ -24,6 +24,7 @@ jobs:
   prepare:
     name: Prepare semantic release
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     permissions:
       actions: write
       contents: write
@@ -65,6 +66,7 @@ jobs:
           cargo metadata --format-version=1 --locked >/dev/null
           node scripts/release/verify-version.mjs "$VERSION"
       - name: Commit release candidate source
+        id: candidate
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -81,8 +83,26 @@ jobs:
           else
             git push origin "HEAD:$RELEASE_REF"
           fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Dispatch exact release candidate
         env:
           GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.candidate.outputs.sha }}
           VERSION: ${{ steps.release.outputs.version }}
-        run: gh workflow run release-candidate.yml --ref "release/v$VERSION"
+        run: gh workflow run release-candidate.yml --ref "release/v$VERSION" -f prepared_sha="$SHA"
+      - name: Wait for release candidate completion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.candidate.outputs.sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          RUN_ID=""
+          for _ in $(seq 1 30); do
+            RUN_ID=$(gh run list --workflow release-candidate.yml --branch "release/v$VERSION" \
+              --event workflow_dispatch --limit 20 --json databaseId,headSha \
+              --jq ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
+            test -n "$RUN_ID" && break
+            sleep 2
+          done
+          test -n "$RUN_ID"
+          gh run watch "$RUN_ID" --exit-status

@@ -74,9 +74,11 @@ test('release workflow builds immutable source and promotes latest after product
   const dispatcher = await readFile(resolve(repository, '.github/workflows/release.yml'), 'utf8');
   const workflow = await readFile(resolve(repository, '.github/workflows/release-candidate.yml'), 'utf8');
 
-  assert.match(dispatcher, /gh workflow run release-candidate\.yml --ref "release\/v\$VERSION"/);
+  assert.match(dispatcher, /gh workflow run release-candidate\.yml --ref "release\/v\$VERSION" -f prepared_sha="\$SHA"/);
   assert.doesNotMatch(workflow, /needs\.prepare\.outputs\.sha/);
-  assert.match(workflow, /ref: "\$\{\{ github\.sha \}\}"/);
+  assert.doesNotMatch(workflow, /ref:.*needs\./);
+  assert.match(workflow, /test "\$GITHUB_SHA" = "\$PREPARED_SHA"/);
+  assert.match(workflow, /git merge-base --is-ancestor "\$PARENT"/);
   assert.match(workflow, /cargo metadata --format-version=1 --locked/);
   assert.match(dispatcher, /--force-with-lease="\$RELEASE_REF:\$REMOTE_SHA"/);
   assert.match(workflow, /container:\n[\s\S]*?needs: \[metadata, quality\]/);
