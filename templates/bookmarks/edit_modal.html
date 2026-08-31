@@ -52,18 +52,6 @@
                             class="px-3 py-2 rounded-lg border border-gray-700 text-gray-400 hover:text-red-300 hover:border-red-700 text-sm">
                         {% if has_override %}Restore original{% else %}Remove override{% endif %}
                     </button>
-                    {% if can_generate_ai_images %}
-                    <button type="button"
-                            data-testid="generate-ai-image-button"
-                            hx-post="/bookmarks/{{ bookmark_id }}/image/generate"
-                            hx-target="#bookmark-{{ bookmark_id }}"
-                            hx-swap="outerHTML"
-                            hx-disabled-elt="this"
-                            hx-on::after-request="if(event.detail.successful) { document.getElementById('edit-modal').remove(); } else { document.getElementById('image-override-status').textContent = 'Could not generate image'; }"
-                            class="px-3 py-2 rounded-lg border border-purple-700 text-purple-300 hover:text-purple-100 hover:border-purple-500 text-sm disabled:opacity-50">
-                        Generate with AI
-                    </button>
-                    {% endif %}
                     <span id="image-override-status" data-testid="image-override-status" class="text-xs text-gray-500" role="status"></span>
                 </div>
             </form>
