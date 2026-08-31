@@ -3,6 +3,7 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::{
     BookmarkRepository, CreateIdempotency, CreateIdempotencyClaim,
 };
+use crate::domain::ports::image_generator::{ImageGenerationContext, ImageGenerator};
 use crate::domain::ports::metadata::MetadataExtractor;
 use crate::domain::ports::screenshot::ScreenshotProvider;
 use crate::domain::ports::storage::ObjectStorage;
@@ -26,6 +27,8 @@ pub struct BookmarkService<R, M, S> {
     storage: Arc<S>,
     screenshot: Arc<dyn ScreenshotProvider>,
     http_client: reqwest::Client,
+    image_generator: Option<Arc<dyn ImageGenerator>>,
+    generated_image_processing_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl<R, M, S> BookmarkService<R, M, S>
@@ -51,7 +54,14 @@ where
             storage,
             screenshot,
             http_client,
+            image_generator: None,
+            generated_image_processing_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         }
+    }
+
+    pub fn with_image_generator(mut self, image_generator: Arc<dyn ImageGenerator>) -> Self {
+        self.image_generator = Some(image_generator);
+        self
     }
 
     pub async fn create(
@@ -59,7 +69,7 @@ where
         user_id: Uuid,
         input: CreateBookmark,
     ) -> Result<Bookmark, DomainError> {
-        let input = self.prepare_create(input).await;
+        let input = self.prepare_create(user_id, input, false).await;
         self.repo.create(user_id, input).await
     }
 
@@ -80,11 +90,26 @@ where
         input: CreateBookmark,
         operation: CreateIdempotency,
     ) -> Result<Bookmark, DomainError> {
-        let input = self.prepare_create(input).await;
+        let input = self.prepare_create(user_id, input, false).await;
         self.repo.create_claimed(user_id, input, operation).await
     }
 
-    async fn prepare_create(&self, mut input: CreateBookmark) -> CreateBookmark {
+    pub async fn create_with_ai_image(
+        &self,
+        user_id: Uuid,
+        input: CreateBookmark,
+    ) -> Result<Bookmark, DomainError> {
+        let input = self.prepare_create(user_id, input, true).await;
+        self.repo.create(user_id, input).await
+    }
+
+    async fn prepare_create(
+        &self,
+        user_id: Uuid,
+        mut input: CreateBookmark,
+        prefer_ai_image: bool,
+    ) -> CreateBookmark {
+        let mut scraped_image_url = None;
         if needs_metadata(&input) {
             let metadata_result = self.metadata.extract(&input.url).await;
             if let Err(error) = &metadata_result {
@@ -94,8 +119,22 @@ where
                     "metadata extraction failed; attempting screenshot fallback"
                 );
             }
-            if let Ok(meta) = metadata_result
-                && let Some(image_url) = merge_metadata(&mut input, meta)
+            if let Ok(meta) = metadata_result {
+                scraped_image_url = merge_metadata(&mut input, meta);
+            }
+            if prefer_ai_image {
+                match self
+                    .generate_and_store_image(user_id, generation_context(&input))
+                    .await
+                {
+                    Ok(url) => input.image_url = Some(url),
+                    Err(error) => {
+                        tracing::warn!(url = %input.url, %error, "primary AI image generation failed; using normal image fallbacks")
+                    }
+                }
+            }
+            if input.image_url.is_none()
+                && let Some(image_url) = scraped_image_url
                 && let Ok(stored_url) = self.download_and_store_image(&image_url).await
             {
                 input.image_url = Some(stored_url);
@@ -108,6 +147,17 @@ where
                 let key = format!("images/{}.jpg", Uuid::new_v4());
                 if let Ok(stored_url) = self.storage.put(&key, bytes, "image/jpeg").await {
                     input.image_url = Some(stored_url);
+                }
+            }
+            if input.image_url.is_none() && !prefer_ai_image {
+                match self
+                    .generate_and_store_image(user_id, generation_context(&input))
+                    .await
+                {
+                    Ok(url) => input.image_url = Some(url),
+                    Err(error) => {
+                        tracing::debug!(url = %input.url, %error, "AI image fallback unavailable")
+                    }
                 }
             }
         }
@@ -185,6 +235,37 @@ where
         self.delete_owned_override(user_id, old_override.as_deref())
             .await;
         Ok(())
+    }
+
+    pub async fn generate_image_override(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Bookmark, DomainError> {
+        let bookmark = self.repo.get(id, user_id).await?;
+        let context = ImageGenerationContext {
+            url: bookmark.url.clone(),
+            title: bookmark.title.clone(),
+            description: bookmark.description.clone(),
+        };
+        let context = self.hydrate_generation_context(context).await;
+        let bytes = self.generate_image_bytes(user_id, context).await?;
+        let key = format!("images/overrides/{user_id}/{}.jpg", Uuid::new_v4());
+        let stored_url = self.storage.put(&key, bytes, "image/jpeg").await?;
+        let old_override = match self
+            .repo
+            .replace_override_image_url(id, user_id, Some(&stored_url))
+            .await
+        {
+            Ok(old) => old,
+            Err(error) => {
+                let _ = self.storage.delete(&key).await;
+                return Err(error);
+            }
+        };
+        self.delete_owned_override(user_id, old_override.as_deref())
+            .await;
+        self.repo.get(id, user_id).await
     }
 
     async fn delete_owned_override(&self, user_id: Uuid, image_url: Option<&str>) {
@@ -455,13 +536,39 @@ where
         let mut failed = 0;
 
         for bookmark in bookmarks {
-            let needs_fix = match &bookmark.image_url {
+            let mut needs_fix = match bookmark.effective_image_url() {
                 None => true,
                 Some(url) => !self.image_url_is_valid(url).await,
             };
 
+            // A broken override hides the base image. Remove it first so a
+            // still-valid scraped/generated base image becomes visible again.
+            if needs_fix && bookmark.override_image_url.is_some() {
+                match self.remove_image_override(bookmark.id, user_id).await {
+                    Ok(()) => {
+                        needs_fix = match &bookmark.image_url {
+                            Some(url) => !self.image_url_is_valid(url).await,
+                            None => true,
+                        };
+                        if !needs_fix {
+                            fixed += 1;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(bookmark_id = %bookmark.id, %error, "could not clear broken image override");
+                        failed += 1;
+                        needs_fix = false;
+                    }
+                }
+            }
+
             if needs_fix {
-                match self.fetch_and_store_image(&bookmark.url).await {
+                let context = ImageGenerationContext {
+                    url: bookmark.url.clone(),
+                    title: bookmark.title.clone(),
+                    description: bookmark.description.clone(),
+                };
+                match self.fetch_and_store_image(user_id, context).await {
                     Ok(new_url) => {
                         if self
                             .repo
@@ -507,8 +614,13 @@ where
     ///
     /// A Cloudflare challenge is a signal that the normal HTTP scraper cannot
     /// see the page, not a reason to disable the browser fallback.
-    async fn fetch_and_store_image(&self, page_url: &str) -> Result<String, DomainError> {
-        let metadata_result = self.metadata.extract(page_url).await;
+    async fn fetch_and_store_image(
+        &self,
+        user_id: Uuid,
+        mut context: ImageGenerationContext,
+    ) -> Result<String, DomainError> {
+        let page_url = context.url.clone();
+        let metadata_result = self.metadata.extract(&page_url).await;
         if let Err(error) = &metadata_result {
             tracing::warn!(
                 url = %page_url,
@@ -516,16 +628,91 @@ where
                 "metadata extraction failed; attempting screenshot fallback"
             );
         }
-        if let Ok(meta) = metadata_result
-            && let Some(image_url) = meta.image_url
-            && let Ok(stored) = self.download_and_store_image(&image_url).await
-        {
-            return Ok(stored);
+        if let Ok(meta) = metadata_result {
+            if context.title.as_deref().is_none_or(str::is_empty) {
+                context.title = meta.title;
+            }
+            if context.description.as_deref().is_none_or(str::is_empty) {
+                context.description = meta.description;
+            }
+            if let Some(image_url) = meta.image_url
+                && let Ok(stored) = self.download_and_store_image(&image_url).await
+            {
+                return Ok(stored);
+            }
         }
 
-        let bytes = self.screenshot.capture(page_url).await?;
-        let key = format!("images/{}.jpg", Uuid::new_v4());
+        if let Ok(bytes) = self.screenshot.capture(&page_url).await {
+            let key = format!("images/{}.jpg", Uuid::new_v4());
+            if let Ok(url) = self.storage.put(&key, bytes, "image/jpeg").await {
+                return Ok(url);
+            }
+        }
+
+        self.generate_and_store_image(user_id, context).await
+    }
+
+    async fn hydrate_generation_context(
+        &self,
+        mut context: ImageGenerationContext,
+    ) -> ImageGenerationContext {
+        if context
+            .title
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && context
+                .description
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return context;
+        }
+        if let Ok(metadata) = self.metadata.extract(&context.url).await {
+            if context.title.as_deref().is_none_or(str::is_empty) {
+                context.title = metadata.title;
+            }
+            if context.description.as_deref().is_none_or(str::is_empty) {
+                context.description = metadata.description;
+            }
+        }
+        context
+    }
+
+    async fn generate_and_store_image(
+        &self,
+        user_id: Uuid,
+        context: ImageGenerationContext,
+    ) -> Result<String, DomainError> {
+        let bytes = self.generate_image_bytes(user_id, context).await?;
+        let key = format!("images/ai/{user_id}/{}.jpg", Uuid::new_v4());
         self.storage.put(&key, bytes, "image/jpeg").await
+    }
+
+    async fn generate_image_bytes(
+        &self,
+        user_id: Uuid,
+        context: ImageGenerationContext,
+    ) -> Result<Vec<u8>, DomainError> {
+        let generator = self.image_generator.as_ref().ok_or_else(|| {
+            DomainError::InvalidInput("AI image generation is unavailable".into())
+        })?;
+        let generated = generator.generate(user_id, context).await?;
+        if !generated.mime_type.starts_with("image/") {
+            return Err(DomainError::Internal(
+                "image generator returned non-image data".into(),
+            ));
+        }
+        let _permit = self
+            .generated_image_processing_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| DomainError::Internal("image processor is unavailable".into()))?;
+        tokio::task::spawn_blocking(move || normalize_social_image(&generated.bytes))
+            .await
+            .map_err(|error| {
+                DomainError::Internal(format!("generated image processing failed: {error}"))
+            })?
     }
 
     /// Check whether a stored image is still reachable.
@@ -565,6 +752,54 @@ where
             .map(|response| response.status().is_success())
             .unwrap_or(false)
     }
+}
+
+fn generation_context(input: &CreateBookmark) -> ImageGenerationContext {
+    ImageGenerationContext {
+        url: input.url.clone(),
+        title: input.title.clone(),
+        description: input.description.clone(),
+    }
+}
+
+fn normalize_social_image(bytes: &[u8]) -> Result<Vec<u8>, DomainError> {
+    use image::ImageReader;
+    use std::io::Cursor;
+
+    if bytes.len() > 12 * 1024 * 1024 {
+        return Err(DomainError::Internal(
+            "generated image exceeded the size limit".into(),
+        ));
+    }
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| DomainError::Internal(format!("invalid generated image: {error}")))?;
+    let (width, height) = reader.into_dimensions().map_err(|error| {
+        DomainError::Internal(format!(
+            "could not read generated image dimensions: {error}"
+        ))
+    })?;
+    let pixels = u64::from(width) * u64::from(height);
+    if width == 0 || height == 0 || width > 10_000 || height > 10_000 || pixels > 20_000_000 {
+        return Err(DomainError::Internal(
+            "generated image dimensions exceeded the limit".into(),
+        ));
+    }
+    let decoded = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| DomainError::Internal(format!("invalid generated image: {error}")))?
+        .decode()
+        .map_err(|error| {
+            DomainError::Internal(format!("could not decode generated image: {error}"))
+        })?;
+    let normalized = decoded.resize_to_fill(1_200, 630, image::imageops::FilterType::Lanczos3);
+    let mut output = Cursor::new(Vec::new());
+    normalized
+        .write_to(&mut output, image::ImageFormat::Jpeg)
+        .map_err(|error| {
+            DomainError::Internal(format!("could not encode generated image: {error}"))
+        })?;
+    Ok(output.into_inner())
 }
 
 fn extension_from_content_type(ct: &str) -> &str {
@@ -674,6 +909,21 @@ mod tests {
         assert_eq!(input.tags, Some(vec![]));
         assert_eq!(input.domain.as_deref(), Some("example.com"));
         assert_eq!(image.as_deref(), Some("https://example.com/image.png"));
+    }
+
+    #[test]
+    fn generated_images_are_normalized_to_social_card_dimensions() {
+        use image::{DynamicImage, GenericImageView, ImageFormat};
+        use std::io::Cursor;
+
+        let source = DynamicImage::new_rgb8(1_376, 768);
+        let mut encoded = Cursor::new(Vec::new());
+        source.write_to(&mut encoded, ImageFormat::Png).unwrap();
+
+        let normalized = normalize_social_image(&encoded.into_inner()).unwrap();
+        let decoded = image::load_from_memory(&normalized).unwrap();
+        assert_eq!(decoded.dimensions(), (1_200, 630));
+        assert!(normalized.starts_with(&[0xff, 0xd8, 0xff]));
     }
 
     struct OwnershipTestStorage;
@@ -1577,13 +1827,16 @@ mod tests {
         use crate::adapters::screenshot::noop::NoopScreenshot;
         use crate::adapters::screenshot::playwright::PlaywrightScreenshot;
         use crate::domain::error::CF_CHALLENGE_MSG;
+        use crate::domain::ports::image_generator::GeneratedImage;
         use axum::{
             Router,
             routing::{get, head as head_route, post},
         };
         use chrono::Utc;
         use std::future::Future;
+        use std::io::Cursor;
         use std::pin::Pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
         use tokio::sync::mpsc;
         use uuid::Uuid;
@@ -1919,6 +2172,43 @@ mod tests {
             }
         }
 
+        struct FixedImageGenerator {
+            calls: AtomicUsize,
+            contexts: Mutex<Vec<ImageGenerationContext>>,
+        }
+
+        impl FixedImageGenerator {
+            fn new() -> Self {
+                Self {
+                    calls: AtomicUsize::new(0),
+                    contexts: Mutex::new(Vec::new()),
+                }
+            }
+        }
+
+        impl ImageGenerator for FixedImageGenerator {
+            fn generate(
+                &self,
+                _user_id: Uuid,
+                context: ImageGenerationContext,
+            ) -> Pin<Box<dyn Future<Output = Result<GeneratedImage, DomainError>> + Send + '_>>
+            {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.contexts.lock().unwrap().push(context);
+                Box::pin(async {
+                    let image = image::DynamicImage::new_rgb8(1_376, 768);
+                    let mut output = Cursor::new(Vec::new());
+                    image
+                        .write_to(&mut output, image::ImageFormat::Png)
+                        .unwrap();
+                    Ok(GeneratedImage {
+                        bytes: output.into_inner(),
+                        mime_type: "image/png".into(),
+                    })
+                })
+            }
+        }
+
         fn make_bookmark(user_id: Uuid, url: &str, image_url: Option<&str>) -> Bookmark {
             Bookmark {
                 id: Uuid::new_v4(),
@@ -2084,6 +2374,85 @@ mod tests {
             assert_eq!(last.fixed, 0);
             assert_eq!(last.failed, 1);
             assert!(last.done);
+        }
+
+        #[tokio::test]
+        async fn repair_uses_ai_after_scrape_and_screenshot_fail() {
+            let user_id = Uuid::new_v4();
+            let bookmark = make_bookmark(user_id, "http://127.0.0.1:1/article", None);
+            let bookmark_id = bookmark.id;
+            let repo = Arc::new(MockRepo::new(vec![bookmark]));
+            let generator = Arc::new(FixedImageGenerator::new());
+            let svc = BookmarkService::new(
+                repo.clone(),
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+                Arc::new(NoopScreenshot),
+            )
+            .with_image_generator(generator.clone());
+            let (tx, rx) = mpsc::channel(32);
+
+            svc.fix_missing_images(user_id, tx).await;
+
+            let events = collect_events(rx).await;
+            assert_eq!(events.last().unwrap().fixed, 1);
+            assert_eq!(generator.calls.load(Ordering::SeqCst), 1);
+            assert!(repo.image_url(bookmark_id).unwrap().contains("/images/ai/"));
+        }
+
+        #[tokio::test]
+        async fn primary_create_and_edit_generation_store_normalized_ai_images() {
+            let user_id = Uuid::new_v4();
+            let repo = Arc::new(MockRepo::new(vec![]));
+            let generator = Arc::new(FixedImageGenerator::new());
+            let svc = BookmarkService::new(
+                repo,
+                Arc::new(NoopMetadata),
+                Arc::new(NoopStorage),
+                Arc::new(NoopScreenshot),
+            )
+            .with_image_generator(generator.clone());
+
+            let created = svc
+                .create_with_ai_image(
+                    user_id,
+                    CreateBookmark {
+                        url: "https://example.com/meaningful-article".into(),
+                        title: Some("Meaningful article".into()),
+                        description: Some("A concrete summary for the visual".into()),
+                        image_url: None,
+                        domain: None,
+                        tags: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                created
+                    .image_url
+                    .as_deref()
+                    .unwrap()
+                    .contains("/images/ai/")
+            );
+
+            let edited = svc
+                .generate_image_override(created.id, user_id)
+                .await
+                .unwrap();
+            assert!(
+                edited
+                    .override_image_url
+                    .as_deref()
+                    .unwrap()
+                    .contains("/images/overrides/")
+            );
+            assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
+            let contexts = generator.contexts.lock().unwrap();
+            assert_eq!(contexts[0].title.as_deref(), Some("Meaningful article"));
+            assert_eq!(
+                contexts[0].description.as_deref(),
+                Some("A concrete summary for the visual")
+            );
         }
 
         #[tokio::test]
