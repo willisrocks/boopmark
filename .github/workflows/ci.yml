@@ -40,6 +40,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run test:release
       - run: npm run test:extension
 
   idempotency-postgres:
@@ -72,6 +73,9 @@ jobs:
           for migration in migrations/*.sql; do
             psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
           done
+      - name: Verify current image model default
+        run: |
+          test "$(psql "$DATABASE_URL" -X -A -t -c "SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'user_llm_settings' AND column_name = 'image_generation_model'")" = "'gpt-image-2'::text"
       - name: Test durable create idempotency
         run: >-
           cargo test -p boopmark-server

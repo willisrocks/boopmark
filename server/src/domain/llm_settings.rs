@@ -20,14 +20,17 @@ pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6-luna";
 pub const DEFAULT_IMAGE_GENERATION_MODEL: &str = "gpt-image-2";
 
+// Claude Fable 5 is intentionally not offered for these short JSON tasks:
+// its adaptive thinking is always on and cannot be disabled, so its token and
+// retention behavior is not a safe fit for the low-latency bookmark path.
 pub const ANTHROPIC_MODEL_OPTIONS: [AnthropicModelOption; 3] = [
     AnthropicModelOption {
-        label: "Claude Opus 4.6",
-        value: "claude-opus-4-6",
+        label: "Claude Opus 5",
+        value: "claude-opus-5",
     },
     AnthropicModelOption {
-        label: "Claude Sonnet 4.6",
-        value: "claude-sonnet-4-6",
+        label: "Claude Sonnet 5",
+        value: "claude-sonnet-5",
     },
     AnthropicModelOption {
         label: "Claude Haiku 4.5",
@@ -133,8 +136,8 @@ mod tests {
         assert_eq!(
             ANTHROPIC_MODEL_OPTIONS.map(|option| option.value),
             [
-                "claude-opus-4-6",
-                "claude-sonnet-4-6",
+                "claude-opus-5",
+                "claude-sonnet-5",
                 "claude-haiku-4-5-20251001",
             ]
         );

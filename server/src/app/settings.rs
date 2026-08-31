@@ -578,17 +578,46 @@ mod tests {
     #[test]
     fn normalize_model_accepts_the_current_official_model_ids() {
         assert_eq!(
-            normalize_model(Some("claude-opus-4-6".into())),
-            "claude-opus-4-6"
+            normalize_model(Some("claude-opus-5".into())),
+            "claude-opus-5"
         );
         assert_eq!(
-            normalize_model(Some("claude-sonnet-4-6".into())),
-            "claude-sonnet-4-6"
+            normalize_model(Some("claude-sonnet-5".into())),
+            "claude-sonnet-5"
         );
         assert_eq!(
             normalize_model(Some("claude-haiku-4-5-20251001".into())),
             "claude-haiku-4-5-20251001"
         );
+    }
+
+    #[tokio::test]
+    async fn save_accepts_the_current_anthropic_model_ids() {
+        let repo = Arc::new(FakeLlmSettingsRepository::new());
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
+        let service = SettingsService::new(repo, secret_box);
+        let user_id = Uuid::new_v4();
+
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            let view = service
+                .save(
+                    user_id,
+                    SaveLlmSettingsInput {
+                        enabled: true,
+                        anthropic_model: Some(model.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("current Anthropic model should be accepted");
+            assert_eq!(view.anthropic_model, model);
+        }
     }
 
     #[test]

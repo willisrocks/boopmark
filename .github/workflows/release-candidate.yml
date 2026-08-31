@@ -35,6 +35,7 @@ jobs:
       - name: Validate candidate identity and versions
         id: candidate
         env:
+          GH_TOKEN: ${{ github.token }}
           PREPARED_SHA: ${{ inputs.prepared_sha }}
         run: |
           printf '%s\n' "$PREPARED_SHA" | grep -Eq '^[0-9a-f]{40}$'
@@ -54,8 +55,10 @@ jobs:
           cargo metadata --format-version=1 --locked >/dev/null
           test "$GITHUB_REF" = "refs/heads/release/v$VERSION"
           if git show-ref --verify --quiet "refs/tags/v$VERSION"; then
-            echo "tag v$VERSION already exists" >&2
-            exit 1
+            test "$(git rev-list -n 1 "v$VERSION")" = "$GITHUB_SHA"
+            gh release view "v$VERSION" --json targetCommitish,isDraft > release-state.json
+            test "$(jq -r .targetCommitish release-state.json)" = "$GITHUB_SHA"
+            test "$(jq -r .isDraft release-state.json)" = true
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -216,8 +219,8 @@ jobs:
         env: {VERSION: "${{ needs.metadata.outputs.version }}"}
         run: |
           for _ in $(seq 1 60); do
-            if curl --fail --silent --show-error "https://boopmark.com/health?release=$GITHUB_RUN_ID" | grep -qx ok && \
-               curl --fail --silent --show-error "https://boopmark.com/version?release=$GITHUB_RUN_ID" | \
+            if curl --fail --silent --show-error --connect-timeout 5 --max-time 10 "https://boopmark.com/health?release=$GITHUB_RUN_ID" | grep -qx ok && \
+               curl --fail --silent --show-error --connect-timeout 5 --max-time 10 "https://boopmark.com/version?release=$GITHUB_RUN_ID" | \
                  jq --exit-status --arg version "$VERSION" '.version == $version' >/dev/null; then
               exit 0
             fi
@@ -226,27 +229,9 @@ jobs:
           echo "production did not report release $VERSION within 10 minutes" >&2
           exit 1
 
-  promote:
-    name: Promote production container
-    needs: [metadata, deploy]
-    runs-on: ubuntu-latest
-    permissions: {contents: read, packages: write}
-    steps:
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
-      - name: Point latest at the verified production image
-        run: |
-          docker buildx imagetools create \
-            --tag "ghcr.io/${{ github.repository }}:latest" \
-            "ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}"
-
   publish:
-    name: Publish GitHub Release
-    needs: [metadata, deploy, promote]
+    name: Stage GitHub Release
+    needs: [metadata, deploy]
     runs-on: ubuntu-latest
     permissions: {contents: write}
     steps:
@@ -269,21 +254,57 @@ jobs:
           )
           for file in "${expected[@]}"; do test -f "release/$file"; done
           (cd release && sha256sum "${expected[@]}" > SHA256SUMS)
-      - name: Tag release commit and publish assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.metadata.outputs.version }}
-          RELEASE_SHA: ${{ github.sha }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$VERSION" "$RELEASE_SHA" -m "Release v$VERSION"
-          git push origin "v$VERSION"
-          gh release create "v$VERSION" --target "$RELEASE_SHA" --title "Boopmark v$VERSION" \
-            --generate-notes release/*
       - uses: actions/upload-artifact@v4
         with:
           name: boopmark-release-${{ needs.metadata.outputs.version }}
           path: release/
           if-no-files-found: error
           retention-days: 90
+      - name: Create or repair exact draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          if gh release view "v$VERSION" --json targetCommitish,isDraft > release-state.json 2>/dev/null; then
+            test "$(jq -r .targetCommitish release-state.json)" = "$RELEASE_SHA"
+            test "$(jq -r .isDraft release-state.json)" = true
+            gh release upload "v$VERSION" release/* --clobber
+          else
+            gh release create "v$VERSION" --target "$RELEASE_SHA" --title "Boopmark v$VERSION" \
+              --generate-notes --draft release/*
+          fi
+
+  promote:
+    name: Promote production container
+    needs: [metadata, deploy, publish]
+    runs-on: ubuntu-latest
+    permissions: {contents: read, packages: write}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Point latest at the verified production image
+        run: |
+          docker buildx imagetools create \
+            --tag "ghcr.io/${{ github.repository }}:latest" \
+            "ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}"
+
+  finalize:
+    name: Publish GitHub Release
+    needs: [metadata, publish, promote]
+    runs-on: ubuntu-latest
+    permissions: {contents: write}
+    steps:
+      - name: Publish the staged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          test "$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_SHA"
+          gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
+          test "$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = false

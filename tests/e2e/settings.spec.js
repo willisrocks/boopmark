@@ -71,11 +71,11 @@ test("settings page renders in the app shell with the official default model", a
   );
   await expect(page.locator("#anthropic_model option").nth(0)).toHaveAttribute(
     "value",
-    "claude-opus-4-6",
+    "claude-opus-5",
   );
   await expect(page.locator("#anthropic_model option").nth(1)).toHaveAttribute(
     "value",
-    "claude-sonnet-4-6",
+    "claude-sonnet-5",
   );
   await expect(page.locator("#anthropic_model option").nth(2)).toHaveAttribute(
     "value",
@@ -95,7 +95,7 @@ test("settings page supports add and delete key flows", async ({ page }) => {
   // Add a key: fill the input and save
   await page.getByLabel("Enable LLM integration").check();
   await page.getByLabel("Anthropic API key").fill(anthropicApiKey);
-  await page.getByLabel("Anthropic model").selectOption("claude-sonnet-4-6");
+  await page.getByLabel("Anthropic model").selectOption("claude-sonnet-5");
   await page.getByRole("button", { name: "Save settings" }).click();
 
   // Verify key-saved state
@@ -106,7 +106,7 @@ test("settings page supports add and delete key flows", async ({ page }) => {
   await expect(page.getByLabel("Anthropic API key")).toHaveCount(0);
   expect(await page.content()).not.toContain(anthropicApiKey);
   await expect(page.getByTestId("delete-anthropic-api-key")).toBeVisible();
-  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-sonnet-4-6");
+  await expect(page.getByLabel("Anthropic model")).toHaveValue("claude-sonnet-5");
 
   // Delete the key
   await page.getByTestId("delete-anthropic-api-key").check();
