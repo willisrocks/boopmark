@@ -11,7 +11,7 @@ on:
         options: [patch, minor, major]
 
 concurrency:
-  group: release
+  group: release-prepare
   cancel-in-progress: false
 
 env:
@@ -25,11 +25,8 @@ jobs:
     name: Prepare semantic release
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
-    outputs:
-      version: ${{ steps.release.outputs.version }}
-      previous_version: ${{ steps.release.outputs.previous_version }}
-      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,7 +55,6 @@ jobs:
             echo "tag v$VERSION already exists" >&2
             exit 1
           fi
-          echo "previous_version=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Synchronize all product versions
         env:
@@ -68,8 +64,7 @@ jobs:
           cargo metadata --format-version=1 >/dev/null
           cargo metadata --format-version=1 --locked >/dev/null
           node scripts/release/verify-version.mjs "$VERSION"
-      - name: Commit immutable release source
-        id: commit
+      - name: Commit release candidate source
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -79,7 +74,6 @@ jobs:
             extensions/chrome/manifest.json mobile/ios/project.yml \
             mobile/ios/Boopmark/Info.plist mobile/ios/BoopmarkShareExtension/Info.plist
           git commit -m "chore: release v$VERSION"
-          SHA=$(git rev-parse HEAD)
           RELEASE_REF="refs/heads/release/v$VERSION"
           REMOTE_SHA=$(git ls-remote --heads origin "$RELEASE_REF" | awk '{print $1}')
           if test -n "$REMOTE_SHA"; then
@@ -87,243 +81,8 @@ jobs:
           else
             git push origin "HEAD:$RELEASE_REF"
           fi
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-
-  quality:
-    name: Full release validation
-    needs: prepare
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
-      - uses: dtolnay/rust-toolchain@stable
-        with: {components: "rustfmt, clippy"}
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with: {node-version: 24, cache: npm}
-      - run: npm ci
-      - name: Verify committed release version
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: |
-          cargo metadata --format-version=1 --locked >/dev/null
-          npm run release:verify -- "$VERSION"
-      - run: npm run test:release
-      - run: npm run test:extension
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
-
-  cli:
-    name: CLI ${{ matrix.target }}
-    needs: prepare
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
-    strategy:
-      matrix:
-        include:
-          - {target: x86_64-apple-darwin, os: macos-latest}
-          - {target: aarch64-apple-darwin, os: macos-latest}
-          - {target: x86_64-unknown-linux-gnu, os: ubuntu-latest}
-          - {target: aarch64-unknown-linux-gnu, os: ubuntu-latest}
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
-      - uses: actions/setup-node@v4
-        with: {node-version: 24}
-      - uses: dtolnay/rust-toolchain@stable
-        with: {targets: "${{ matrix.target }}"}
-      - uses: Swatinem/rust-cache@v2
-        with: {key: "release-${{ matrix.target }}"}
-      - run: cargo metadata --format-version=1 --locked >/dev/null
-      - if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cargo install cross --version 0.2.5
-      - if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: cargo build --locked --release -p boop --target ${{ matrix.target }}
-      - if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cross build --locked --release -p boop --target ${{ matrix.target }}
-      - name: Verify binary version
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: target/${{ matrix.target }}/release/boop --version | grep -F "$VERSION"
-      - run: cp target/${{ matrix.target }}/release/boop boop-${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cli-${{ matrix.target }}
-          path: boop-${{ matrix.target }}
-          if-no-files-found: error
-
-  chrome:
-    name: Chrome artifacts
-    needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
-      - uses: actions/setup-node@v4
-        with: {node-version: 24, cache: npm}
-      - run: npm ci
-      - run: npm run test:extension
-      - name: Build Web Store and sideload packages
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: |
-          npm run extension:package
-          test -f "dist/boopmark-chrome-$VERSION.zip"
-          mkdir -p "dist/boopmark-chrome-unpacked-$VERSION"
-          unzip -q "dist/boopmark-chrome-$VERSION.zip" -d "dist/boopmark-chrome-unpacked-$VERSION"
-          test "$(node -p "require('./dist/boopmark-chrome-unpacked-$VERSION/manifest.json').version")" = "$VERSION"
-          (cd dist && zip -X -q -r "boopmark-chrome-sideload-$VERSION.zip" "boopmark-chrome-unpacked-$VERSION")
-      - uses: actions/upload-artifact@v4
-        with:
-          name: chrome-${{ needs.prepare.outputs.version }}
-          path: |
-            dist/boopmark-chrome-${{ needs.prepare.outputs.version }}.zip
-            dist/boopmark-chrome-sideload-${{ needs.prepare.outputs.version }}.zip
-          if-no-files-found: error
-
-  ios:
-    name: iOS artifacts
-    needs: prepare
-    runs-on: macos-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
-      - uses: actions/setup-node@v4
-        with: {node-version: 24}
-      - run: brew install xcodegen
-      - run: swift test --package-path mobile/ios/BoopmarkShared
-      - name: Build iOS release packages
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: bash scripts/release/package-ios.sh "$VERSION"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ios-${{ needs.prepare.outputs.version }}
-          path: |
-            dist/boopmark-ios-simulator-${{ needs.prepare.outputs.version }}.zip
-            dist/boopmark-ios-unsigned-${{ needs.prepare.outputs.version }}.ipa
-          if-no-files-found: error
-
-  container:
-    name: Versioned container
-    needs: [prepare, quality]
-    runs-on: ubuntu-latest
-    permissions: {contents: read, packages: write}
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}
-          build-args: |
-            BOOPMARK_VERSION=${{ needs.prepare.outputs.version }}
-            BOOPMARK_GIT_SHA=${{ needs.prepare.outputs.sha }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
-            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
-
-  deploy:
-    name: Deploy and verify production
-    needs: [prepare, quality, cli, chrome, ios, container]
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
-      - run: npm install --global @railway/cli@4.42.1
-      - name: Deploy exact release source
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
-          SERVICE: ${{ vars.RAILWAY_SERVICE_ID }}
-        run: |
-          railway variable --set "BOOPMARK_VERSION=$VERSION" --skip-deploys \
-            --service "$SERVICE" --environment "$ENVIRONMENT"
-          railway up --ci --environment "$ENVIRONMENT" --service "$SERVICE" \
-            --message "Release v$VERSION (${{ needs.prepare.outputs.sha }})"
-      - name: Verify exact production version
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: |
-          for _ in $(seq 1 60); do
-            if curl --fail --silent --show-error "https://boopmark.com/health?release=$GITHUB_RUN_ID" | grep -qx ok && \
-               curl --fail --silent --show-error "https://boopmark.com/version?release=$GITHUB_RUN_ID" | \
-                 jq --exit-status --arg version "$VERSION" '.version == $version' >/dev/null; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "production did not report release $VERSION within 10 minutes" >&2
-          exit 1
-
-  promote:
-    name: Promote production container
-    needs: [prepare, deploy]
-    runs-on: ubuntu-latest
-    permissions: {contents: read, packages: write}
-    steps:
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
-      - name: Point latest at the verified production image
-        run: |
-          docker buildx imagetools create \
-            --tag "ghcr.io/${{ github.repository }}:latest" \
-            "ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}"
-
-  publish:
-    name: Publish GitHub Release
-    needs: [prepare, deploy, promote]
-    runs-on: ubuntu-latest
-    permissions: {contents: write}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: "${{ needs.prepare.outputs.sha }}"
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with: {node-version: 24}
-      - uses: actions/download-artifact@v4
-        with: {path: release, merge-multiple: true}
-      - name: Generate installation guide and checksums
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: |
-          node scripts/release/generate-install.mjs "$VERSION" release/INSTALL.md "$GITHUB_REPOSITORY"
-          expected=(
-            boop-x86_64-apple-darwin boop-aarch64-apple-darwin
-            boop-x86_64-unknown-linux-gnu boop-aarch64-unknown-linux-gnu
-            "boopmark-chrome-$VERSION.zip" "boopmark-chrome-sideload-$VERSION.zip"
-            "boopmark-ios-simulator-$VERSION.zip" "boopmark-ios-unsigned-$VERSION.ipa" INSTALL.md
-          )
-          for file in "${expected[@]}"; do test -f "release/$file"; done
-          (cd release && sha256sum "${expected[@]}" > SHA256SUMS)
-      - name: Tag release commit and publish assets
+      - name: Dispatch exact release candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$VERSION" "$RELEASE_SHA" -m "Release v$VERSION"
-          git push origin "v$VERSION"
-          gh release create "v$VERSION" --target "$RELEASE_SHA" --title "Boopmark v$VERSION" \
-            --generate-notes release/*
-      - uses: actions/upload-artifact@v4
-        with:
-          name: boopmark-release-${{ needs.prepare.outputs.version }}
-          path: release/
-          if-no-files-found: error
-          retention-days: 90
+          VERSION: ${{ steps.release.outputs.version }}
+        run: gh workflow run release-candidate.yml --ref "release/v$VERSION"
