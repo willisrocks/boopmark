@@ -78,6 +78,7 @@ test('release workflow builds immutable source and promotes latest after product
   assert.doesNotMatch(workflow, /needs\.prepare\.outputs\.sha/);
   assert.doesNotMatch(workflow, /ref:.*needs\./);
   assert.match(workflow, /test "\$GITHUB_SHA" = "\$PREPARED_SHA"/);
+  assert.match(workflow, /git rev-list -n 1 "v\$VERSION"[\s\S]*?gh release view[\s\S]*?\.isDraft/);
   assert.match(workflow, /git merge-base --is-ancestor "\$PARENT"/);
   assert.match(workflow, /cargo metadata --format-version=1 --locked/);
   assert.match(dispatcher, /--force-with-lease="\$RELEASE_REF:\$REMOTE_SHA"/);

@@ -40,6 +40,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run test:release
       - run: npm run test:extension
 
   idempotency-postgres:

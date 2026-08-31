@@ -35,6 +35,7 @@ jobs:
       - name: Validate candidate identity and versions
         id: candidate
         env:
+          GH_TOKEN: ${{ github.token }}
           PREPARED_SHA: ${{ inputs.prepared_sha }}
         run: |
           printf '%s\n' "$PREPARED_SHA" | grep -Eq '^[0-9a-f]{40}$'
@@ -54,8 +55,10 @@ jobs:
           cargo metadata --format-version=1 --locked >/dev/null
           test "$GITHUB_REF" = "refs/heads/release/v$VERSION"
           if git show-ref --verify --quiet "refs/tags/v$VERSION"; then
-            echo "tag v$VERSION already exists" >&2
-            exit 1
+            test "$(git rev-list -n 1 "v$VERSION")" = "$GITHUB_SHA"
+            gh release view "v$VERSION" --json targetCommitish,isDraft > release-state.json
+            test "$(jq -r .targetCommitish release-state.json)" = "$GITHUB_SHA"
+            test "$(jq -r .isDraft release-state.json)" = true
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
