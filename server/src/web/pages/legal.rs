@@ -35,6 +35,7 @@ mod tests {
             .expect("privacy template should render");
         assert!(body.contains("Bookmark content"));
         assert!(body.contains("Anthropic"));
+        assert!(body.contains("OpenAI"));
         assert!(body.contains("Chrome extension"));
         assert!(body.contains("extension-local storage"));
         assert!(body.contains("August 30, 2026"));

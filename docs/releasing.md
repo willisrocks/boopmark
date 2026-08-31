@@ -2,7 +2,7 @@
 
 The manually invoked GitHub Actions workflow named **Release** is the only supported production release path. Run it from `main` and choose exactly one semantic increment: `patch`, `minor`, or `major`.
 
-The highest stable `vX.Y.Z` Git tag is the authoritative previous release. The workflow feeds that version and the selected increment to `npm version`, then synchronizes the result into the Rust server and CLI, Chrome manifest, iOS app, Share Extension, and XcodeGen project. It creates an immutable `release/vX.Y.Z` source branch so every build and the Railway deployment use the same commit. The release is tagged and published only after the production version endpoint reports the expected version. This tag-based baseline keeps later releases correct even though protected `main` is not mutated by a release run.
+The highest stable `vX.Y.Z` Git tag is the authoritative previous release. The workflow feeds that version and the selected increment to `npm version`, then synchronizes the result into the Rust server and CLI, Chrome manifest, iOS app, Share Extension, and XcodeGen project. It creates a `release/vX.Y.Z` candidate source branch so every build and the Railway deployment use the same commit. A failed, unpublished candidate can be replaced safely on retry; the final release tag is immutable. The release is tagged and published only after the production version endpoint reports the expected version. This tag-based baseline keeps later releases correct even though protected `main` is not mutated by a release run.
 
 ## Start a release
 
@@ -25,7 +25,11 @@ Each GitHub Release contains:
 - `INSTALL.md` with version-specific instructions.
 - `SHA256SUMS` covering every downloadable artifact.
 
-The workflow also publishes `ghcr.io/willisrocks/boopmark:X.Y.Z` and updates `ghcr.io/willisrocks/boopmark:latest`, deploys the same release commit to Railway production, and verifies both `/health` and `/version` at `https://boopmark.com`.
+The workflow publishes `ghcr.io/willisrocks/boopmark:X.Y.Z`, deploys the same release commit to Railway production, and verifies both `/health` and `/version` at `https://boopmark.com`. Only after production passes does it update `ghcr.io/willisrocks/boopmark:latest` and publish the GitHub Release.
+
+## Retry a failed release
+
+If a run fails before publishing its tag, correct the problem on `main` and invoke the same semantic increment again. The workflow recomputes the unpublished version and replaces only its bot-owned `release/vX.Y.Z` branch using a lease, so it cannot overwrite a concurrent update. It never replaces an existing `vX.Y.Z` tag. A versioned container from an earlier attempt may be replaced, but `latest` is not updated until the retry has passed the production verification gate.
 
 ## Required GitHub configuration
 

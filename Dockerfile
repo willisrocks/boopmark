@@ -18,13 +18,13 @@ COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml server/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
 RUN mkdir -p server/src cli/src && echo "fn main(){}" > server/src/main.rs && echo "fn main(){}" > cli/src/main.rs
-RUN cargo build --release -p boopmark-server && rm -rf server/src cli/src
+RUN cargo build --locked --release -p boopmark-server && rm -rf server/src cli/src
 COPY server/ server/
 COPY cli/ cli/
 COPY migrations/ migrations/
 COPY templates/ templates/
-RUN touch server/src/main.rs && cargo build --release -p boopmark-server
-RUN cargo build --release -p boopmark-server --example hash_password
+RUN touch server/src/main.rs && cargo build --locked --release -p boopmark-server
+RUN cargo build --locked --release -p boopmark-server --example hash_password
 
 FROM debian:trixie-slim
 ARG BOOPMARK_VERSION=dev

@@ -58,10 +58,6 @@ jobs:
             echo "tag v$VERSION already exists" >&2
             exit 1
           fi
-          if git ls-remote --exit-code --heads origin "release/v$VERSION" >/dev/null 2>&1; then
-            echo "release branch release/v$VERSION already exists" >&2
-            exit 1
-          fi
           echo "previous_version=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Synchronize all product versions
@@ -69,7 +65,8 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           node scripts/release/sync-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
-          cargo metadata --format-version=1 --no-deps >/dev/null
+          cargo metadata --format-version=1 >/dev/null
+          cargo metadata --format-version=1 --locked >/dev/null
           node scripts/release/verify-version.mjs "$VERSION"
       - name: Commit immutable release source
         id: commit
@@ -83,7 +80,13 @@ jobs:
             mobile/ios/Boopmark/Info.plist mobile/ios/BoopmarkShareExtension/Info.plist
           git commit -m "chore: release v$VERSION"
           SHA=$(git rev-parse HEAD)
-          git push origin "HEAD:refs/heads/release/v$VERSION"
+          RELEASE_REF="refs/heads/release/v$VERSION"
+          REMOTE_SHA=$(git ls-remote --heads origin "$RELEASE_REF" | awk '{print $1}')
+          if test -n "$REMOTE_SHA"; then
+            git push --force-with-lease="$RELEASE_REF:$REMOTE_SHA" origin "HEAD:$RELEASE_REF"
+          else
+            git push origin "HEAD:$RELEASE_REF"
+          fi
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
   quality:
@@ -93,24 +96,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ github.sha }}"}
+        with: {ref: "${{ needs.prepare.outputs.sha }}"}
       - uses: dtolnay/rust-toolchain@stable
         with: {components: "rustfmt, clippy"}
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with: {node-version: 24, cache: npm}
       - run: npm ci
-      - name: Apply release version
+      - name: Verify committed release version
         env: {VERSION: "${{ needs.prepare.outputs.version }}"}
         run: |
-          node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
-          cargo metadata --format-version=1 --no-deps >/dev/null
+          cargo metadata --format-version=1 --locked >/dev/null
           npm run release:verify -- "$VERSION"
       - run: npm run test:release
       - run: npm run test:extension
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
 
   cli:
     name: CLI ${{ matrix.target }}
@@ -126,24 +128,20 @@ jobs:
           - {target: aarch64-unknown-linux-gnu, os: ubuntu-latest}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ github.sha }}"}
+        with: {ref: "${{ needs.prepare.outputs.sha }}"}
       - uses: actions/setup-node@v4
         with: {node-version: 24}
       - uses: dtolnay/rust-toolchain@stable
         with: {targets: "${{ matrix.target }}"}
       - uses: Swatinem/rust-cache@v2
         with: {key: "release-${{ matrix.target }}"}
-      - name: Apply release version
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: |
-          node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
-          cargo metadata --format-version=1 --no-deps >/dev/null
+      - run: cargo metadata --format-version=1 --locked >/dev/null
       - if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: cargo install cross --version 0.2.5
       - if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: cargo build --release -p boop --target ${{ matrix.target }}
+        run: cargo build --locked --release -p boop --target ${{ matrix.target }}
       - if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cross build --release -p boop --target ${{ matrix.target }}
+        run: cross build --locked --release -p boop --target ${{ matrix.target }}
       - name: Verify binary version
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         env: {VERSION: "${{ needs.prepare.outputs.version }}"}
@@ -161,13 +159,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ github.sha }}"}
+        with: {ref: "${{ needs.prepare.outputs.sha }}"}
       - uses: actions/setup-node@v4
         with: {node-version: 24, cache: npm}
       - run: npm ci
-      - name: Apply release version
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
       - run: npm run test:extension
       - name: Build Web Store and sideload packages
         env: {VERSION: "${{ needs.prepare.outputs.version }}"}
@@ -193,12 +188,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ github.sha }}"}
+        with: {ref: "${{ needs.prepare.outputs.sha }}"}
       - uses: actions/setup-node@v4
         with: {node-version: 24}
-      - name: Apply release version
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
       - run: brew install xcodegen
       - run: swift test --package-path mobile/ios/BoopmarkShared
       - name: Build iOS release packages
@@ -214,17 +206,12 @@ jobs:
 
   container:
     name: Versioned container
-    needs: prepare
+    needs: [prepare, quality]
     runs-on: ubuntu-latest
     permissions: {contents: read, packages: write}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ github.sha }}"}
-      - uses: actions/setup-node@v4
-        with: {node-version: 24}
-      - name: Apply release version
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
+        with: {ref: "${{ needs.prepare.outputs.sha }}"}
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -235,9 +222,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}
-            ghcr.io/${{ github.repository }}:latest
+          tags: ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}
           build-args: |
             BOOPMARK_VERSION=${{ needs.prepare.outputs.version }}
             BOOPMARK_GIT_SHA=${{ needs.prepare.outputs.sha }}
@@ -253,12 +238,7 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ github.sha }}"}
-      - uses: actions/setup-node@v4
-        with: {node-version: 24}
-      - name: Apply release version
-        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
-        run: node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
+        with: {ref: "${{ needs.prepare.outputs.sha }}"}
       - run: npm install --global @railway/cli@4.42.1
       - name: Deploy exact release source
         env:
@@ -285,14 +265,34 @@ jobs:
           echo "production did not report release $VERSION within 10 minutes" >&2
           exit 1
 
+  promote:
+    name: Promote production container
+    needs: [prepare, deploy]
+    runs-on: ubuntu-latest
+    permissions: {contents: read, packages: write}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Point latest at the verified production image
+        run: |
+          docker buildx imagetools create \
+            --tag "ghcr.io/${{ github.repository }}:latest" \
+            "ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}"
+
   publish:
     name: Publish GitHub Release
-    needs: [prepare, deploy]
+    needs: [prepare, deploy, promote]
     runs-on: ubuntu-latest
     permissions: {contents: write}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ github.sha }}"}
+        with:
+          ref: "${{ needs.prepare.outputs.sha }}"
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with: {node-version: 24}
       - uses: actions/download-artifact@v4
