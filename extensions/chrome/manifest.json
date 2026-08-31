@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Boopmark",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "description": "Capture the current page, review automatic metadata, and save to Boopmark.",
   "minimum_chrome_version": "127",
   "permissions": ["activeTab", "storage"],

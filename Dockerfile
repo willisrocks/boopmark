@@ -8,6 +8,10 @@ COPY templates/ templates/
 RUN npx tailwindcss -i static/css/input.css -o static/css/output.css --minify
 
 FROM rust:1.94-slim AS builder
+ARG BOOPMARK_VERSION=dev
+ARG BOOPMARK_GIT_SHA=unknown
+ENV BOOPMARK_VERSION=${BOOPMARK_VERSION}
+ENV BOOPMARK_GIT_SHA=${BOOPMARK_GIT_SHA}
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
@@ -23,6 +27,13 @@ RUN touch server/src/main.rs && cargo build --release -p boopmark-server
 RUN cargo build --release -p boopmark-server --example hash_password
 
 FROM debian:trixie-slim
+ARG BOOPMARK_VERSION=dev
+ARG BOOPMARK_GIT_SHA=unknown
+LABEL org.opencontainers.image.title="Boopmark"
+LABEL org.opencontainers.image.version="${BOOPMARK_VERSION}"
+LABEL org.opencontainers.image.revision="${BOOPMARK_GIT_SHA}"
+ENV BOOPMARK_VERSION=${BOOPMARK_VERSION}
+ENV BOOPMARK_GIT_SHA=${BOOPMARK_GIT_SHA}
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/boopmark-server .
