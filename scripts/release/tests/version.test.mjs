@@ -82,7 +82,12 @@ test('release workflow builds immutable source and promotes latest after product
   assert.match(workflow, /cargo metadata --format-version=1 --locked/);
   assert.match(dispatcher, /--force-with-lease="\$RELEASE_REF:\$REMOTE_SHA"/);
   assert.match(workflow, /container:\n[\s\S]*?needs: \[metadata, quality\]/);
-  assert.match(workflow, /promote:\n[\s\S]*?needs: \[metadata, deploy\]/);
+  assert.match(workflow, /publish:\n[\s\S]*?needs: \[metadata, deploy\]/);
+  assert.match(workflow, /gh release create[\s\S]*?--draft/);
+  assert.match(workflow, /gh release upload[\s\S]*?--clobber/);
+  assert.doesNotMatch(workflow, /git push origin "v\$VERSION"/);
+  assert.match(workflow, /promote:\n[\s\S]*?needs: \[metadata, deploy, publish\]/);
   assert.match(workflow, /docker buildx imagetools create[\s\S]*?:latest/);
-  assert.match(workflow, /publish:\n[\s\S]*?needs: \[metadata, deploy, promote\]/);
+  assert.match(workflow, /finalize:\n[\s\S]*?needs: \[metadata, publish, promote\]/);
+  assert.match(workflow, /gh release edit[\s\S]*?--draft=false/);
 });
