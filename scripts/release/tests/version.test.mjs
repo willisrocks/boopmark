@@ -82,6 +82,9 @@ test('release workflow builds immutable source and promotes latest after product
   assert.match(workflow, /git merge-base --is-ancestor "\$PARENT"/);
   assert.match(workflow, /cargo metadata --format-version=1 --locked/);
   assert.match(dispatcher, /--force-with-lease="\$RELEASE_REF:\$REMOTE_SHA"/);
+  assert.match(dispatcher, /gh release list --exclude-drafts --exclude-pre-releases/);
+  assert.match(dispatcher, /reuse_sha=\$REUSE_SHA/);
+  assert.match(dispatcher, /if test -n "\$REUSE_SHA"; then[\s\S]*?SHA="\$REUSE_SHA"/);
   assert.match(workflow, /container:\n[\s\S]*?needs: \[metadata, quality\]/);
   assert.match(workflow, /publish:\n[\s\S]*?needs: \[metadata, deploy\]/);
   assert.match(workflow, /gh release create[\s\S]*?--draft/);

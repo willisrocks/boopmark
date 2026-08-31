@@ -45,19 +45,36 @@ jobs:
         id: release
         env:
           BUMP: ${{ inputs.bump }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          LATEST_TAG=$(git tag --list | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -1)
+          LATEST_TAG=$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 \
+            --json tagName --jq '.[].tagName' | \
+            grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -1)
           test -n "$LATEST_TAG"
           CURRENT=${LATEST_TAG#v}
           npm version "$CURRENT" --no-git-tag-version --allow-same-version
           npm version "$BUMP" --no-git-tag-version
           VERSION=$(node -p "require('./package.json').version")
-          if git show-ref --verify --quiet "refs/tags/v$VERSION"; then
-            echo "tag v$VERSION already exists" >&2
-            exit 1
+          REUSE_SHA=""
+          RELEASE_DRAFT=$(gh release list --limit 1000 --json tagName,isDraft \
+            --jq ".[] | select(.tagName == \"v$VERSION\") | .isDraft")
+          if test -n "$RELEASE_DRAFT"; then
+            test "$RELEASE_DRAFT" = true
+            gh release view "v$VERSION" --json targetCommitish,isDraft > release-state.json
+            REUSE_SHA=$(jq -r .targetCommitish release-state.json)
+            printf '%s\n' "$REUSE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+            RELEASE_REF="refs/heads/release/v$VERSION"
+            test "$(git ls-remote --heads origin "$RELEASE_REF" | awk '{print $1}')" = "$REUSE_SHA"
+          else
+            if git show-ref --verify --quiet "refs/tags/v$VERSION"; then
+              echo "tag v$VERSION exists without a resumable draft release" >&2
+              exit 1
+            fi
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "reuse_sha=$REUSE_SHA" >> "$GITHUB_OUTPUT"
       - name: Synchronize all product versions
+        if: steps.release.outputs.reuse_sha == ''
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -68,22 +85,28 @@ jobs:
       - name: Commit release candidate source
         id: candidate
         env:
+          REUSE_SHA: ${{ steps.release.outputs.reuse_sha }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json Cargo.lock cli/Cargo.toml server/Cargo.toml \
-            extensions/chrome/manifest.json mobile/ios/project.yml \
-            mobile/ios/Boopmark/Info.plist mobile/ios/BoopmarkShareExtension/Info.plist
-          git commit -m "chore: release v$VERSION"
-          RELEASE_REF="refs/heads/release/v$VERSION"
-          REMOTE_SHA=$(git ls-remote --heads origin "$RELEASE_REF" | awk '{print $1}')
-          if test -n "$REMOTE_SHA"; then
-            git push --force-with-lease="$RELEASE_REF:$REMOTE_SHA" origin "HEAD:$RELEASE_REF"
+          if test -n "$REUSE_SHA"; then
+            SHA="$REUSE_SHA"
           else
-            git push origin "HEAD:$RELEASE_REF"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add package.json package-lock.json Cargo.lock cli/Cargo.toml server/Cargo.toml \
+              extensions/chrome/manifest.json mobile/ios/project.yml \
+              mobile/ios/Boopmark/Info.plist mobile/ios/BoopmarkShareExtension/Info.plist
+            git commit -m "chore: release v$VERSION"
+            RELEASE_REF="refs/heads/release/v$VERSION"
+            REMOTE_SHA=$(git ls-remote --heads origin "$RELEASE_REF" | awk '{print $1}')
+            if test -n "$REMOTE_SHA"; then
+              git push --force-with-lease="$RELEASE_REF:$REMOTE_SHA" origin "HEAD:$RELEASE_REF"
+            else
+              git push origin "HEAD:$RELEASE_REF"
+            fi
+            SHA=$(git rev-parse HEAD)
           fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
       - name: Dispatch exact release candidate
         env:
           GH_TOKEN: ${{ github.token }}
