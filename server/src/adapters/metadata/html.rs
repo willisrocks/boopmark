@@ -30,14 +30,15 @@ impl MetadataExtractor for HtmlMetadataExtractor {
     ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
         let url_str = url_str.to_string();
         Box::pin(async move {
-            let parsed_url = Url::parse(&url_str)
+            let safe_url = super::validate_public_url(&url_str)?;
+            let parsed_url = Url::parse(&safe_url)
                 .map_err(|e| DomainError::InvalidInput(format!("invalid URL: {e}")))?;
 
             let domain = parsed_url.host_str().map(|h| h.to_string());
 
             let resp = self
                 .client
-                .get(&url_str)
+                .get(&safe_url)
                 .send()
                 .await
                 .map_err(|e| DomainError::Internal(format!("fetch error: {e}")))?;
@@ -74,7 +75,7 @@ impl MetadataExtractor for HtmlMetadataExtractor {
             let description = select_meta(&document, "og:description")
                 .or_else(|| select_meta_name(&document, "description"));
 
-            let image_url = extract_image_url(&document).map(|img| resolve_url(&url_str, &img));
+            let image_url = extract_image_url(&document).map(|img| resolve_url(&safe_url, &img));
 
             Ok(UrlMetadata {
                 title,

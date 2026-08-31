@@ -1,6 +1,9 @@
 use crate::app::secrets::SecretBox;
 use crate::domain::error::DomainError;
-use crate::domain::llm_settings::{ANTHROPIC_MODEL_OPTIONS, DEFAULT_ANTHROPIC_MODEL, LlmSettings};
+use crate::domain::llm_settings::{
+    ANTHROPIC_MODEL_OPTIONS, DEFAULT_ANTHROPIC_MODEL, DEFAULT_IMAGE_ART_STYLE,
+    DEFAULT_IMAGE_GENERATION_MODEL, LlmSettings,
+};
 use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -14,13 +17,30 @@ pub struct SettingsView {
     pub enabled: bool,
     pub has_anthropic_api_key: bool,
     pub anthropic_model: String,
+    pub image_generation_enabled: bool,
+    pub has_gemini_api_key: bool,
+    pub image_generation_model: String,
+    pub image_generation_art_style: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ImageGenerationSettings {
+    pub api_key: String,
+    pub model: String,
+    pub art_style: String,
+}
+
+#[derive(Default)]
 pub struct SaveLlmSettingsInput {
     pub enabled: bool,
     pub anthropic_api_key: Option<String>,
     pub clear_anthropic_api_key: bool,
     pub anthropic_model: Option<String>,
+    pub image_generation_enabled: bool,
+    pub gemini_api_key: Option<String>,
+    pub clear_gemini_api_key: bool,
+    pub image_generation_model: Option<String>,
+    pub image_generation_art_style: Option<String>,
 }
 
 impl<R> SettingsService<R>
@@ -57,6 +77,30 @@ where
         }
     }
 
+    pub async fn get_image_generation_settings(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<ImageGenerationSettings>, DomainError> {
+        let settings = self.repo.get(user_id).await?;
+        match settings {
+            Some(s) if s.image_generation_enabled => {
+                let Some(encrypted) = &s.gemini_api_key_encrypted else {
+                    return Ok(None);
+                };
+                let api_key = self
+                    .secret_box
+                    .decrypt(encrypted)
+                    .map_err(DomainError::Internal)?;
+                Ok(Some(ImageGenerationSettings {
+                    api_key,
+                    model: normalize_image_model(Some(&s.image_generation_model)),
+                    art_style: normalize_art_style(Some(&s.image_generation_art_style)),
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub async fn save(
         &self,
         user_id: Uuid,
@@ -66,6 +110,8 @@ where
         let model_for_save = resolve_model_for_save(existing.as_ref(), input.anthropic_model)?;
         let key_change =
             resolve_api_key_change(input.anthropic_api_key, input.clear_anthropic_api_key);
+        let gemini_key_change =
+            resolve_api_key_change(input.gemini_api_key, input.clear_gemini_api_key);
 
         let (replace_key, clear_key) = match key_change {
             ApiKeyChange::KeepExisting => (None, false),
@@ -79,6 +125,20 @@ where
                 false,
             ),
         };
+        let (replace_gemini_key, clear_gemini_key) = match gemini_key_change {
+            ApiKeyChange::KeepExisting => (None, false),
+            ApiKeyChange::Clear => (None, true),
+            ApiKeyChange::Replace(value) => (
+                Some(
+                    self.secret_box
+                        .encrypt(&value)
+                        .map_err(DomainError::InvalidInput)?,
+                ),
+                false,
+            ),
+        };
+        let image_model = resolve_image_model(existing.as_ref(), input.image_generation_model)?;
+        let art_style = resolve_art_style(existing.as_ref(), input.image_generation_art_style);
 
         let saved = self
             .repo
@@ -88,10 +148,55 @@ where
                 replace_key.as_deref(),
                 clear_key,
                 &model_for_save,
+                input.image_generation_enabled,
+                replace_gemini_key.as_deref(),
+                clear_gemini_key,
+                &image_model,
+                &art_style,
             )
             .await?;
 
         Ok(to_view(Some(&saved)))
+    }
+}
+
+fn resolve_image_model(
+    existing: Option<&LlmSettings>,
+    model: Option<String>,
+) -> Result<String, DomainError> {
+    match model.as_deref().map(str::trim) {
+        None | Some("") => Ok(existing
+            .map(|settings| normalize_image_model(Some(&settings.image_generation_model)))
+            .unwrap_or_else(|| DEFAULT_IMAGE_GENERATION_MODEL.to_string())),
+        Some(DEFAULT_IMAGE_GENERATION_MODEL) => Ok(DEFAULT_IMAGE_GENERATION_MODEL.to_string()),
+        Some(_) => Err(DomainError::InvalidInput(
+            "Unsupported Gemini image model selection".into(),
+        )),
+    }
+}
+
+fn normalize_image_model(model: Option<&str>) -> String {
+    match model.map(str::trim) {
+        Some(DEFAULT_IMAGE_GENERATION_MODEL) => DEFAULT_IMAGE_GENERATION_MODEL.to_string(),
+        _ => DEFAULT_IMAGE_GENERATION_MODEL.to_string(),
+    }
+}
+
+fn normalize_art_style(style: Option<&str>) -> String {
+    style
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_IMAGE_ART_STYLE)
+        .to_string()
+}
+
+fn resolve_art_style(existing: Option<&LlmSettings>, submitted: Option<String>) -> String {
+    match submitted {
+        Some(value) if !value.trim().is_empty() => value.trim().to_string(),
+        Some(_) => DEFAULT_IMAGE_ART_STYLE.to_string(),
+        None => existing
+            .map(|settings| normalize_art_style(Some(&settings.image_generation_art_style)))
+            .unwrap_or_else(|| DEFAULT_IMAGE_ART_STYLE.to_string()),
     }
 }
 
@@ -156,11 +261,21 @@ fn to_view(settings: Option<&LlmSettings>) -> SettingsView {
             enabled: settings.enabled,
             has_anthropic_api_key: settings.anthropic_api_key_encrypted.is_some(),
             anthropic_model: normalize_model(Some(settings.anthropic_model.clone())),
+            image_generation_enabled: settings.image_generation_enabled,
+            has_gemini_api_key: settings.gemini_api_key_encrypted.is_some(),
+            image_generation_model: normalize_image_model(Some(&settings.image_generation_model)),
+            image_generation_art_style: normalize_art_style(Some(
+                &settings.image_generation_art_style,
+            )),
         },
         None => SettingsView {
             enabled: false,
             has_anthropic_api_key: false,
             anthropic_model: DEFAULT_ANTHROPIC_MODEL.to_string(),
+            image_generation_enabled: false,
+            has_gemini_api_key: false,
+            image_generation_model: DEFAULT_IMAGE_GENERATION_MODEL.to_string(),
+            image_generation_art_style: DEFAULT_IMAGE_ART_STYLE.to_string(),
         },
     }
 }
@@ -183,6 +298,11 @@ mod tests {
         replace_anthropic_api_key_encrypted: Option<Vec<u8>>,
         clear_anthropic_api_key: bool,
         anthropic_model: String,
+        image_generation_enabled: bool,
+        replace_gemini_api_key_encrypted: Option<Vec<u8>>,
+        clear_gemini_api_key: bool,
+        image_generation_model: String,
+        image_generation_art_style: String,
     }
 
     impl FakeLlmSettingsRepository {
@@ -206,9 +326,14 @@ mod tests {
             replace_anthropic_api_key_encrypted: Option<&[u8]>,
             clear_anthropic_api_key: bool,
             anthropic_model: &str,
+            image_generation_enabled: bool,
+            replace_gemini_api_key_encrypted: Option<&[u8]>,
+            clear_gemini_api_key: bool,
+            image_generation_model: &str,
+            image_generation_art_style: &str,
         ) -> Result<LlmSettings, DomainError> {
             let existing = self.stored.lock().expect("stored lock").clone();
-            let encrypted = if clear_anthropic_api_key {
+            let anthropic_encrypted = if clear_anthropic_api_key {
                 None
             } else {
                 replace_anthropic_api_key_encrypted
@@ -219,6 +344,17 @@ mod tests {
                             .and_then(|settings| settings.anthropic_api_key_encrypted.clone())
                     })
             };
+            let gemini_encrypted = if clear_gemini_api_key {
+                None
+            } else {
+                replace_gemini_api_key_encrypted
+                    .map(|value| value.to_vec())
+                    .or_else(|| {
+                        existing
+                            .as_ref()
+                            .and_then(|settings| settings.gemini_api_key_encrypted.clone())
+                    })
+            };
 
             *self.last_upsert.lock().expect("last_upsert lock") = Some(LastUpsert {
                 enabled,
@@ -226,13 +362,23 @@ mod tests {
                     .map(|value| value.to_vec()),
                 clear_anthropic_api_key,
                 anthropic_model: anthropic_model.to_string(),
+                image_generation_enabled,
+                replace_gemini_api_key_encrypted: replace_gemini_api_key_encrypted
+                    .map(|value| value.to_vec()),
+                clear_gemini_api_key,
+                image_generation_model: image_generation_model.to_string(),
+                image_generation_art_style: image_generation_art_style.to_string(),
             });
 
             let saved = LlmSettings {
                 user_id,
                 enabled,
-                anthropic_api_key_encrypted: encrypted,
+                anthropic_api_key_encrypted: anthropic_encrypted,
                 anthropic_model: anthropic_model.to_string(),
+                image_generation_enabled,
+                gemini_api_key_encrypted: gemini_encrypted,
+                image_generation_model: image_generation_model.to_string(),
+                image_generation_art_style: image_generation_art_style.to_string(),
                 created_at: existing
                     .as_ref()
                     .map(|settings| settings.created_at)
@@ -318,6 +464,7 @@ mod tests {
                     anthropic_api_key: Some("sk-ant-test".into()),
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("claude-haiku-4-5-20251001".into()),
+                    ..Default::default()
                 },
             )
             .await
@@ -363,8 +510,7 @@ mod tests {
                 enabled: true,
                 anthropic_api_key_encrypted: Some(vec![1, 2, 3]),
                 anthropic_model: "claude-3-7-sonnet-latest".into(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                ..Default::default()
             });
 
         let view = service.load(user_id).await.expect("load");
@@ -391,8 +537,7 @@ mod tests {
                 enabled: true,
                 anthropic_api_key_encrypted: Some(vec![1, 2, 3]),
                 anthropic_model: "claude-3-7-sonnet-latest".into(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                ..Default::default()
             });
 
         let view = service
@@ -403,6 +548,7 @@ mod tests {
                     anthropic_api_key: None,
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("claude-3-7-sonnet-latest".into()),
+                    ..Default::default()
                 },
             )
             .await
@@ -435,8 +581,7 @@ mod tests {
                 enabled: true,
                 anthropic_api_key_encrypted: Some(vec![1, 2, 3]),
                 anthropic_model: "claude-3-7-sonnet-latest".into(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                ..Default::default()
             });
 
         let view = service
@@ -447,6 +592,7 @@ mod tests {
                     anthropic_api_key: None,
                     clear_anthropic_api_key: false,
                     anthropic_model: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -479,8 +625,7 @@ mod tests {
                 enabled: true,
                 anthropic_api_key_encrypted: Some(vec![1, 2, 3]),
                 anthropic_model: "claude-3-7-sonnet-latest".into(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                ..Default::default()
             });
 
         let view = service
@@ -491,6 +636,7 @@ mod tests {
                     anthropic_api_key: None,
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("   ".into()),
+                    ..Default::default()
                 },
             )
             .await
@@ -523,6 +669,7 @@ mod tests {
                     anthropic_api_key: Some("sk-ant-test-key".into()),
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("claude-haiku-4-5-20251001".into()),
+                    ..Default::default()
                 },
             )
             .await
@@ -554,6 +701,7 @@ mod tests {
                     anthropic_api_key: Some("sk-ant-test-key".into()),
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("claude-haiku-4-5-20251001".into()),
+                    ..Default::default()
                 },
             )
             .await
@@ -583,6 +731,172 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_encrypts_gemini_key_and_persists_image_generation_settings() {
+        let repo = Arc::new(FakeLlmSettingsRepository::new());
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
+        let service = SettingsService::new(repo.clone(), secret_box.clone());
+        let user_id = Uuid::new_v4();
+
+        let view = service
+            .save(
+                user_id,
+                SaveLlmSettingsInput {
+                    image_generation_enabled: true,
+                    gemini_api_key: Some("AIza-test-key".into()),
+                    image_generation_model: Some(DEFAULT_IMAGE_GENERATION_MODEL.into()),
+                    image_generation_art_style: Some(
+                        "Flat paper-cut collage in coral and cobalt".into(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("save");
+
+        let last_upsert = repo
+            .last_upsert
+            .lock()
+            .expect("last_upsert lock")
+            .take()
+            .expect("last_upsert");
+        let encrypted = last_upsert
+            .replace_gemini_api_key_encrypted
+            .expect("encrypted Gemini key");
+
+        assert!(last_upsert.image_generation_enabled);
+        assert!(!last_upsert.clear_gemini_api_key);
+        assert_eq!(
+            last_upsert.image_generation_model,
+            DEFAULT_IMAGE_GENERATION_MODEL
+        );
+        assert_eq!(
+            last_upsert.image_generation_art_style,
+            "Flat paper-cut collage in coral and cobalt"
+        );
+        assert_ne!(encrypted, b"AIza-test-key");
+        assert_eq!(
+            secret_box.decrypt(&encrypted).expect("decrypt"),
+            "AIza-test-key"
+        );
+        assert!(view.image_generation_enabled);
+        assert!(view.has_gemini_api_key);
+        assert_eq!(view.image_generation_model, DEFAULT_IMAGE_GENERATION_MODEL);
+        assert_eq!(
+            view.image_generation_art_style,
+            "Flat paper-cut collage in coral and cobalt"
+        );
+
+        let image_settings = service
+            .get_image_generation_settings(user_id)
+            .await
+            .expect("get image settings")
+            .expect("configured image settings");
+        assert_eq!(image_settings.api_key, "AIza-test-key");
+        assert_eq!(image_settings.model, DEFAULT_IMAGE_GENERATION_MODEL);
+        assert_eq!(
+            image_settings.art_style,
+            "Flat paper-cut collage in coral and cobalt"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_gemini_key_removes_image_generation_access() {
+        let repo = Arc::new(FakeLlmSettingsRepository::new());
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
+        let service = SettingsService::new(repo.clone(), secret_box);
+        let user_id = Uuid::new_v4();
+
+        service
+            .save(
+                user_id,
+                SaveLlmSettingsInput {
+                    image_generation_enabled: true,
+                    gemini_api_key: Some("AIza-test-key".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("initial save");
+        let view = service
+            .save(
+                user_id,
+                SaveLlmSettingsInput {
+                    image_generation_enabled: true,
+                    clear_gemini_api_key: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("clear save");
+
+        assert!(!view.has_gemini_api_key);
+        assert!(
+            service
+                .get_image_generation_settings(user_id)
+                .await
+                .expect("get image settings")
+                .is_none()
+        );
+        let last_upsert = repo
+            .last_upsert
+            .lock()
+            .expect("last_upsert lock")
+            .take()
+            .expect("last_upsert");
+        assert!(last_upsert.clear_gemini_api_key);
+        assert!(last_upsert.replace_gemini_api_key_encrypted.is_none());
+    }
+
+    #[tokio::test]
+    async fn blank_art_style_uses_the_default_style() {
+        let repo = Arc::new(FakeLlmSettingsRepository::new());
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
+        let service = SettingsService::new(repo, secret_box);
+
+        let view = service
+            .save(
+                Uuid::new_v4(),
+                SaveLlmSettingsInput {
+                    image_generation_art_style: Some("   ".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("save");
+
+        assert_eq!(view.image_generation_art_style, DEFAULT_IMAGE_ART_STYLE);
+    }
+
+    #[tokio::test]
+    async fn save_rejects_unsupported_image_generation_model() {
+        let repo = Arc::new(FakeLlmSettingsRepository::new());
+        let secret_box = Arc::new(SecretBox::new(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        ));
+        let service = SettingsService::new(repo, secret_box);
+
+        let error = service
+            .save(
+                Uuid::new_v4(),
+                SaveLlmSettingsInput {
+                    image_generation_model: Some("gemini-3.1-flash-image".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .err()
+            .expect("invalid image model should fail");
+
+        assert!(matches!(error, DomainError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
     async fn save_rejects_new_unsupported_model_values() {
         let repo = Arc::new(FakeLlmSettingsRepository::new());
         let secret_box = Arc::new(SecretBox::new(
@@ -598,6 +912,7 @@ mod tests {
                     anthropic_api_key: None,
                     clear_anthropic_api_key: false,
                     anthropic_model: Some("claude-3-7-sonnet-latest".into()),
+                    ..Default::default()
                 },
             )
             .await

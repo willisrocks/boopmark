@@ -5,6 +5,7 @@ mod domain;
 mod web;
 
 use adapters::anthropic::AnthropicEnricher;
+use adapters::gemini_image::GeminiImageGenerator;
 use adapters::login::google::GoogleLoginProvider;
 use adapters::login::local_password::LocalPasswordLoginProvider;
 use adapters::metadata::fallback::FallbackMetadataExtractor;
@@ -50,6 +51,9 @@ async fn main() {
         .expect("Failed to run migrations");
 
     let db = Arc::new(PostgresPool::new(pool));
+    let secret_box = Arc::new(SecretBox::new(&config.llm_settings_encryption_key));
+    let settings_service = Arc::new(SettingsService::new(db.clone(), secret_box));
+    let image_generator = Arc::new(GeminiImageGenerator::new(settings_service.clone()));
 
     let html_extractor = HtmlMetadataExtractor::new();
     let mut extractors: Vec<Box<dyn domain::ports::metadata::MetadataExtractor>> =
@@ -99,12 +103,10 @@ async fn main() {
                 format!("{}/uploads/images", config.app_url),
             ));
             (
-                Bookmarks::Local(Arc::new(BookmarkService::new(
-                    db.clone(),
-                    metadata,
-                    storage,
-                    screenshot.clone(),
-                ))),
+                Bookmarks::Local(Arc::new(
+                    BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
+                        .with_image_generator(image_generator.clone()),
+                )),
                 images,
             )
         }
@@ -139,20 +141,16 @@ async fn main() {
                 images_public_url,
             ));
             (
-                Bookmarks::S3(Arc::new(BookmarkService::new(
-                    db.clone(),
-                    metadata,
-                    storage,
-                    screenshot.clone(),
-                ))),
+                Bookmarks::S3(Arc::new(
+                    BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
+                        .with_image_generator(image_generator),
+                )),
                 images,
             )
         }
     };
 
     let auth_service = Arc::new(AuthService::new(db.clone(), db.clone(), db.clone()));
-    let secret_box = Arc::new(SecretBox::new(&config.llm_settings_encryption_key));
-    let settings_service = Arc::new(SettingsService::new(db.clone(), secret_box));
     let enricher: Arc<dyn LlmEnricher> = Arc::new(AnthropicEnricher::new());
     let enrichment_service = Arc::new(EnrichmentService::new(
         metadata_for_enrichment,

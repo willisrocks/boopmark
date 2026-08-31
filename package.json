@@ -1,10 +1,15 @@
 {
+  "name": "boopmark",
+  "version": "0.8.0",
   "private": true,
   "scripts": {
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:extension": "node --test extensions/chrome/tests/*.test.js",
     "extension:package": "node scripts/chrome-store/package.mjs",
+    "release:sync": "node scripts/release/sync-version.mjs",
+    "release:verify": "node scripts/release/verify-version.mjs",
+    "test:release": "node --test scripts/release/tests/*.test.mjs",
     "extension:store-assets": "node scripts/chrome-store/render-assets.mjs",
     "extension:browser": "node scripts/e2e/chrome-browser.mjs",
     "extension:fixture": "node scripts/e2e/chrome-fixture.mjs"

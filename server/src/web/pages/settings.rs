@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::app::bookmarks::ProgressEvent;
 use crate::domain::error::DomainError;
-use crate::domain::llm_settings::ANTHROPIC_MODEL_OPTIONS;
+use crate::domain::llm_settings::{ANTHROPIC_MODEL_OPTIONS, IMAGE_GENERATION_MODEL_OPTIONS};
 use crate::web::extractors::AuthUser;
 use crate::web::pages::shared::UserView;
 use crate::web::state::{AppState, Bookmarks};
@@ -75,6 +75,10 @@ struct SettingsPage {
     llm_enabled: bool,
     has_anthropic_api_key: bool,
     anthropic_model_options: Vec<ModelOptionView>,
+    image_generation_enabled: bool,
+    has_gemini_api_key: bool,
+    image_generation_model_options: Vec<ModelOptionView>,
+    image_generation_art_style: String,
     success_message: Option<String>,
     api_keys: Vec<ApiKeyView>,
 }
@@ -97,6 +101,11 @@ struct SettingsForm {
     delete_anthropic_api_key: Option<String>,
     anthropic_api_key: Option<String>,
     anthropic_model: Option<String>,
+    image_generation_enabled: Option<String>,
+    delete_gemini_api_key: Option<String>,
+    gemini_api_key: Option<String>,
+    image_generation_model: Option<String>,
+    image_generation_art_style: Option<String>,
 }
 
 fn build_model_option_views(current_model: &str) -> Vec<ModelOptionView> {
@@ -126,6 +135,17 @@ fn build_model_option_views(current_model: &str) -> Vec<ModelOptionView> {
     options
 }
 
+fn build_image_model_option_views(current_model: &str) -> Vec<ModelOptionView> {
+    IMAGE_GENERATION_MODEL_OPTIONS
+        .iter()
+        .map(|option| ModelOptionView {
+            label: option.label.to_string(),
+            value: option.value.to_string(),
+            selected: option.value == current_model,
+        })
+        .collect()
+}
+
 async fn settings_page(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -137,7 +157,8 @@ async fn settings_page(
     match (settings_result, keys_result) {
         (Ok(settings), Ok(keys)) => {
             let email = user.email.clone();
-            let anthropic_model = settings.anthropic_model;
+            let anthropic_model = settings.anthropic_model.clone();
+            let image_generation_model = settings.image_generation_model.clone();
             let api_keys: Vec<ApiKeyView> = keys.into_iter().map(Into::into).collect();
 
             render(&SettingsPage {
@@ -147,6 +168,12 @@ async fn settings_page(
                 llm_enabled: settings.enabled,
                 has_anthropic_api_key: settings.has_anthropic_api_key,
                 anthropic_model_options: build_model_option_views(&anthropic_model),
+                image_generation_enabled: settings.image_generation_enabled,
+                has_gemini_api_key: settings.has_gemini_api_key,
+                image_generation_model_options: build_image_model_option_views(
+                    &image_generation_model,
+                ),
+                image_generation_art_style: settings.image_generation_art_style,
                 success_message: query
                     .saved
                     .filter(|value| value == "1")
@@ -175,6 +202,15 @@ async fn save_settings(
         (submitted_api_key, false)
     };
 
+    let image_generation_enabled = form.image_generation_enabled.is_some();
+    let delete_gemini_key = form.delete_gemini_api_key.is_some();
+    let submitted_gemini_api_key = form.gemini_api_key.filter(|value| !value.trim().is_empty());
+    let (gemini_api_key, clear_gemini_api_key) = if delete_gemini_key {
+        (None, true)
+    } else {
+        (submitted_gemini_api_key, false)
+    };
+
     match state
         .settings
         .save(
@@ -184,6 +220,11 @@ async fn save_settings(
                 anthropic_api_key,
                 clear_anthropic_api_key,
                 anthropic_model: form.anthropic_model,
+                image_generation_enabled,
+                gemini_api_key,
+                clear_gemini_api_key,
+                image_generation_model: form.image_generation_model,
+                image_generation_art_style: form.image_generation_art_style,
             },
         )
         .await
@@ -337,7 +378,7 @@ pub fn routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_model_option_views;
+    use super::{build_image_model_option_views, build_model_option_views};
 
     #[test]
     fn official_models_render_only_the_three_official_options() {
@@ -369,5 +410,18 @@ mod tests {
         assert_eq!(options[1].value, "claude-opus-4-6");
         assert_eq!(options[2].value, "claude-sonnet-4-6");
         assert_eq!(options[3].value, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn image_generation_model_selector_contains_only_nano_banana_2_lite() {
+        let options = build_image_model_option_views("gemini-3.1-flash-lite-image");
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(
+            options[0].label,
+            "Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)"
+        );
+        assert_eq!(options[0].value, "gemini-3.1-flash-lite-image");
+        assert!(options[0].selected);
     }
 }

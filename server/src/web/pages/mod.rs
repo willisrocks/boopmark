@@ -34,6 +34,10 @@ pub fn routes() -> Router<AppState> {
                     bookmarks::MAX_IMAGE_UPLOAD_BYTES + 1024 * 1024,
                 )),
         )
+        .route(
+            "/bookmarks/{id}/image/generate",
+            post(bookmarks::generate_image),
+        )
         .route("/bookmarks/{id}/suggest", post(bookmarks::edit_suggest))
         .route("/invite/{token}", get(invite::invite_landing))
         .route("/admin", get(admin::admin_page))
