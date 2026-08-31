@@ -30,6 +30,7 @@ pub struct ImageGenerationSettings {
     pub art_style: String,
 }
 
+#[derive(Default)]
 pub struct SaveLlmSettingsInput {
     pub enabled: bool,
     pub anthropic_api_key: Option<String>,
@@ -40,22 +41,6 @@ pub struct SaveLlmSettingsInput {
     pub clear_gemini_api_key: bool,
     pub image_generation_model: Option<String>,
     pub image_generation_art_style: Option<String>,
-}
-
-impl Default for SaveLlmSettingsInput {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            anthropic_api_key: None,
-            clear_anthropic_api_key: false,
-            anthropic_model: None,
-            image_generation_enabled: false,
-            gemini_api_key: None,
-            clear_gemini_api_key: false,
-            image_generation_model: None,
-            image_generation_art_style: None,
-        }
-    }
 }
 
 impl<R> SettingsService<R>

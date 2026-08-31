@@ -127,7 +127,7 @@ impl ImageGenerator for GeminiImageGenerator {
                 .into_iter()
                 .flat_map(|candidate| candidate.content.parts)
                 .filter_map(|part| part.inline_data)
-                .last()
+                .next_back()
                 .ok_or_else(|| DomainError::Internal("Gemini returned no image".into()))?;
             if !inline.mime_type.starts_with("image/") {
                 return Err(DomainError::Internal(

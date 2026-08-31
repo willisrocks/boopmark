@@ -5,6 +5,9 @@ use uuid::Uuid;
 #[trait_variant::make(Send)]
 pub trait LlmSettingsRepository: Send + Sync {
     async fn get(&self, user_id: Uuid) -> Result<Option<LlmSettings>, DomainError>;
+    // Settings are persisted atomically so the independently clearable encrypted keys
+    // cannot drift from their enable flags and model selections.
+    #[allow(clippy::too_many_arguments)]
     async fn upsert(
         &self,
         user_id: Uuid,
