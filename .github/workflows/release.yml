@@ -93,14 +93,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
+        with: {ref: "${{ github.sha }}"}
       - uses: dtolnay/rust-toolchain@stable
         with: {components: "rustfmt, clippy"}
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with: {node-version: 24, cache: npm}
       - run: npm ci
-      - run: npm run release:verify -- ${{ needs.prepare.outputs.version }}
+      - name: Apply release version
+        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
+        run: |
+          node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
+          cargo metadata --format-version=1 --no-deps >/dev/null
+          npm run release:verify -- "$VERSION"
       - run: npm run test:release
       - run: npm run test:extension
       - run: cargo fmt --all -- --check
@@ -121,11 +126,18 @@ jobs:
           - {target: aarch64-unknown-linux-gnu, os: ubuntu-latest}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
+        with: {ref: "${{ github.sha }}"}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
       - uses: dtolnay/rust-toolchain@stable
         with: {targets: "${{ matrix.target }}"}
       - uses: Swatinem/rust-cache@v2
         with: {key: "release-${{ matrix.target }}"}
+      - name: Apply release version
+        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
+        run: |
+          node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
+          cargo metadata --format-version=1 --no-deps >/dev/null
       - if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: cargo install cross --version 0.2.5
       - if: matrix.target != 'aarch64-unknown-linux-gnu'
@@ -149,10 +161,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
+        with: {ref: "${{ github.sha }}"}
       - uses: actions/setup-node@v4
         with: {node-version: 24, cache: npm}
       - run: npm ci
+      - name: Apply release version
+        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
+        run: node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
       - run: npm run test:extension
       - name: Build Web Store and sideload packages
         env: {VERSION: "${{ needs.prepare.outputs.version }}"}
@@ -178,10 +193,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
+        with: {ref: "${{ github.sha }}"}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - name: Apply release version
+        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
+        run: node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
       - run: brew install xcodegen
       - run: swift test --package-path mobile/ios/BoopmarkShared
-      - run: bash scripts/release/package-ios.sh "${{ needs.prepare.outputs.version }}"
+      - name: Build iOS release packages
+        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
+        run: bash scripts/release/package-ios.sh "$VERSION"
       - uses: actions/upload-artifact@v4
         with:
           name: ios-${{ needs.prepare.outputs.version }}
@@ -197,7 +219,12 @@ jobs:
     permissions: {contents: read, packages: write}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
+        with: {ref: "${{ github.sha }}"}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - name: Apply release version
+        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
+        run: node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -226,9 +253,12 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
+        with: {ref: "${{ github.sha }}"}
       - uses: actions/setup-node@v4
         with: {node-version: 24}
+      - name: Apply release version
+        env: {VERSION: "${{ needs.prepare.outputs.version }}"}
+        run: node scripts/release/apply-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
       - run: npm install --global @railway/cli@4.42.1
       - name: Deploy exact release source
         env:
@@ -262,7 +292,7 @@ jobs:
     permissions: {contents: write}
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ needs.prepare.outputs.sha }}"}
+        with: {ref: "${{ github.sha }}"}
       - uses: actions/setup-node@v4
         with: {node-version: 24}
       - uses: actions/download-artifact@v4
