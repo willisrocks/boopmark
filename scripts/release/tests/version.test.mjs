@@ -87,9 +87,9 @@ test('release workflow builds immutable source and promotes latest after product
   assert.match(dispatcher, /if test -n "\$REUSE_SHA"; then[\s\S]*?SHA="\$REUSE_SHA"/);
   assert.match(workflow, /container:\n[\s\S]*?needs: \[metadata, quality\]/);
   assert.match(workflow, /publish:\n[\s\S]*?needs: \[metadata, deploy\]/);
-  for (const pattern of ['cli-*', 'chrome-*', 'ios-*']) {
-    assert.match(workflow, new RegExp(`pattern: ${pattern.replace('*', '\\*')}`));
-  }
+  assert.match(workflow, /pattern: cli-\*/);
+  assert.match(workflow, /pattern: chrome-\*/);
+  assert.match(workflow, /pattern: ios-\*/);
   assert.doesNotMatch(workflow, /with: \{path: release, merge-multiple: true\}/);
   assert.match(workflow, /gh release create[\s\S]*?--draft/);
   assert.match(workflow, /gh release upload[\s\S]*?--clobber/);
