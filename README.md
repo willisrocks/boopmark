@@ -22,7 +22,22 @@
 
 ### For humans
 
-Tell your AI coding agent:
+The official clients connect to `https://boopmark.com` or your own HTTPS Boopmark server. Before connecting, sign in to the web app and create an API key under **Settings → API keys**.
+
+#### Chrome extension
+
+1. Open [Boopmark in the Chrome Web Store](https://chromewebstore.google.com/detail/boopmark/oncfakjpmbjhmahhccdboahbhgjihgbo) in Chrome 127 or later and select **Add to Chrome**.
+2. Optionally pin Boopmark from Chrome's Extensions menu for one-click access.
+3. Select the Boopmark toolbar icon, enter your server URL and API key, and grant access to that server when Chrome asks.
+4. On any page you want to save, select the toolbar icon, review the captured or AI-suggested metadata, and select **Add Bookmark**.
+
+#### iPhone app
+
+1. Install [Boopmark from the App Store](https://apps.apple.com/app/boopmark/id6805968959). The app requires iOS 16 or later.
+2. Open Boopmark, enter your server URL and API key in **Settings**, then select **Save connection**.
+3. To save a page from Safari or another app, open its Share Sheet and select **Boopmark**. If Boopmark is not shown, enable it from the Share Sheet's **More** or **Edit Actions** screen.
+
+For self-hosting or CLI setup, tell your AI coding agent:
 
 > Read https://raw.githubusercontent.com/willisrocks/boopmark/main/README.md and follow the installation instructions.
 
@@ -79,6 +94,7 @@ Use the `boop` CLI to save and search bookmarks:
 - Save and tag bookmarks with automatic metadata extraction
 - Full-text search across titles, descriptions, and URLs
 - AI enrichment via Anthropic Claude (auto-tagging, descriptions)
+- Chrome extension and native iPhone app with a Share Extension
 - CLI client (`boop`) for terminal and agent-based bookmark management
 - Claude Code skill support — agents can save and search bookmarks
 - Optional screenshot capture via Playwright sidecar
