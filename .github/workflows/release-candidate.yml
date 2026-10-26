@@ -276,7 +276,11 @@ jobs:
               # from the machine config is read here, so no secret can reach the log.
               analysis=$(printf '%s' "$machines" | jq -r --arg tag ":$VERSION" '
                 def epoch: (.timestamp // null)
-                  | try (sub("\\.[0-9]+"; "") | fromdateiso8601) catch null;
+                  | if type == "number"
+                    then (if . > 1e11 then (. / 1000 | floor) else . end)
+                    elif type == "string"
+                    then (try (sub("\\.[0-9]+"; "") | fromdateiso8601) catch null)
+                    else null end;
                 .[]
                 | select((.config.image // "") | contains($tag))
                 # Fly updates a machine in place, so .events still holds the exit of the

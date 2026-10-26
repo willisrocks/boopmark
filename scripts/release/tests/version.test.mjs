@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -122,4 +123,47 @@ test('release workflow builds immutable source and promotes latest after product
   assert.doesNotMatch(deployJob, /deadline_seconds/);
   assert.doesNotMatch(deployJob, /select\(\.state \| IN/);
   assert.doesNotMatch(deployJob, /^\s*flyctl (secrets|config)\b/m);
+  // Fly machine events carry epoch milliseconds, not ISO-8601.
+  assert.match(deployJob, /if type == "number"/);
+  assert.match(deployJob, /then \(if \. > 1e11 then \(\. \/ 1000 \| floor\) else \. end\)/);
+});
+
+test('deploy diagnostics judge breakage by the newest Fly machine event', async (t) => {
+  if (spawnSync('jq', ['--version'], { encoding: 'utf8' }).error?.code === 'ENOENT') {
+    return t.skip('jq is not installed');
+  }
+
+  const repository = resolve(import.meta.dirname, '../../..');
+  const workflow = await readFile(resolve(repository, '.github/workflows/release-candidate.yml'), 'utf8');
+  const program = workflow.match(/(def epoch:[\s\S]*?)' 2>\/dev\/null/)?.[1];
+  assert.ok(program, 'the analysis jq program is in the workflow');
+
+  const image = 'ghcr.io/willisrocks/boopmark:1.2.3';
+  const stepStart = 1793000000;
+  const analyze = (events) => {
+    const machines = [{ id: 'm1', state: 'started', config: { image }, instance_id: 'i1', events }];
+    const result = spawnSync('jq', ['-r', '--arg', 'tag', ':1.2.3', program], {
+      input: JSON.stringify(machines),
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const [type, exitCode, newestAt] = result.stdout.trim().split('\t').slice(3);
+    return { type, exitCode: Number(exitCode), newestAt: Number(newestAt) };
+  };
+
+  // Fly stops the previous release in place, so its exit stays in `.events`: an exit
+  // of 143 older than the step start must not count, even after a newer start.
+  const stale = analyze([
+    { type: 'exit', timestamp: (stepStart - 600) * 1000, request: { exit_event: { exit_code: 143 } } },
+    { type: 'start', timestamp: (stepStart + 5) * 1000 },
+  ]);
+  assert.deepEqual(stale, { type: 'start', exitCode: 0, newestAt: stepStart + 5 });
+
+  // Events arrive newest-first, so array order must not be trusted.
+  const died = analyze([
+    { type: 'exit', timestamp: (stepStart + 30) * 1000, request: { exit_event: { exit_code: 1 } } },
+    { type: 'start', timestamp: stepStart * 1000 },
+  ]);
+  assert.deepEqual(died, { type: 'exit', exitCode: 1, newestAt: stepStart + 30 });
+  assert.ok(died.newestAt >= stepStart);
 });
