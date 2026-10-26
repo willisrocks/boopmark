@@ -206,23 +206,144 @@ jobs:
       - uses: superfly/flyctl-actions/setup-flyctl@1.6
         with: {version: 0.4.115}
       - name: Deploy exact release image
+        id: deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           IMAGE: ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}
         run: flyctl deploy --app boopmark --image "$IMAGE"
-      - name: Verify exact production version
-        env: {VERSION: "${{ needs.metadata.outputs.version }}"}
+      - name: Report Fly state when the deploy step fails
+        if: failure() && steps.deploy.outcome == 'failure'
+        env: {FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}"}
         run: |
+          app=boopmark
+          flyctl status --app "$app" 2>&1 || true
+          flyctl machine list --app "$app" --json 2>/dev/null |
+            jq -r '.[] | [.id, .state, (.config.image // ""), (.instance_id // "")] | @tsv' || true
+          flyctl logs --app "$app" --no-tail 2>&1 | tail -n 60 || true
+      - name: Verify exact production version
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          app=boopmark
+          started_at=$(date -u +%s)
+          # Fail fast only on evidence that the release cannot start: a machine in a
+          # failed state, a non-zero exit event, a crash loop, or no release machine
+          # left running. The first minute is boot grace, so a slow but healthy
+          # rollout keeps the full ten-minute window either way.
+          grace_seconds=60
+          declare -A instance_seen=()
+          declare -A restarts=()
+
+          machine_rows() {
+            flyctl machine list --app "$app" --json 2>/dev/null |
+              jq -r '.[] | [.id, .state, (.config.image // ""), (.instance_id // "")] | @tsv' || true
+          }
+
+          # Only app-owned output: the machine state, the projected machine table and
+          # the app's own log lines. Never dump secret or machine config listings.
+          fail_with_diagnostics() {
+            echo "::error::$1" >&2
+            echo "--- flyctl status ---" >&2
+            flyctl status --app "$app" 2>&1 || true
+            flyctl status --app "$app" --json 2>/dev/null |
+              jq -r '(.Machines // {}) | to_entries[] | "\(.key)\t\(.value.state // "unknown")"' 2>/dev/null || true
+            echo "--- flyctl machine list (id state image instance) ---" >&2
+            machine_rows >&2
+            # Diagnostic only: the release image may be recorded by digest, so this
+            # never decides the outcome.
+            flyctl machine list --app "$app" --json 2>/dev/null |
+              jq -r --arg tag ":$VERSION" \
+                '"machines reporting an image: \([.[]? | select((.config.image // "") != "")] | length), carrying \($tag): \([.[]? | select((.config.image // "") | contains($tag))] | length)"' 2>/dev/null || true
+            echo "--- last app log lines ---" >&2
+            flyctl logs --app "$app" --no-tail 2>&1 | tail -n 60 || true
+            exit 1
+          }
+
           for _ in $(seq 1 60); do
             if curl --fail --silent --show-error --connect-timeout 5 --max-time 10 "https://boopmark.com/health?release=$GITHUB_RUN_ID" | grep -qx ok && \
                curl --fail --silent --show-error --connect-timeout 5 --max-time 10 "https://boopmark.com/version?release=$GITHUB_RUN_ID" | \
                  jq --exit-status --arg version "$VERSION" '.version == $version' >/dev/null; then
+              echo "production serves $VERSION"
               exit 0
             fi
+
+            elapsed=$SECONDS
+            if (( elapsed >= grace_seconds )); then
+              machines=$(flyctl machine list --app "$app" --json 2>/dev/null || printf '[]')
+              # Release machines only, with the last exit event's code. Nothing else
+              # from the machine config is read here, so no secret can reach the log.
+              analysis=$(printf '%s' "$machines" | jq -r --arg tag ":$VERSION" '
+                def epoch: (.timestamp // null)
+                  | if type == "number"
+                    then (if . > 1e11 then (. / 1000 | floor) else . end)
+                    elif type == "string"
+                    then (try (sub("\\.[0-9]+"; "") | fromdateiso8601) catch null)
+                    else null end;
+                .[]
+                | select((.config.image // "") | contains($tag))
+                # Fly updates a machine in place, so .events still holds the exit of the
+                # process from the previous release (often 143/137/-1 after a deploy
+                # stop). Only the newest event can describe this rollout, so sort by
+                # time instead of trusting array order.
+                | (([(.events // [])[] | select(.timestamp != null)]
+                     | sort_by(epoch // 0) | last) // {}) as $newest
+                | [ .id,
+                    (.state // "unknown"),
+                    (.instance_id // ""),
+                    ($newest.type // ""),
+                    (($newest.request.exit_event.exit_code
+                      // $newest.request.exit_event.guest_exit_code // 0) | tostring),
+                    (($newest | epoch) // 0 | tostring)
+                  ]
+                | @tsv' 2>/dev/null || true)
+
+              matched=0
+              running=0
+              in_flight=0
+              breakage=""
+              while IFS=$'\t' read -r id state instance event_type exit_code event_at; do
+                test -n "${id:-}" || continue
+                matched=$(( matched + 1 ))
+                case "$state" in
+                  created|starting|started) running=$(( running + 1 )) ;;
+                  stopping|replacing) in_flight=$(( in_flight + 1 )) ;;
+                  failed|crashed|destroyed) breakage="${breakage:+$breakage; }$id is $state" ;;
+                esac
+                # The current instance died and nothing started since, in this rollout.
+                if test "${event_type:-}" = exit && test "${exit_code:-0}" -ne 0 &&
+                   test "${event_at:-0}" -ge "$started_at"; then
+                  breakage="${breakage:+$breakage; }$id exited with code $exit_code"
+                fi
+                # A machine whose instance id keeps changing is crash looping.
+                case "$state" in
+                  starting|started)
+                    previous=${instance_seen[$id]:-}
+                    instance_seen[$id]=$instance
+                    if test -n "$previous" && test "$previous" != "$instance"; then
+                      restarts[$id]=$(( ${restarts[$id]:-0} + 1 ))
+                      if (( restarts[$id] >= 2 )); then
+                        breakage="${breakage:+$breakage; }$id restarted ${restarts[$id]} times"
+                      fi
+                    fi ;;
+                esac
+              done <<< "$analysis"
+
+              if test -n "$breakage"; then
+                fail_with_diagnostics "release machine cannot start: $breakage"
+              fi
+              # Scaled-to-zero machines are normal (auto_stop_machines with
+              # min_machines_running=1), so this fails only when no release machine
+              # is serving and none is still moving.
+              if (( matched > 0 && running == 0 && in_flight == 0 )); then
+                fail_with_diagnostics "no machine is running the $VERSION release"
+              fi
+            fi
+
             sleep 10
           done
-          echo "production did not report release $VERSION within 10 minutes" >&2
-          exit 1
+          fail_with_diagnostics "production did not serve $VERSION within 10 minutes"
 
   publish:
     name: Stage GitHub Release
