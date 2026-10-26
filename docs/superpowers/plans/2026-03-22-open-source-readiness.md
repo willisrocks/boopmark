@@ -1,5 +1,7 @@
 # Open Source Readiness Implementation Plan
 
+> **Historical note:** production now runs on Fly.io, not the hosting described below. See [docs/releasing.md](../../releasing.md).
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prepare Boopmark for open-sourcing by abstracting the screenshot service into a proper port, improving the self-hosting experience, and adding comprehensive documentation.
