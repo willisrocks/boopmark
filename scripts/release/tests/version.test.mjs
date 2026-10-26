@@ -108,7 +108,14 @@ test('release workflow builds immutable source and promotes latest after product
   assert.match(deployJob, /flyctl machine list --app "\$app" --json/);
   assert.match(deployJob, /flyctl logs --app "\$app" --no-tail/);
   assert.match(deployJob, /grace_seconds=60/);
+  assert.match(deployJob, /started_at=\$\(date -u \+%s\)/);
   assert.match(deployJob, /request\.exit_event\.exit_code/);
+  // Fly updates machines in place, so events still hold the previous release's exit:
+  // only the newest event, newer than this step, may be treated as breakage.
+  assert.match(deployJob, /sort_by\(epoch \/\/ 0\) \| last/);
+  assert.match(deployJob, /test "\$\{event_type:-\}" = exit/);
+  assert.match(deployJob, /-ge "\$started_at"/);
+  assert.doesNotMatch(deployJob, /select\(\.type == "exit"\)\] \| last/);
   assert.match(deployJob, /failed\|crashed/);
   assert.match(deployJob, /last app log lines/);
   assert.match(deployJob, /within 10 minutes/);

@@ -227,6 +227,7 @@ jobs:
         run: |
           set -euo pipefail
           app=boopmark
+          started_at=$(date -u +%s)
           # Fail fast only on evidence that the release cannot start: a machine in a
           # failed state, a non-zero exit event, a crash loop, or no release machine
           # left running. The first minute is boot grace, so a slow but healthy
@@ -274,13 +275,23 @@ jobs:
               # Release machines only, with the last exit event's code. Nothing else
               # from the machine config is read here, so no secret can reach the log.
               analysis=$(printf '%s' "$machines" | jq -r --arg tag ":$VERSION" '
+                def epoch: (.timestamp // null)
+                  | try (sub("\\.[0-9]+"; "") | fromdateiso8601) catch null;
                 .[]
                 | select((.config.image // "") | contains($tag))
+                # Fly updates a machine in place, so .events still holds the exit of the
+                # process from the previous release (often 143/137/-1 after a deploy
+                # stop). Only the newest event can describe this rollout, so sort by
+                # time instead of trusting array order.
+                | (([(.events // [])[] | select(.timestamp != null)]
+                     | sort_by(epoch // 0) | last) // {}) as $newest
                 | [ .id,
                     (.state // "unknown"),
                     (.instance_id // ""),
-                    (([(.events // [])[] | select(.type == "exit")] | last)
-                      | (.request.exit_event.exit_code // .request.exit_event.guest_exit_code // 0))
+                    ($newest.type // ""),
+                    (($newest.request.exit_event.exit_code
+                      // $newest.request.exit_event.guest_exit_code // 0) | tostring),
+                    (($newest | epoch) // 0 | tostring)
                   ]
                 | @tsv' 2>/dev/null || true)
 
@@ -288,7 +299,7 @@ jobs:
               running=0
               in_flight=0
               breakage=""
-              while IFS=$'\t' read -r id state instance exit_code; do
+              while IFS=$'\t' read -r id state instance event_type exit_code event_at; do
                 test -n "${id:-}" || continue
                 matched=$(( matched + 1 ))
                 case "$state" in
@@ -296,7 +307,9 @@ jobs:
                   stopping|replacing) in_flight=$(( in_flight + 1 )) ;;
                   failed|crashed|destroyed) breakage="${breakage:+$breakage; }$id is $state" ;;
                 esac
-                if test "${exit_code:-0}" -ne 0; then
+                # The current instance died and nothing started since, in this rollout.
+                if test "${event_type:-}" = exit && test "${exit_code:-0}" -ne 0 &&
+                   test "${event_at:-0}" -ge "$started_at"; then
                   breakage="${breakage:+$breakage; }$id exited with code $exit_code"
                 fi
                 # A machine whose instance id keeps changing is crash looping.
