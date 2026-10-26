@@ -111,7 +111,7 @@ add-user *ARGS:
 
 deploy:
     just css-build
-    railway up
+    fly deploy
 
 # Run install script tests
 test-install:

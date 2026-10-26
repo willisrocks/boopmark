@@ -203,18 +203,13 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
-      - run: npm install --global @railway/cli@4.42.1
-      - name: Deploy exact release source
+      - uses: superfly/flyctl-actions/setup-flyctl@1.6
+        with: {version: 0.4.115}
+      - name: Deploy exact release image
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          VERSION: ${{ needs.metadata.outputs.version }}
-          ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
-          SERVICE: ${{ vars.RAILWAY_SERVICE_ID }}
-        run: |
-          railway variable --set "BOOPMARK_VERSION=$VERSION" --skip-deploys \
-            --service "$SERVICE" --environment "$ENVIRONMENT"
-          railway up --ci --environment "$ENVIRONMENT" --service "$SERVICE" \
-            --message "Release v$VERSION (${{ github.sha }})"
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          IMAGE: ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}
+        run: flyctl deploy --app boopmark --image "$IMAGE"
       - name: Verify exact production version
         env: {VERSION: "${{ needs.metadata.outputs.version }}"}
         run: |

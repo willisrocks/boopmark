@@ -2,7 +2,7 @@
 
 The manually invoked GitHub Actions workflow named **Release** is the only supported production release path. Run it from `main` and choose exactly one semantic increment: `patch`, `minor`, or `major`.
 
-The highest stable `vX.Y.Z` Git tag is the authoritative previous release. The workflow feeds that version and the selected increment to `npm version`, then synchronizes the result into the Rust server and CLI, Chrome manifest, iOS app, Share Extension, and XcodeGen project. It creates a `release/vX.Y.Z` candidate source branch, then explicitly dispatches the release-candidate workflow on that exact branch. Every build and the Railway deployment therefore execute the candidate commit as their trusted `github.sha`. A failed, unpublished candidate can be replaced safely on retry; the final release tag is immutable. The release is tagged and published only after the production version endpoint reports the expected version. This tag-based baseline keeps later releases correct even though protected `main` is not mutated by a release run.
+The highest stable `vX.Y.Z` Git tag is the authoritative previous release. The workflow feeds that version and the selected increment to `npm version`, then synchronizes the result into the Rust server and CLI, Chrome manifest, iOS app, Share Extension, and XcodeGen project. It creates a `release/vX.Y.Z` candidate source branch, then explicitly dispatches the release-candidate workflow on that exact branch. Every build and the Fly.io deployment therefore execute the candidate commit as their trusted `github.sha`. A failed, unpublished candidate can be replaced safely on retry; the final release tag is immutable. The release is tagged and published only after the production version endpoint reports the expected version. This tag-based baseline keeps later releases correct even though protected `main` is not mutated by a release run.
 
 ## Start a release
 
@@ -12,7 +12,7 @@ From GitHub, open **Actions → Release → Run workflow**, select `patch`, `min
 just release patch
 ```
 
-Only one release runs at a time. A release stops before publication if tests, artifact validation, the container push, the Railway deployment, or the exact-version production check fails.
+Only one release runs at a time. A release stops before publication if tests, artifact validation, the container push, the Fly.io deployment, or the exact-version production check fails.
 
 ## Published assets
 
@@ -25,7 +25,7 @@ Each GitHub Release contains:
 - `INSTALL.md` with version-specific instructions.
 - `SHA256SUMS` covering every downloadable artifact.
 
-The workflow publishes `ghcr.io/willisrocks/boopmark:X.Y.Z`, deploys the same release commit to Railway production, and verifies both `/health` and `/version` at `https://boopmark.com`. Only after production passes does it update `ghcr.io/willisrocks/boopmark:latest` and publish the GitHub Release.
+The workflow publishes `ghcr.io/willisrocks/boopmark:X.Y.Z`, deploys that exact image to the Fly.io production app `boopmark`, and verifies both `/health` and `/version` at `https://boopmark.com`. Only after production passes does it update `ghcr.io/willisrocks/boopmark:latest` and publish the GitHub Release.
 
 ## Retry a failed release
 
@@ -33,10 +33,8 @@ If a run fails before publishing its tag, correct the problem on `main` and invo
 
 ## Required GitHub configuration
 
-The `production` environment uses one environment-scoped secret and two repository variables:
+The `production` environment uses one environment-scoped secret:
 
-- Secret `RAILWAY_TOKEN` (a Railway project token scoped to production)
-- Variable `RAILWAY_ENVIRONMENT_ID`
-- Variable `RAILWAY_SERVICE_ID`
+- Secret `FLY_API_TOKEN` (a Fly.io deploy token scoped to the `boopmark` app)
 
 The workflow uses the built-in `GITHUB_TOKEN` for release branches, tags, GitHub Releases, and GHCR packages.
