@@ -227,13 +227,11 @@ jobs:
         run: |
           set -euo pipefail
           app=boopmark
-          # A build that cannot start must fail the release in about two minutes with
-          # its own logs, instead of polling 502s for ten minutes. The first minute is
-          # boot grace; after that a machine that is not running, a machine that is
-          # crash looping, or a machine that never reports this release is diagnosed
-          # immediately, and two minutes is the hard cap either way.
+          # Fail fast only on evidence that the release cannot start: a machine in a
+          # failed state, a non-zero exit event, a crash loop, or no release machine
+          # left running. The first minute is boot grace, so a slow but healthy
+          # rollout keeps the full ten-minute window either way.
           grace_seconds=60
-          deadline_seconds=120
           declare -A instance_seen=()
           declare -A restarts=()
 
@@ -252,6 +250,11 @@ jobs:
               jq -r '(.Machines // {}) | to_entries[] | "\(.key)\t\(.value.state // "unknown")"' 2>/dev/null || true
             echo "--- flyctl machine list (id state image instance) ---" >&2
             machine_rows >&2
+            # Diagnostic only: the release image may be recorded by digest, so this
+            # never decides the outcome.
+            flyctl machine list --app "$app" --json 2>/dev/null |
+              jq -r --arg tag ":$VERSION" \
+                '"machines reporting an image: \([.[]? | select((.config.image // "") != "")] | length), carrying \($tag): \([.[]? | select((.config.image // "") | contains($tag))] | length)"' 2>/dev/null || true
             echo "--- last app log lines ---" >&2
             flyctl logs --app "$app" --no-tail 2>&1 | tail -n 60 || true
             exit 1
@@ -268,46 +271,62 @@ jobs:
             elapsed=$SECONDS
             if (( elapsed >= grace_seconds )); then
               machines=$(flyctl machine list --app "$app" --json 2>/dev/null || printf '[]')
-              rows=$(printf '%s' "$machines" |
-                jq -r '.[] | [.id, .state, (.config.image // ""), (.instance_id // "")] | @tsv' 2>/dev/null || true)
-              counts=$(printf '%s' "$machines" | jq -r --arg tag ":$VERSION" \
-                '([.[] | select((.config.image // "") != "")] | length) as $known |
-                 ([.[] | select((.config.image // "") | contains($tag))] | length) as $tagged |
-                 "\($known) \($tagged)"' 2>/dev/null || printf '0 0')
-              known=${counts% *}
-              tagged=${counts#* }
-              broken=$(printf '%s' "$machines" | jq -r --arg tag ":$VERSION" \
-                '[.[] | select((.config.image // "") | contains($tag))
-                      | select(.state | IN("created", "starting", "started") | not)
-                      | "\(.id) is \(.state)"] | join(", ")' 2>/dev/null || true)
+              # Release machines only, with the last exit event's code. Nothing else
+              # from the machine config is read here, so no secret can reach the log.
+              analysis=$(printf '%s' "$machines" | jq -r --arg tag ":$VERSION" '
+                .[]
+                | select((.config.image // "") | contains($tag))
+                | [ .id,
+                    (.state // "unknown"),
+                    (.instance_id // ""),
+                    (([(.events // [])[] | select(.type == "exit")] | last)
+                      | (.request.exit_event.exit_code // .request.exit_event.guest_exit_code // 0))
+                  ]
+                | @tsv' 2>/dev/null || true)
 
-              if test -n "$broken"; then
-                fail_with_diagnostics "release machine is not running: $broken"
-              fi
-              if test "${known:-0}" -gt 0 && test "${tagged:-0}" -eq 0; then
-                fail_with_diagnostics "no machine was replaced with the $VERSION release image"
-              fi
-
-              # A machine whose instance id keeps changing is crash looping.
-              while IFS=$'\t' read -r id _state _image instance; do
+              matched=0
+              running=0
+              in_flight=0
+              breakage=""
+              while IFS=$'\t' read -r id state instance exit_code; do
                 test -n "${id:-}" || continue
-                previous=${instance_seen[$id]:-}
-                instance_seen[$id]=$instance
-                if test -n "$previous" && test "$previous" != "$instance"; then
-                  restarts[$id]=$(( ${restarts[$id]:-0} + 1 ))
-                  if (( restarts[$id] >= 2 )); then
-                    fail_with_diagnostics "machine $id restarted ${restarts[$id]} times without serving $VERSION"
-                  fi
+                matched=$(( matched + 1 ))
+                case "$state" in
+                  created|starting|started) running=$(( running + 1 )) ;;
+                  stopping|replacing) in_flight=$(( in_flight + 1 )) ;;
+                  failed|crashed|destroyed) breakage="${breakage:+$breakage; }$id is $state" ;;
+                esac
+                if test "${exit_code:-0}" -ne 0; then
+                  breakage="${breakage:+$breakage; }$id exited with code $exit_code"
                 fi
-              done <<< "$rows"
+                # A machine whose instance id keeps changing is crash looping.
+                case "$state" in
+                  starting|started)
+                    previous=${instance_seen[$id]:-}
+                    instance_seen[$id]=$instance
+                    if test -n "$previous" && test "$previous" != "$instance"; then
+                      restarts[$id]=$(( ${restarts[$id]:-0} + 1 ))
+                      if (( restarts[$id] >= 2 )); then
+                        breakage="${breakage:+$breakage; }$id restarted ${restarts[$id]} times"
+                      fi
+                    fi ;;
+                esac
+              done <<< "$analysis"
+
+              if test -n "$breakage"; then
+                fail_with_diagnostics "release machine cannot start: $breakage"
+              fi
+              # Scaled-to-zero machines are normal (auto_stop_machines with
+              # min_machines_running=1), so this fails only when no release machine
+              # is serving and none is still moving.
+              if (( matched > 0 && running == 0 && in_flight == 0 )); then
+                fail_with_diagnostics "no machine is running the $VERSION release"
+              fi
             fi
 
-            if (( elapsed >= deadline_seconds )); then
-              fail_with_diagnostics "production did not serve $VERSION within ${deadline_seconds}s"
-            fi
             sleep 10
           done
-          fail_with_diagnostics "production did not serve $VERSION"
+          fail_with_diagnostics "production did not serve $VERSION within 10 minutes"
 
   publish:
     name: Stage GitHub Release

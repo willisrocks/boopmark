@@ -100,7 +100,7 @@ test('release workflow builds immutable source and promotes latest after product
   assert.match(workflow, /gh release edit[\s\S]*?--draft=false/);
 
   // A deploy that cannot start must report the Fly machine state and app logs and
-  // fail in about two minutes, not poll 502s for ten.
+  // fail on positive evidence, without shortening the healthy ten-minute window.
   const deployJob = workflow.slice(workflow.indexOf('\n  deploy:\n'), workflow.indexOf('\n  publish:\n'));
   assert.match(deployJob, /id: deploy/);
   assert.match(deployJob, /FLY_API_TOKEN/);
@@ -108,8 +108,11 @@ test('release workflow builds immutable source and promotes latest after product
   assert.match(deployJob, /flyctl machine list --app "\$app" --json/);
   assert.match(deployJob, /flyctl logs --app "\$app" --no-tail/);
   assert.match(deployJob, /grace_seconds=60/);
-  assert.match(deployJob, /deadline_seconds=120/);
-  assert.match(deployJob, /IN\("created", "starting", "started"\)/);
-  assert.doesNotMatch(deployJob, /within 10 minutes/);
+  assert.match(deployJob, /request\.exit_event\.exit_code/);
+  assert.match(deployJob, /failed\|crashed/);
+  assert.match(deployJob, /last app log lines/);
+  assert.match(deployJob, /within 10 minutes/);
+  assert.doesNotMatch(deployJob, /deadline_seconds/);
+  assert.doesNotMatch(deployJob, /select\(\.state \| IN/);
   assert.doesNotMatch(deployJob, /^\s*flyctl (secrets|config)\b/m);
 });
