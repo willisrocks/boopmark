@@ -1,5 +1,7 @@
 # Open Source Readiness Design
 
+> **Historical note:** production now runs on Fly.io, not the hosting described below. See [docs/releasing.md](../../releasing.md).
+
 **Date:** 2026-03-22
 **Goal:** Prepare Boopmark for open-sourcing with clean abstractions, great self-hosting experience, and comprehensive documentation.
 

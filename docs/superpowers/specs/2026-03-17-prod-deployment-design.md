@@ -1,5 +1,7 @@
 # Production Deployment Design
 
+> **Historical note:** production now runs on Fly.io, not the hosting described below. See [docs/releasing.md](../../releasing.md).
+
 Deploy boopmark to production via `just deploy` using Neon (Postgres), Railway (app hosting), and Cloudflare (DNS/CDN/R2 storage).
 
 ## Services & Responsibilities

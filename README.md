@@ -157,13 +157,48 @@ just bootstrap you@example.com --password yourpassword
 
 The server runs on port 4000. Add a reverse proxy (nginx, Caddy) for HTTPS.
 
-### Railway + Neon
+### Fly.io
 
-1. Provision a [Neon](https://neon.tech) Postgres database and copy the connection string.
-2. Fork this repo and connect it to [Railway](https://railway.app).
-3. Set environment variables in Railway: `DATABASE_URL`, `SESSION_SECRET`, `LLM_SETTINGS_ENCRYPTION_KEY`, `APP_URL`.
-4. Deploy. Railway runs `./boopmark-server` which auto-migrates on startup.
-5. Create your first user via the Railway shell: `./hash_password yourpassword` then insert directly.
+The committed `fly.toml` is a working starting point: app `boopmark`, internal port 4000, an HTTP check on `/health`, and one always-on 512 MB machine. Rename `app` to your own Fly app name, or generate the config yourself with `fly launch --no-deploy` and keep the port (`4000`) and `/health` check.
+
+1. **Postgres.** Create a Fly Managed Postgres cluster with `fly mpg create`, then attach it with `fly mpg attach <cluster-id> -a <your-app>` — that sets the `DATABASE_URL` secret for you. Any other Postgres URL works too: `fly secrets set DATABASE_URL='postgres://...'`.
+
+2. **Required configuration.** Variable names only; the values are yours to generate and none belong in git:
+
+   ```bash
+   fly secrets set \
+     SESSION_SECRET="$(openssl rand -hex 32)" \
+     LLM_SETTINGS_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+     APP_URL="https://your-app.fly.dev"
+   ```
+
+3. **Deploy from source.** `fly deploy` builds the Dockerfile and rolls a new machine; the server migrates on startup.
+
+4. **Or deploy a release image.** To run a published build instead of building locally, use the versioned GHCR image:
+
+   ```bash
+   fly deploy --image ghcr.io/willisrocks/boopmark:0.8.2
+   ```
+
+   Pick the version from [Releases](https://github.com/willisrocks/boopmark/releases); every release publishes `ghcr.io/willisrocks/boopmark:X.Y.Z`.
+
+5. **Create the first owner.** The image ships the `hash_password` helper. Hash a password inside the machine, then insert the result with psql:
+
+   ```bash
+   fly ssh console -a your-app        # inside: echo '<password>' | ./hash_password
+   fly mpg connect <cluster-id>       # psql against the attached cluster
+   ```
+
+   ```sql
+   INSERT INTO users (email, name, password_hash, role)
+   VALUES ('you@example.com', 'You', '<hash>', 'owner');
+   ```
+
+   With any other Postgres, use your own client against `DATABASE_URL`.
+
+6. **Custom domain and TLS.** `fly certs add boopmark.yourdomain.com` prints the DNS records to create, and `fly certs show boopmark.yourdomain.com` reports certificate status. Once the certificate is issued, point `APP_URL` at the public URL (`fly secrets set APP_URL='https://boopmark.yourdomain.com'` restarts the machine).
+
+7. **Image storage.** With `STORAGE_BACKEND=local`, uploads land on the machine's ephemeral disk and are lost on redeploy. For a real instance set `STORAGE_BACKEND=s3` plus the `S3_*` variables (RustFS, AWS S3, or Cloudflare R2).
 
 ### Optional: S3 Storage (RustFS)
 

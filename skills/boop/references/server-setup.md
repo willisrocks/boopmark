@@ -40,12 +40,24 @@ Boopmark is invite-only. As the owner:
 - Create invite links for your users
 - Users claim invites and create their accounts
 
-## Cloud Deployment (Railway + Neon)
+## Cloud Deployment (Fly.io)
 
-1. Provision a [Neon](https://neon.tech) Postgres database
-2. Fork the repo and connect to [Railway](https://railway.app)
-3. Set env vars: `DATABASE_URL`, `SESSION_SECRET`, `LLM_SETTINGS_ENCRYPTION_KEY`, `APP_URL`
-4. Deploy — the server auto-migrates on startup
+Production runs on Fly.io. The committed `fly.toml` targets app `boopmark`, internal port 4000, and a `/health` check; change `app` to your own name (or run `fly launch --no-deploy`) and keep the port and check.
+
+1. Postgres: `fly mpg create` then `fly mpg attach <cluster-id> -a <your-app>` sets `DATABASE_URL`, or set your own with `fly secrets set DATABASE_URL='postgres://...'`
+2. Required secrets (names only, generate the values yourself):
+   ```bash
+   fly secrets set \
+     SESSION_SECRET="$(openssl rand -hex 32)" \
+     LLM_SETTINGS_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+     APP_URL="https://your-app.fly.dev"
+   ```
+3. Deploy: `fly deploy`, or run a published image with `fly deploy --image ghcr.io/willisrocks/boopmark:<version>`
+4. Custom domain: `fly certs add your.domain`, create the DNS records it prints, then set `APP_URL` to the public URL
+5. Uploads need S3 (`STORAGE_BACKEND=s3` + `S3_*`) — `STORAGE_BACKEND=local` writes to the machine's ephemeral disk
+6. Create the first owner: `fly ssh console`, run `echo '<password>' | ./hash_password`, then insert the hash with `role = 'owner'` into `users` (use `fly mpg connect <cluster-id>`, or any client against `DATABASE_URL`)
+
+See the README's [Fly.io section](../../../README.md#flyio) for the full walkthrough.
 
 ## Configuration Reference
 

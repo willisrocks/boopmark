@@ -1,5 +1,7 @@
 # Production Deployment Implementation Plan
 
+> **Historical note:** production now runs on Fly.io, not the hosting described below. See [docs/releasing.md](../../releasing.md).
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deploy boopmark to production using Neon (Postgres), Railway (app), and Cloudflare (DNS/CDN/R2) with a single `just deploy` command.

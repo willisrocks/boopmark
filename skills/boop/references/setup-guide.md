@@ -41,8 +41,8 @@ boop config set-server http://localhost:4000
 # Hosted instance with a custom domain
 boop config set-server https://boopmark.yourdomain.com
 
-# Railway or other cloud deployment
-boop config set-server https://your-app.up.railway.app
+# Cloud deployment (e.g. Fly.io)
+boop config set-server https://your-app.fly.dev
 ```
 
 ### Get your API key
