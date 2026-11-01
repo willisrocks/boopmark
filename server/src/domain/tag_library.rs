@@ -7,9 +7,8 @@
 //! one, and a canonical that only lives in the alias table (its bookmarks
 //! were deleted) is listed with a count of zero.
 
-use crate::domain::tag_alias::TagAlias;
+use crate::domain::tag_alias::{TagAlias, TagIndex};
 use crate::domain::tag_normalize::compact_key;
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 /// One canonical tag: its bookmark count and the other spellings that
@@ -47,23 +46,24 @@ impl TagSort {
     }
 }
 
-fn by_name(a: &TagRow, b: &TagRow) -> Ordering {
-    a.name
-        .to_lowercase()
-        .cmp(&b.name.to_lowercase())
-        .then_with(|| a.name.cmp(&b.name))
+/// A–Z ignoring case, then by exact spelling so the order is total.
+fn name_key(name: &str) -> (String, String) {
+    (name.to_lowercase(), name.to_string())
 }
 
-fn compare(sort: TagSort, a: &TagRow, b: &TagRow) -> Ordering {
-    match sort {
-        TagSort::MostUsed => b.count.cmp(&a.count).then_with(|| by_name(a, b)),
-        TagSort::Az => by_name(a, b),
-        TagSort::LeastUsed => a.count.cmp(&b.count).then_with(|| by_name(a, b)),
-    }
+/// The order of `sort`: by count (descending for most used), then A–Z.
+/// Computed once per row with `sort_by_cached_key`.
+fn sort_key(sort: TagSort, row: &TagRow) -> (i64, (String, String)) {
+    let count = match sort {
+        TagSort::MostUsed => -row.count,
+        TagSort::Az => 0,
+        TagSort::LeastUsed => row.count,
+    };
+    (count, name_key(&row.name))
 }
 
-/// Build the library from the tags on bookmarks and the alias table,
-/// sorted by most used.
+/// Build the library from the tags on bookmarks and the alias table, in no
+/// particular order; [`sort_rows`] orders it.
 pub fn library_rows(tag_counts: &[(String, i64)], aliases: &[TagAlias]) -> Vec<TagRow> {
     let mut rows: BTreeMap<&str, TagRow> = tag_counts
         .iter()
@@ -92,15 +92,13 @@ pub fn library_rows(tag_counts: &[(String, i64)], aliases: &[TagAlias]) -> Vec<T
     }
     let mut rows: Vec<TagRow> = rows.into_values().collect();
     for row in &mut rows {
-        row.aliases
-            .sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then(a.cmp(b)));
+        row.aliases.sort_by_cached_key(|a| name_key(a));
     }
-    sort_rows(&mut rows, TagSort::MostUsed);
     rows
 }
 
 pub fn sort_rows(rows: &mut [TagRow], sort: TagSort) {
-    rows.sort_by(|a, b| compare(sort, a, b));
+    rows.sort_by_cached_key(|r| sort_key(sort, r));
 }
 
 /// The `n` most used tags with bookmarks, skipping the active ones (they
@@ -110,7 +108,7 @@ pub fn top_tags<'a>(rows: &'a [TagRow], n: usize, active: &[String]) -> Vec<&'a 
         .iter()
         .filter(|r| r.count > 0 && !active.contains(&r.name))
         .collect();
-    used.sort_by(|a, b| compare(TagSort::MostUsed, a, b));
+    used.sort_by_cached_key(|r| sort_key(TagSort::MostUsed, r));
     used.truncate(n);
     used
 }
@@ -134,17 +132,21 @@ impl Query {
         self.lower.is_empty()
     }
 
+    fn compact_matches(&self, spelling: &str) -> bool {
+        !self.compact.is_empty() && compact_key(spelling).contains(&self.compact)
+    }
+
     fn matches(&self, spelling: &str) -> bool {
-        spelling.to_lowercase().contains(&self.lower)
-            || (!self.compact.is_empty() && compact_key(spelling).contains(&self.compact))
+        spelling.to_lowercase().contains(&self.lower) || self.compact_matches(spelling)
     }
 
     /// 0: the name starts with the query; 1: the name contains it;
     /// 2: only an alias matches.
     fn rank(&self, row: &TagRow) -> Option<u8> {
-        if row.name.to_lowercase().starts_with(&self.lower) {
+        let name = row.name.to_lowercase();
+        if name.starts_with(&self.lower) {
             Some(0)
-        } else if self.matches(&row.name) {
+        } else if name.contains(&self.lower) || self.compact_matches(&row.name) {
             Some(1)
         } else if row.aliases.iter().any(|a| self.matches(a)) {
             Some(2)
@@ -182,14 +184,14 @@ pub fn search<'a>(rows: &'a [TagRow], query: &str, limit: usize) -> Vec<&'a TagR
             }
         })
         .collect();
-    hits.sort_by(|(ra, a), (rb, b)| ra.cmp(rb).then_with(|| compare(TagSort::MostUsed, a, b)));
+    hits.sort_by_cached_key(|(rank, r)| (*rank, sort_key(TagSort::MostUsed, r)));
     hits.truncate(limit);
     hits.into_iter().map(|(_, r)| r).collect()
 }
 
 /// Up to `max` aliases to show next to a tag, the ones matching `query`
-/// first, plus how many more there are.
-pub fn alias_preview<'a>(row: &'a TagRow, query: &str, max: usize) -> (Vec<&'a str>, usize) {
+/// first, as one line: `"a, b, +2"`.
+pub fn alias_preview(row: &TagRow, query: &str, max: usize) -> String {
     let query = Query::new(query);
     let (mut shown, rest): (Vec<&str>, Vec<&str>) = row
         .aliases
@@ -199,7 +201,11 @@ pub fn alias_preview<'a>(row: &'a TagRow, query: &str, max: usize) -> (Vec<&'a s
     shown.extend(rest);
     let more = shown.len().saturating_sub(max);
     shown.truncate(max);
-    (shown, more)
+    let mut text = shown.join(", ");
+    if more > 0 {
+        text.push_str(&format!(", +{more}"));
+    }
+    text
 }
 
 /// Where a manual rename or merge goes, after checking it against the
@@ -221,24 +227,20 @@ pub enum MergeRefusal {
     SpellingOf { source: String, canonical: String },
 }
 
-/// The tag that owns `key` now: the alias row if there is one, otherwise
-/// the most used tag with that key.
-fn key_owner<'a>(rows: &'a [TagRow], aliases: &'a [TagAlias], key: &str) -> Option<&'a str> {
-    if let Some(alias) = aliases.iter().find(|a| a.alias_key == key) {
-        return Some(&alias.canonical);
-    }
-    rows.iter()
-        .filter(|r| compact_key(&r.name) == key)
-        .max_by(|a, b| compare(TagSort::MostUsed, b, a))
-        .map(|r| r.name.as_str())
+fn alias_owner<'a>(aliases: &'a [TagAlias], key: &str) -> Option<&'a str> {
+    aliases
+        .iter()
+        .find(|a| a.alias_key == key)
+        .map(|a| a.canonical.as_str())
 }
 
 /// Check a manual merge of `sources` into `target` against the library.
 /// A merge repoints the compact keys of its sources and target, so neither
 /// may belong to a tag the user did not name: a target that is another
 /// tag's spelling (`js` when `js` -> `javascript`) is redirected to that tag,
-/// and a source whose spelling belongs elsewhere is refused. Every source
-/// must still be a tag, so a stale page cannot repoint an alias.
+/// the way the write path would resolve it, and a source whose spelling
+/// belongs elsewhere is refused. Every source must still be a tag, so a
+/// stale page cannot repoint an alias.
 pub fn resolve_merge_target(
     rows: &[TagRow],
     aliases: &[TagAlias],
@@ -248,9 +250,15 @@ pub fn resolve_merge_target(
     if !sources.iter().all(|s| rows.iter().any(|r| &r.name == s)) {
         return Err(MergeRefusal::Stale);
     }
-    let target = match key_owner(rows, aliases, &compact_key(target)) {
-        Some(owner) if owner != target && !sources.iter().any(|s| s == owner) => MergeTarget {
-            canonical: owner.to_string(),
+    let counts: Vec<(String, i64)> = rows
+        .iter()
+        .filter(|r| r.count > 0)
+        .map(|r| (r.name.clone(), r.count))
+        .collect();
+    let owner = TagIndex::new(aliases, &counts).canonical_for_key(&compact_key(target));
+    let target = match owner {
+        Some(owner) if owner != target && !sources.contains(&owner) => MergeTarget {
+            canonical: owner,
             redirected: true,
         },
         _ => MergeTarget {
@@ -259,11 +267,7 @@ pub fn resolve_merge_target(
         },
     };
     for source in sources {
-        let owner = aliases
-            .iter()
-            .find(|a| a.alias_key == compact_key(source))
-            .map(|a| a.canonical.as_str());
-        if let Some(owner) = owner
+        if let Some(owner) = alias_owner(aliases, &compact_key(source))
             && owner != source
             && owner != target.canonical
             && !sources.iter().any(|s| s == owner)
@@ -324,7 +328,8 @@ mod tests {
 
     #[test]
     fn rows_join_counts_and_aliases_and_keep_alias_only_canonicals() {
-        let rows = library();
+        let mut rows = library();
+        sort_rows(&mut rows, TagSort::MostUsed);
         let summary: Vec<(&str, i64, Vec<&str>)> = rows
             .iter()
             .map(|r| {
@@ -456,11 +461,12 @@ mod tests {
                 "autonomous agents".into(),
             ],
         };
+        assert_eq!(alias_preview(&row, "", 2), "agentic ai, AI bots, +2");
+        assert_eq!(alias_preview(&row, "bot", 1), "AI bots, +3");
         assert_eq!(
-            alias_preview(&row, "", 2),
-            (vec!["agentic ai", "AI bots"], 2)
+            alias_preview(&row, "", 4),
+            "agentic ai, AI bots, Agentic-AI, autonomous agents"
         );
-        assert_eq!(alias_preview(&row, "bot", 1), (vec!["AI bots"], 3));
     }
 
     fn merge_library() -> (Vec<TagRow>, Vec<TagAlias>) {

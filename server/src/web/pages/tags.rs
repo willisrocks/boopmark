@@ -13,13 +13,12 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::tag_alias::{
-    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMerge,
-};
+use crate::domain::tag_alias::{ChangeKind, ProposalStatus, TagAlias, TagChangeBatch, TagMerge};
 use crate::domain::tag_library::{
     MergeRefusal, TagRow, TagSort, alias_preview, filter_rows, library_rows, resolve_merge_target,
     search, sort_rows, top_tags,
 };
+use crate::domain::tag_normalize::clean_tag;
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
 use crate::web::pages::shared::UserView;
@@ -117,7 +116,6 @@ struct TagOption {
     name: String,
     count: i64,
     aliases: String,
-    more_aliases: usize,
     active: bool,
     url: String,
 }
@@ -150,16 +148,12 @@ pub async fn search_tags(
     };
     let options = search(&rows, &q, SEARCH_LIMIT)
         .into_iter()
-        .map(|row| {
-            let (aliases, more_aliases) = alias_preview(row, &q, ALIAS_PREVIEW);
-            TagOption {
-                name: row.name.clone(),
-                count: row.count,
-                aliases: aliases.join(", "),
-                more_aliases,
-                active: active.contains(&row.name),
-                url: bookmarks_url(&toggled(&active, &row.name)),
-            }
+        .map(|row| TagOption {
+            name: row.name.clone(),
+            count: row.count,
+            aliases: alias_preview(row, &q, ALIAS_PREVIEW),
+            active: active.contains(&row.name),
+            url: bookmarks_url(&toggled(&active, &row.name)),
         })
         .collect();
     render(&SearchResults {
@@ -191,13 +185,7 @@ struct LibraryRow {
     name: String,
     count: i64,
     aliases: String,
-    more_aliases: usize,
     filter_url: String,
-}
-
-struct PendingView {
-    spellings: usize,
-    groups: usize,
 }
 
 struct BatchView {
@@ -207,7 +195,6 @@ struct BatchView {
     when: String,
     bookmarks: String,
     undone: bool,
-    can_undo: bool,
 }
 
 struct Flash {
@@ -245,14 +232,27 @@ impl Flash {
     }
 }
 
+/// Which responses carry the `<datalist>` of tag names for the merge
+/// dialog. It only changes after a merge or undo, so filter and sort
+/// requests leave it out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TagNames {
+    /// Filter or sort: the page's list is still current.
+    Skip,
+    /// Full page: `library.html` renders it.
+    Page,
+    /// After a change: the fragment replaces it out of band.
+    Refresh,
+}
+
 struct LibraryBody {
     q: String,
     sort: &'static str,
-    tag_count: usize,
-    alias_count: usize,
+    summary: String,
     rows: Vec<LibraryRow>,
     all_names: Vec<String>,
-    pending: Option<PendingView>,
+    refresh_names: bool,
+    pending: Option<String>,
     batches: Vec<BatchView>,
     flash: Option<Flash>,
 }
@@ -289,7 +289,7 @@ fn kind_label(kind: ChangeKind) -> &'static str {
     }
 }
 
-fn plural(n: u64, word: &str) -> String {
+fn plural(n: usize, word: &str) -> String {
     if n == 1 {
         format!("1 {word}")
     } else {
@@ -319,15 +319,18 @@ fn merges_summary(merges: &[TagMerge]) -> String {
     parts.join("; ")
 }
 
+fn bookmarks_changed(batch: &TagChangeBatch) -> String {
+    plural(batch.summary.bookmarks_changed as usize, "bookmark")
+}
+
 fn batch_view(batch: &TagChangeBatch) -> BatchView {
     BatchView {
         id: batch.id,
         kind: kind_label(batch.kind),
         summary: merges_summary(&batch.summary.merges),
         when: batch.created_at.format("%b %d, %Y %H:%M").to_string(),
-        bookmarks: plural(batch.summary.bookmarks_changed, "bookmark"),
+        bookmarks: bookmarks_changed(batch),
         undone: batch.undone_at.is_some(),
-        can_undo: batch.undone_at.is_none(),
     }
 }
 
@@ -358,47 +361,56 @@ async fn library_body(
     state: &AppState,
     user_id: Uuid,
     view: &LibraryView,
+    names: TagNames,
     flash: Option<Flash>,
 ) -> Result<LibraryBody, DomainError> {
-    let svc = &state.tag_aliases;
-    let (mut rows, batches, pending) = tokio::try_join!(
+    let (rows, batches, pending) = tokio::try_join!(
         load_rows(state, user_id),
         recent_batches(state, user_id),
-        svc.list_proposals(user_id, Some(ProposalStatus::Pending)),
+        state
+            .tag_aliases
+            .list_proposals(user_id, Some(ProposalStatus::Pending)),
     )?;
     let q = view.q.as_deref().unwrap_or_default().trim().to_string();
     let sort = TagSort::parse(view.sort.as_deref().unwrap_or_default());
 
-    let tag_count = rows.len();
     let alias_count = rows.iter().map(|r| r.aliases.len()).sum();
-    let mut all_names: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
-    all_names.sort_by_key(|n| n.to_lowercase());
+    let summary = format!(
+        "{} · {} folded in as aliases",
+        plural(rows.len(), "tag"),
+        plural(alias_count, "spelling")
+    );
+    let mut all_names: Vec<String> = Vec::new();
+    if names != TagNames::Skip {
+        all_names = rows.iter().map(|r| r.name.clone()).collect();
+        all_names.sort_by_cached_key(|n| n.to_lowercase());
+    }
+    let mut rows = filter_rows(rows, &q);
     sort_rows(&mut rows, sort);
-    let rows = filter_rows(rows, &q)
+    let rows = rows
         .into_iter()
-        .map(|row| {
-            let (aliases, more_aliases) = alias_preview(&row, &q, ALIAS_PREVIEW);
-            LibraryRow {
-                aliases: aliases.join(", "),
-                more_aliases,
-                filter_url: bookmarks_url(std::slice::from_ref(&row.name)),
-                name: row.name,
-                count: row.count,
-            }
+        .map(|row| LibraryRow {
+            aliases: alias_preview(&row, &q, ALIAS_PREVIEW),
+            filter_url: bookmarks_url(std::slice::from_ref(&row.name)),
+            name: row.name,
+            count: row.count,
         })
         .collect();
-    let pending = (!pending.is_empty()).then(|| PendingView {
-        spellings: pending.iter().map(|p| p.members.len()).sum(),
-        groups: pending.len(),
+    let pending = (!pending.is_empty()).then(|| {
+        format!(
+            "{} can merge into {}",
+            plural(pending.iter().map(|p| p.members.len()).sum(), "spelling"),
+            plural(pending.len(), "tag")
+        )
     });
 
     Ok(LibraryBody {
         q,
         sort: sort.as_str(),
-        tag_count,
-        alias_count,
+        summary,
         rows,
         all_names,
+        refresh_names: names == TagNames::Refresh,
         pending,
         batches: batches.iter().map(batch_view).collect(),
         flash,
@@ -409,30 +421,13 @@ async fn render_body(
     state: &AppState,
     user_id: Uuid,
     view: &LibraryView,
+    names: TagNames,
     flash: Option<Flash>,
 ) -> axum::response::Response {
-    match library_body(state, user_id, view, flash).await {
+    match library_body(state, user_id, view, names, flash).await {
         Ok(body) => render(&LibraryBodyFragment { body }),
         Err(e) => error_response(e),
     }
-}
-
-/// The normalization job runs lazily, once: on the first visit when the
-/// user has no deterministic proposal of any status yet. It only stores
-/// proposals; the review screen applies them.
-async fn ensure_normalization_proposals(
-    state: &AppState,
-    user_id: Uuid,
-) -> Result<(), DomainError> {
-    let svc = &state.tag_aliases;
-    let proposals = svc.list_proposals(user_id, None).await?;
-    if !proposals
-        .iter()
-        .any(|p| p.source == ProposalSource::Deterministic)
-    {
-        svc.propose_normalization(user_id).await?;
-    }
-    Ok(())
 }
 
 /// `GET /tags`: the full page, or only the table and history for an HTMX
@@ -444,13 +439,17 @@ pub async fn library(
     Query(view): Query<LibraryView>,
 ) -> axum::response::Response {
     if is_htmx(&headers) {
-        return render_body(&state, user.id, &view, None).await;
+        return render_body(&state, user.id, &view, TagNames::Skip, None).await;
     }
-    if let Err(e) = ensure_normalization_proposals(&state, user.id).await {
+    if let Err(e) = state
+        .tag_aliases
+        .ensure_normalization_proposals(user.id)
+        .await
+    {
         // The page still works without proposals; the banner just stays hidden.
         tracing::error!("tag normalization proposals failed: {e}");
     }
-    match library_body(&state, user.id, &view, None).await {
+    match library_body(&state, user.id, &view, TagNames::Page, None).await {
         Ok(body) => render(&LibraryPage {
             user: Some(user.into()),
             header_shows_bookmark_actions: false,
@@ -499,14 +498,14 @@ impl MergeForm {
             "merge" => ChangeKind::Merge,
             _ => return Err("Unknown tag change.".into()),
         };
-        let target = self.target.trim();
-        if target.is_empty() {
+        if self.target.trim().is_empty() {
             return Err("Enter a tag name.".into());
         }
-        // Tags are entered and filtered as comma-separated lists.
-        if target.contains(',') || target.chars().any(char::is_control) {
-            return Err("A tag name cannot contain commas or control characters.".into());
-        }
+        // The write path's rule (trimmed, no control characters), plus no
+        // commas: tags are entered and filtered as comma-separated lists.
+        let target = clean_tag(&self.target)
+            .filter(|t| !t.contains(','))
+            .ok_or("A tag name cannot contain commas or control characters.")?;
         if self.sources.is_empty() {
             return Err("Choose tags to merge.".into());
         }
@@ -591,7 +590,7 @@ pub async fn merge(
     let flash = apply_merge_form(&state, user.id, &form)
         .await
         .unwrap_or_else(|flash| flash);
-    render_body(&state, user.id, &form.view, Some(flash)).await
+    render_body(&state, user.id, &form.view, TagNames::Refresh, Some(flash)).await
 }
 
 async fn apply_merge_form(
@@ -628,10 +627,7 @@ async fn apply_merge_form(
         .map_err(Flash::from_error)?
     {
         Some(batch) => Ok(Flash::ok(
-            format!(
-                "{what} on {}.",
-                plural(batch.summary.bookmarks_changed, "bookmark")
-            ),
+            format!("{what} on {}.", bookmarks_changed(&batch)),
             Some(batch.id),
         )),
         None => Ok(Flash::ok("Nothing to change.".into(), None)),
@@ -656,7 +652,7 @@ pub async fn undo(
         ),
         Err(e) => Flash::from_error(e),
     };
-    render_body(&state, user.id, &view, Some(flash)).await
+    render_body(&state, user.id, &view, TagNames::Refresh, Some(flash)).await
 }
 
 #[cfg(test)]

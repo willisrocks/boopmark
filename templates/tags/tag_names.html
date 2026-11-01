@@ -1,0 +1,4 @@
+{# Tag names for the merge dialog's suggestions. Swapped out of band after a change. #}
+<datalist id="tag-names"{% if body.refresh_names %} hx-swap-oob="true"{% endif %}>
+    {% for name in body.all_names %}<option value="{{ name }}"></option>{% endfor %}
+</datalist>

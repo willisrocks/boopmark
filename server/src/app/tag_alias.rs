@@ -59,6 +59,21 @@ where
             .await
     }
 
+    /// Run [`Self::propose_normalization`] once per user: only when the user
+    /// has no deterministic proposal of any status yet, so applied or
+    /// dismissed groups are never proposed again. Pages that show proposals
+    /// call it lazily on first visit.
+    pub async fn ensure_normalization_proposals(&self, user_id: Uuid) -> Result<(), DomainError> {
+        let proposals = self.repo.list_proposals(user_id, None).await?;
+        if !proposals
+            .iter()
+            .any(|p| p.source == ProposalSource::Deterministic)
+        {
+            self.propose_normalization(user_id).await?;
+        }
+        Ok(())
+    }
+
     /// Apply the chosen pending proposals as one undoable batch.
     pub async fn apply_merge(
         &self,

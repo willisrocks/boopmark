@@ -144,6 +144,8 @@ test("a merge on /tags makes the old name an alias that the filter search finds"
   await expect(page.getByTestId("tag-flash")).toContainText("Merged “k8s” into “kubernetes” on 1 bookmark.");
   await expect(page.getByTestId("tag-merge-dialog")).toBeHidden();
   await expect(row(page, "k8s")).toHaveCount(0);
+  // The dialog suggestions are refreshed out of band.
+  await expect(page.locator(`#tag-names option[value="k8s"]`)).toHaveCount(0);
   await expect(row(page, "kubernetes").getByTestId("tag-row-count")).toHaveText("3");
   await expect(row(page, "kubernetes").getByTestId("tag-row-aliases")).toHaveText("k8s");
   await expect(page.getByTestId("tag-batch")).toHaveCount(batchesBefore + 1);
@@ -166,6 +168,7 @@ test("undo restores the merged tag", async ({ page }) => {
   await newest.getByTestId("tag-batch-undo").click();
   await expect(page.getByTestId("tag-flash")).toContainText("Undid merge: k8s → kubernetes.");
   await expect(row(page, "k8s").getByTestId("tag-row-count")).toHaveText("1");
+  await expect(page.locator(`#tag-names option[value="k8s"]`)).toHaveCount(1);
   await expect(row(page, "kubernetes").getByTestId("tag-row-count")).toHaveText("2");
   await expect(newest).toContainText("Undone");
   await expect(newest.getByTestId("tag-batch-undo")).toHaveCount(0);

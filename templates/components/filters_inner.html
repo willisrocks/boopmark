@@ -1,15 +1,16 @@
     <span class="hidden shrink-0 text-sm text-gray-400 sm:inline">Tags</span>
     {# One row: chips that do not fit wrap onto a second row that overflow hides; a chip alone on the row shrinks and truncates. #}
-    <div class="flex h-7 min-w-0 flex-1 flex-wrap items-center gap-2 overflow-hidden" data-testid="filter-tag-row">
+    <div class="flex h-7 min-w-0 flex-1 flex-wrap items-center gap-2 overflow-hidden"
+         data-testid="filter-tag-row"
+         hx-target="#bookmark-grid"
+         hx-push-url="true"
+         hx-include="[name='search'],[name='sort']">
         {% for chip in filter.active %}
         <button type="button"
                 data-testid="active-tag-chip"
                 aria-label="Remove tag filter {{ chip.name }}"
                 class="inline-flex h-7 min-w-0 max-w-[12rem] items-center gap-1 rounded-full border border-blue-500 bg-blue-600 px-3 text-xs text-white hover:bg-blue-700"
-                hx-get="{{ chip.url }}"
-                hx-target="#bookmark-grid"
-                hx-push-url="true"
-                hx-include="[name='search'],[name='sort']">
+                hx-get="{{ chip.url }}">
             <span class="min-w-0 truncate">{{ chip.name }}</span><span class="shrink-0" aria-hidden="true">&times;</span>
         </button>
         {% endfor %}
@@ -17,10 +18,7 @@
         <button type="button"
                 data-testid="filter-tag-chip"
                 class="{% if loop.index0 >= 4 %}hidden sm:inline-flex{% else %}inline-flex{% endif %} h-7 min-w-0 max-w-[12rem] items-center gap-1 rounded-full border border-gray-700 bg-[#1a1d2e] px-3 text-xs text-gray-300 hover:border-gray-500"
-                hx-get="{{ chip.url }}"
-                hx-target="#bookmark-grid"
-                hx-push-url="true"
-                hx-include="[name='search'],[name='sort']">
+                hx-get="{{ chip.url }}">
             <span class="min-w-0 truncate">{{ chip.name }}</span>{% if let Some(count) = chip.count %}<span class="shrink-0 text-gray-500">{{ count }}</span>{% endif %}
         </button>
         {% endfor %}

@@ -47,7 +47,8 @@
             </select>
         </div>
 
-        <div id="tag-library-body" class="mt-4">
+        {# Undo buttons inside inherit the target and the filter/sort values. #}
+        <div id="tag-library-body" class="mt-4" hx-target="#tag-library-body" hx-include="#tag-library-controls">
             {% include "tags/library_body.html" %}
         </div>
 
@@ -65,6 +66,8 @@
         </div>
     </section>
 </main>
+
+{% include "tags/tag_names.html" %}
 
 <dialog id="tag-merge-dialog"
         data-testid="tag-merge-dialog"
