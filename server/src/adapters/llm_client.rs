@@ -1,3 +1,7 @@
+// Nothing calls the port yet: tag management and article search move onto it
+// in their own changes. Remove this once they land.
+#![allow(dead_code)]
+
 //! Vendor adapters for the shared `LlmClient` port, plus the router that picks
 //! one per request. Each adapter only knows how to send one structured request
 //! to its vendor and read back JSON and token usage; prompts and schemas belong
@@ -529,7 +533,11 @@ impl LlamaCppLlmClient {
     }
 
     fn parse_response(payload: &Value, schema: &Value) -> Result<StructuredResponse, DomainError> {
-        if payload.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") {
+        if payload
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            == Some("length")
+        {
             return Err(DomainError::Internal(
                 "llama.cpp response hit max_tokens before finishing".into(),
             ));
@@ -600,9 +608,7 @@ impl LlmClientConfig {
             Some("none") => None,
             Some(level) if ANTHROPIC_EFFORTS.contains(&level) => Some(level.to_string()),
             Some(_) => {
-                tracing::warn!(
-                    "unknown ANTHROPIC_EFFORT, using {DEFAULT_ANTHROPIC_EFFORT}"
-                );
+                tracing::warn!("unknown ANTHROPIC_EFFORT, using {DEFAULT_ANTHROPIC_EFFORT}");
                 Some(DEFAULT_ANTHROPIC_EFFORT.to_string())
             }
         };
@@ -854,7 +860,10 @@ mod tests {
         );
         assert_eq!(body["output_config"]["effort"], "low");
         assert_eq!(body["system"], "sys");
-        assert_eq!(body["messages"], json!([{"role": "user", "content": "usr"}]));
+        assert_eq!(
+            body["messages"],
+            json!([{"role": "user", "content": "usr"}])
+        );
         assert_eq!(body["max_tokens"], 512);
         assert!(body.get("temperature").is_none());
 
@@ -1056,7 +1065,8 @@ mod tests {
             1
         );
 
-        let truncated = json!({"choices": [{"finish_reason": "length", "message": {"content": "{"}}]});
+        let truncated =
+            json!({"choices": [{"finish_reason": "length", "message": {"content": "{"}}]});
         assert!(matches!(
             LlamaCppLlmClient::parse_response(&truncated, &schema()),
             Err(DomainError::Internal(_))
@@ -1141,7 +1151,11 @@ mod tests {
         let openai = request(TextProvider::OpenAi, "gpt-5.6-luna");
         let anthropic = request(TextProvider::Anthropic, "claude-haiku-5-5");
         assert_eq!(
-            hosted.complete_structured(openai.clone()).await.unwrap().json,
+            hosted
+                .complete_structured(openai.clone())
+                .await
+                .unwrap()
+                .json,
             "openai"
         );
         assert_eq!(

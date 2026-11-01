@@ -145,6 +145,12 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `METADATA_FALLBACK_BACKEND` | — | `iframely` or `opengraph_io` (optional) |
 | `IFRAMELY_API_KEY` | — | Required when `METADATA_FALLBACK_BACKEND=iframely` |
 | `OPENGRAPH_IO_API_KEY` | — | Required when `METADATA_FALLBACK_BACKEND=opengraph_io` |
+| `EMBEDDING_BACKEND` | `disabled` | `disabled`, `openai` or `local` (`local` needs a build with `--features local-embeddings`) |
+| `EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model; `BAAI/bge-small-en-v1.5` by default for `local` |
+| `EMBEDDING_DIMENSIONS` | `1024` | Vector size for `openai` (default model only; otherwise the model's native size) |
+| `OPENAI_EMBEDDING_API_KEY` | — | Operator key, required when `EMBEDDING_BACKEND=openai` |
+| `ANTHROPIC_EFFORT` | `low` | Anthropic `effort` for models that accept it: `low`, `medium`, `high`, `xhigh`, `max` or `none` |
+| `LLM_BACKEND` | — | `llamacpp` sends every LLM request to `LLAMACPP_BASE_URL` (local development) |
 | `ENABLE_E2E_AUTH` | `0` | Set to `1` for E2E test auth bypass |
 
 ## Deployment Guides

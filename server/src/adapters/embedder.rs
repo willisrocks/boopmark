@@ -1,3 +1,7 @@
+// Nothing calls the port yet: tag management and article search move onto it
+// in their own changes. Remove this once they land.
+#![allow(dead_code)]
+
 //! Vendor adapters for the `Embedder` port, plus the router that builds the
 //! one selected by configuration:
 //!
@@ -59,7 +63,10 @@ impl std::fmt::Debug for EmbeddingSettings {
             .field("backend", &self.backend)
             .field("model", &self.model)
             .field("dimensions", &self.dimensions)
-            .field("openai_api_key", &self.openai_api_key.as_ref().map(|_| "set"))
+            .field(
+                "openai_api_key",
+                &self.openai_api_key.as_ref().map(|_| "set"),
+            )
             .finish()
     }
 }
@@ -172,8 +179,7 @@ impl EmbedderRouter {
             #[cfg(not(feature = "local-embeddings"))]
             EmbeddingBackend::Local => {
                 return Err(DomainError::InvalidInput(
-                    "EMBEDDING_BACKEND=local needs a build with --features local-embeddings"
-                        .into(),
+                    "EMBEDDING_BACKEND=local needs a build with --features local-embeddings".into(),
                 ));
             }
         };
@@ -328,8 +334,9 @@ impl OpenAiEmbedder {
             .bytes()
             .await
             .map_err(|error| transport_error(VENDOR, &error))?;
-        let payload: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| DomainError::Internal(format!("{VENDOR} returned a malformed response")))?;
+        let payload: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            DomainError::Internal(format!("{VENDOR} returned a malformed response"))
+        })?;
         let vectors = self.parse_vectors(&payload, batch.len())?;
         let tokens = payload
             .pointer("/usage/total_tokens")
@@ -340,7 +347,11 @@ impl OpenAiEmbedder {
 
     /// One normalised vector per input in input order, or an error if the
     /// response does not cover the batch exactly with `dims`-long vectors.
-    fn parse_vectors(&self, payload: &Value, expected: usize) -> Result<Vec<Vec<f32>>, DomainError> {
+    fn parse_vectors(
+        &self,
+        payload: &Value,
+        expected: usize,
+    ) -> Result<Vec<Vec<f32>>, DomainError> {
         let mismatch =
             || DomainError::Internal(format!("{VENDOR} response did not match the request"));
         let rows = payload
@@ -564,8 +575,7 @@ mod tests {
             async move { (StatusCode::from_u16(status).unwrap(), body) }
         };
         let url = server_for(Router::new().route("/v1/embeddings", post(reply))).await;
-        OpenAiEmbedder::with_url(&url, "sk-test".into(), "text-embedding-3-small", Some(4))
-            .unwrap()
+        OpenAiEmbedder::with_url(&url, "sk-test".into(), "text-embedding-3-small", Some(4)).unwrap()
     }
 
     async fn fake_vendor_embedder(dims: usize) -> (OpenAiEmbedder, Captured) {
@@ -644,7 +654,9 @@ mod tests {
             assert_eq!(local.model, "BAAI/bge-small-en-v1.5");
         }
 
-        assert!(EmbeddingSettings::from_lookup(lookup(&[("EMBEDDING_BACKEND", "voyage")])).is_err());
+        assert!(
+            EmbeddingSettings::from_lookup(lookup(&[("EMBEDDING_BACKEND", "voyage")])).is_err()
+        );
         assert!(
             EmbeddingSettings::from_lookup(lookup(&[
                 ("EMBEDDING_BACKEND", "openai"),
@@ -697,8 +709,8 @@ mod tests {
     #[cfg(not(feature = "local-embeddings"))]
     #[test]
     fn router_refuses_local_without_the_feature() {
-        let settings = EmbeddingSettings::from_lookup(lookup(&[("EMBEDDING_BACKEND", "local")]))
-            .unwrap();
+        let settings =
+            EmbeddingSettings::from_lookup(lookup(&[("EMBEDDING_BACKEND", "local")])).unwrap();
         assert!(matches!(
             EmbedderRouter::from_settings(&settings),
             Err(DomainError::InvalidInput(message)) if message.contains("local-embeddings")
@@ -732,7 +744,11 @@ mod tests {
         assert_eq!(requests[0]["input"], json!(["a", "bbb"]));
         assert_eq!(requests[1]["input"], json!(["cc"]));
         assert!(requests.iter().all(|r| r["dimensions"] == 4));
-        assert!(requests.iter().all(|r| r["model"] == "text-embedding-3-small"));
+        assert!(
+            requests
+                .iter()
+                .all(|r| r["model"] == "text-embedding-3-small")
+        );
         assert_eq!(out.usage_tokens, 9);
         // Each vector is [len, 1, 0, 0] normalised: unit length, and the
         // ratio of the first two components gives back the input length.
@@ -746,8 +762,7 @@ mod tests {
 
     #[test]
     fn openai_places_rows_by_index() {
-        let embedder =
-            OpenAiEmbedder::new("sk".into(), "text-embedding-3-small", Some(2)).unwrap();
+        let embedder = OpenAiEmbedder::new("sk".into(), "text-embedding-3-small", Some(2)).unwrap();
         let payload = json!({"data": [
             {"index": 1, "embedding": [0.0, 2.0]},
             {"index": 0, "embedding": [3.0, 0.0]},
@@ -815,7 +830,10 @@ mod tests {
             "empty",
         );
         assert_eq!(
-            embedder.embed(Vec::new(), EmbedKind::Document).await.unwrap(),
+            embedder
+                .embed(Vec::new(), EmbedKind::Document)
+                .await
+                .unwrap(),
             Embeddings::default()
         );
     }
@@ -883,7 +901,10 @@ mod tests {
     #[cfg(feature = "local-embeddings")]
     #[test]
     fn fastembed_knows_bge_small_by_its_upstream_name() {
-        assert_eq!(FastembedEmbedder::native_dims("BAAI/bge-small-en-v1.5"), 384);
+        assert_eq!(
+            FastembedEmbedder::native_dims("BAAI/bge-small-en-v1.5"),
+            384
+        );
         assert_eq!(FastembedEmbedder::native_dims("no-such-model"), 0);
     }
 }
