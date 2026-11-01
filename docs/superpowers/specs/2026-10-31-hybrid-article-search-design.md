@@ -117,7 +117,7 @@ Evidence from the repository and git history (checked 2026-11-01):
 | PR #33, "Move production from Railway to Fly.io", merged 2026-10-26 (`gh pr view 33`) | "Production now runs on Fly.io with Fly Managed Postgres". Under "Already done outside this PR": "DB moved Neon → Fly MPG (2 users, 334 bookmarks, migration 14 verified)". |
 | `fly.toml` (from #33) | app `boopmark`, region `sjc`. The release workflow deploys with `flyctl deploy --image`. |
 | PR #34 (`README.md`, `skills/boop/references/server-setup.md`) | Self-hosting docs: `fly mpg create` / `fly mpg attach`, and `fly mpg connect` for psql. |
-| `AGENTS.md:68` (= `CLAUDE.md:68`) | "… Docker Compose, Neon (Postgres)". The file was last changed on 2026-03-22 (`git log -- AGENTS.md`), seven months before the move, so this line is stale. It dates from the 2026-03 prod-deployment design (`docs/superpowers/specs/2026-03-17-prod-deployment-design.md`, Neon + Railway). |
+| `AGENTS.md:68` (= `CLAUDE.md:68`) | Said "… Docker Compose, Neon (Postgres)", left over from the 2026-03 prod-deployment design (`docs/superpowers/specs/2026-03-17-prod-deployment-design.md`, Neon + Railway). Fixed in the PR that landed this spec: it now says "Postgres (Fly Managed Postgres in production)". |
 
 **What cannot be verified without prod secrets:**
 
@@ -476,7 +476,8 @@ How much of the gap it closes (nDCG@10, `eval.py` "Fallback gap"):
   URL (C) and article body (D), stored in a new `bookmark_contents` table
   with a GIN index. The query is `websearch_to_tsquery('english', $q)`,
   ranked by `ts_rank(search, q, 1)`. Users also get quotes and `-exclusion`
-  for free.
+  for free; they filter the fused result of all three legs, not only this
+  leg (Search query).
 - **Trigram leg:** `word_similarity($q, meta_text)` over title +
   description, with a GIN `gin_trgm_ops` index. It catches prefixes and
   typos in the words people actually remember: the title.
@@ -680,6 +681,7 @@ CREATE TABLE bookmark_chunks (
     ord         INT  NOT NULL,     -- a failed fetch has one chunk, ord 0, made of the metadata
     text        TEXT NOT NULL,     -- the passage, shown as a snippet
     embedding   halfvec NOT NULL,  -- no fixed dimension: one schema for every backend
+    model       TEXT NOT NULL,     -- Embedder::model_id() that produced this embedding
     PRIMARY KEY (bookmark_id, ord)
 );
 CREATE INDEX idx_bookmark_chunks_user ON bookmark_chunks(user_id);
@@ -719,6 +721,11 @@ CREATE INDEX idx_bookmark_chunks_hnsw_384 ON bookmark_chunks
   - **Changing models is a re-embed backfill, with no schema change.**
     `embedded_model` (`Embedder::model_id()`, which includes the dimension)
     lets the worker find stale rows; the stored text means no refetch.
+  - **The vector leg matches only the current model.** It filters on
+    `bookmark_chunks.model = Embedder::model_id()`, not only on the
+    dimension, so a re-embed to another model of the same size never ranks
+    old-model chunks against a new-model query. Until a bookmark is
+    re-embedded it is found through the lexical legs only.
 - **Self-hosting / dev / CI** need a Postgres with pgvector:
   - `docker-compose.yml`: `postgres:16-alpine` → `pgvector/pgvector:pg16`
     (it includes contrib, so `pg_trgm` too);
@@ -960,23 +967,35 @@ trg AS (
     ORDER BY word_similarity($2, meta_text) DESC, bookmark_id LIMIT 50
 ),
 nn AS (
-    -- 1024 = Embedder::dims(), inlined by the repository so the partial index matches
+    -- 1024 = Embedder::dims(), inlined by the repository so the partial index matches;
+    -- $6 = Embedder::model_id(), so chunks from an older model of the same size never match
     SELECT bookmark_id, embedding::halfvec(1024) <=> $3::halfvec(1024) AS dist
     FROM bookmark_chunks
-    WHERE user_id = $1 AND vector_dims(embedding) = 1024
+    WHERE user_id = $1 AND model = $6 AND vector_dims(embedding) = 1024
     ORDER BY embedding::halfvec(1024) <=> $3::halfvec(1024) LIMIT 200
 ),
 vec AS (
     SELECT bookmark_id, row_number() OVER (ORDER BY min(dist), bookmark_id) AS r
     FROM nn GROUP BY bookmark_id ORDER BY min(dist), bookmark_id LIMIT 50
 )
-SELECT bookmark_id, sum(1.0 / (60 + r)) AS score
-FROM (SELECT * FROM lex UNION ALL SELECT * FROM trg UNION ALL SELECT * FROM vec) u
-GROUP BY bookmark_id
+SELECT u.bookmark_id, sum(1.0 / (60 + u.r)) AS score
+FROM (SELECT bookmark_id, r FROM lex UNION ALL SELECT bookmark_id, r FROM trg
+      UNION ALL SELECT bookmark_id, r FROM vec) u
+JOIN bookmark_contents c ON c.bookmark_id = u.bookmark_id
+-- $7 = the query's quoted phrases and -exclusions only, or NULL when it has none
+WHERE $7::text IS NULL OR c.search @@ websearch_to_tsquery('english', $7)
+GROUP BY u.bookmark_id
 ORDER BY score DESC, bookmark_id
 LIMIT $4 OFFSET $5;
 ```
 
+- **Quotes and `-exclusion` constrain the whole result.** The repository
+  extracts the quoted phrases and `-terms` from the query into `$7`
+  (`"rust async" tokio -tea` → `"rust async" -tea`) and the fused result
+  keeps only bookmarks whose `search` matches it. So `coffee -tea` never
+  returns a bookmark about tea through the trigram or vector leg. A query
+  without operators passes `NULL` and is unfiltered. This is not measured:
+  no eval query uses operators.
 - **Tags filter.** Join `bookmarks` in each leg with `AND b.tags && $tags`.
   This is not measured, but it is cheap: GIN on `tags`, applied after the
   user scope.
@@ -1048,7 +1067,9 @@ The search input in `templates/components/header.html` keeps its
 - Changing the embedding model later means `UPDATE bookmark_contents SET
   embedded_model = NULL` (plus a partial HNSW index if the new size has
   none). The worker then
-  re-embeds from the stored text, with **no refetch**. The text is kept for
+  re-embeds from the stored text, with **no refetch**, and replaces each
+  bookmark's chunks with ones tagged with the new `model`. Meanwhile the
+  vector leg skips old-model chunks. The text is kept for
   exactly this reason.
 
 ### Cost
@@ -1262,8 +1283,7 @@ What it shows:
    Weighting the full-text leg down, or letting metadata-only bookmarks
    rank on `meta_text` in it, are untested alternatives.
 2. **The Neon leftovers.** Does the "Boopmark - Prod - Neon" project still
-   hold data? If so, decide whether to delete it. AGENTS.md:68 should say
-   Fly Managed Postgres.
+   hold data? If so, decide whether to delete it.
 3. **pgvector version on MPG.** It isn't published. `iterative_scan` needs
    ≥ 0.8.0 and `halfvec` needs ≥ 0.7.0. Check with the query above.
 4. **Re-crawl policy.** Should articles be refetched periodically (for
