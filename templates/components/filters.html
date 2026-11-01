@@ -1,3 +1,88 @@
-<div id="filter-bar" class="flex items-center gap-2 px-6 py-3 flex-wrap">
+<div id="filter-bar" class="relative flex items-center gap-2 px-4 py-3 sm:px-6" data-testid="filter-bar">
     {% include "components/filters_inner.html" %}
 </div>
+<script>
+// "More tags" popover. The filter bar is swapped out of band after every
+// filter change, so the handlers are delegated from the document.
+(() => {
+    const panel = () => document.querySelector("[data-tag-popover-panel]");
+    const toggle = () => document.querySelector("[data-tag-popover-toggle]");
+    const input = () => document.querySelector("[data-tag-search]");
+    const options = () => [...document.querySelectorAll("#tag-search-results [role='option']")];
+    const isOpen = () => panel() && !panel().classList.contains("hidden");
+
+    function open() {
+        panel().classList.remove("hidden");
+        toggle().setAttribute("aria-expanded", "true");
+        input().value = "";
+        input().focus();
+        htmx.trigger(input(), "tag-popover-open");
+    }
+
+    function close() {
+        if (!isOpen()) return;
+        panel().classList.add("hidden");
+        toggle().setAttribute("aria-expanded", "false");
+    }
+
+    function select(index) {
+        const all = options();
+        all.forEach((option, i) => option.setAttribute("aria-selected", String(i === index)));
+        if (all[index]) {
+            input().setAttribute("aria-activedescendant", all[index].id);
+            all[index].scrollIntoView({ block: "nearest" });
+        } else {
+            input().removeAttribute("aria-activedescendant");
+        }
+    }
+
+    document.addEventListener("click", (event) => {
+        if (event.target.closest("[data-tag-popover-toggle]")) {
+            isOpen() ? close() : open();
+        } else if (!event.target.closest("[data-tag-popover]")) {
+            close();
+        }
+    });
+
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && isOpen()) {
+            close();
+            toggle().focus();
+            return;
+        }
+        if (!event.target.matches("[data-tag-search]")) return;
+        const all = options();
+        if (all.length === 0) return;
+        const current = all.findIndex((option) => option.getAttribute("aria-selected") === "true");
+        if (event.key === "ArrowDown") {
+            select((current + 1) % all.length);
+        } else if (event.key === "ArrowUp") {
+            select(current <= 0 ? all.length - 1 : current - 1);
+        } else if (event.key === "Enter") {
+            (all[current] || all[0]).click();
+        } else {
+            return;
+        }
+        event.preventDefault();
+    });
+
+    document.body.addEventListener("htmx:afterSwap", (event) => {
+        if (event.detail.target.id === "tag-search-results") select(0);
+    });
+
+    // Choosing a chip or a popover row swaps the whole bar out of band,
+    // which would drop focus to <body>; move it to the "More tags" button.
+    let refocus = false;
+    document.body.addEventListener("htmx:oobBeforeSwap", (event) => {
+        if (event.detail.target.id === "filter-bar") {
+            refocus = event.detail.target.contains(document.activeElement);
+        }
+    });
+    document.body.addEventListener("htmx:oobAfterSwap", () => {
+        if (refocus) {
+            refocus = false;
+            toggle().focus();
+        }
+    });
+})();
+</script>

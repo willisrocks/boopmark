@@ -88,9 +88,14 @@ test("profile menu stays visible while keyboard focus moves into the menu", asyn
   await expect(menu).toBeVisible();
 
   await page.keyboard.press("Tab");
+  await expect(page.getByTestId("profile-menu-tags")).toBeFocused();
+  await expect(menu).toBeVisible();
+
+  await page.keyboard.press("Tab");
   await expect(signOutButton).toBeFocused();
   await expect(menu).toBeVisible();
 
+  await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Shift+Tab");
   await expect(settingsLink).toBeFocused();
   await expect(menu).toBeVisible();

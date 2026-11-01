@@ -39,6 +39,11 @@ where
         self.repo.resolve_writes(user_id, writes).await
     }
 
+    /// Each canonical tag on the user's bookmarks with its bookmark count.
+    pub async fn tag_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
+        self.repo.tag_counts(user_id).await
+    }
+
     /// The on-demand normalization job: group the user's existing tags by
     /// L1-L3 and store each group with duplicates as a pending proposal.
     /// It never changes bookmarks. Re-running replaces earlier pending
@@ -52,6 +57,21 @@ where
         self.repo
             .replace_pending_proposals(user_id, ProposalSource::Deterministic, &proposals)
             .await
+    }
+
+    /// Run [`Self::propose_normalization`] once per user: only when the user
+    /// has no deterministic proposal of any status yet, so applied or
+    /// dismissed groups are never proposed again. Pages that show proposals
+    /// call it lazily on first visit.
+    pub async fn ensure_normalization_proposals(&self, user_id: Uuid) -> Result<(), DomainError> {
+        let proposals = self.repo.list_proposals(user_id, None).await?;
+        if !proposals
+            .iter()
+            .any(|p| p.source == ProposalSource::Deterministic)
+        {
+            self.propose_normalization(user_id).await?;
+        }
+        Ok(())
     }
 
     /// Apply the chosen pending proposals as one undoable batch.

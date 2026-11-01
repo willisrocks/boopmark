@@ -1,22 +1,74 @@
-    <button class="text-sm text-gray-400 flex items-center gap-1">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/>
-        </svg>
-        Filters
-    </button>
-    {% for tag in filter_tags %}
-    <button class="px-3 py-1 text-xs rounded-full border
-                    {% if tag.active %}bg-blue-600 border-blue-500 text-white{% else %}bg-[#1a1d2e] border-gray-700 text-gray-400 hover:border-gray-500{% endif %}"
-            hx-get="/bookmarks?tags={% if tag.active %}{% else %}{{ tag.name }}{% endif %}"
-            hx-target="#bookmark-grid"
-            hx-push-url="true"
-            hx-include="[name='search'],[name='sort']">
-        {{ tag.name }}
-    </button>
-    {% endfor %}
-    <input type="hidden" name="tags" value="{% for tag in filter_tags %}{% if tag.active %}{{ tag.name }}{% endif %}{% endfor %}">
-    <div class="ml-auto">
+    <span class="hidden shrink-0 text-sm text-gray-400 sm:inline">Tags</span>
+    {# One row: chips that do not fit wrap onto a second row that overflow hides; a chip alone on the row shrinks and truncates. #}
+    <div class="flex h-7 min-w-0 flex-1 flex-wrap items-center gap-2 overflow-hidden"
+         data-testid="filter-tag-row"
+         hx-target="#bookmark-grid"
+         hx-push-url="true"
+         hx-include="[name='search'],[name='sort']">
+        {% for chip in filter.active %}
+        <button type="button"
+                data-testid="active-tag-chip"
+                aria-label="Remove tag filter {{ chip.name }}"
+                class="inline-flex h-7 min-w-0 max-w-[12rem] items-center gap-1 rounded-full border border-blue-500 bg-blue-600 px-3 text-xs text-white hover:bg-blue-700"
+                hx-get="{{ chip.url }}">
+            <span class="min-w-0 truncate">{{ chip.name }}</span><span class="shrink-0" aria-hidden="true">&times;</span>
+        </button>
+        {% endfor %}
+        {% for chip in filter.top %}
+        <button type="button"
+                data-testid="filter-tag-chip"
+                class="{% if loop.index0 >= 4 %}hidden sm:inline-flex{% else %}inline-flex{% endif %} h-7 min-w-0 max-w-[12rem] items-center gap-1 rounded-full border border-gray-700 bg-[#1a1d2e] px-3 text-xs text-gray-300 hover:border-gray-500"
+                hx-get="{{ chip.url }}">
+            <span class="min-w-0 truncate">{{ chip.name }}</span>{% if let Some(count) = chip.count %}<span class="shrink-0 text-gray-500">{{ count }}</span>{% endif %}
+        </button>
+        {% endfor %}
+    </div>
+    <div class="shrink-0" data-tag-popover>
+        <button type="button"
+                data-testid="more-tags-button"
+                data-tag-popover-toggle
+                aria-haspopup="listbox"
+                aria-expanded="false"
+                aria-controls="tag-popover"
+                class="inline-flex h-7 items-center gap-1 whitespace-nowrap rounded-full border border-dashed border-gray-600 px-3 text-xs text-gray-300 hover:border-gray-400 hover:text-white">
+            {% if filter.more_count > 0 %}More<span class="hidden sm:inline"> tags</span> ({{ filter.more_count }}){% else %}Find tags{% endif %}
+            <span aria-hidden="true">&#9662;</span>
+        </button>
+        <div id="tag-popover"
+             data-testid="tag-popover"
+             data-tag-popover-panel
+             class="absolute inset-x-4 top-full z-40 mt-1 hidden rounded-xl border border-gray-700 bg-[#1e2235] p-3 shadow-2xl shadow-black/50 sm:left-auto sm:right-6 sm:w-[28rem]">
+            <input type="search"
+                   name="q"
+                   data-testid="tag-search-input"
+                   data-tag-search
+                   role="combobox"
+                   aria-label="Search tags"
+                   aria-controls="tag-search-results"
+                   aria-autocomplete="list"
+                   aria-expanded="true"
+                   autocomplete="off"
+                   placeholder="Search tags or aliases"
+                   class="w-full rounded-lg border border-gray-700 bg-[#1a1d2e] px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+                   hx-get="/tags/search"
+                   hx-trigger="input changed delay:150ms, tag-popover-open"
+                   hx-target="#tag-search-results"
+                   hx-include="[name='tags']"
+                   hx-sync="this:replace">
+            <p class="mt-2 text-xs text-gray-500">Matches name or alias &middot; &uarr;&darr; to move, Enter to add</p>
+            <div id="tag-search-results" role="listbox" aria-label="Tags" class="mt-2 max-h-80 overflow-y-auto"></div>
+            <a href="/tags?sort=az"
+               data-testid="browse-all-tags"
+               class="mt-2 flex items-center justify-between border-t border-gray-700 px-2 pt-2 text-xs">
+                <span class="text-gray-400">All tags A&ndash;Z</span>
+                <span class="text-blue-400 hover:text-blue-300">Browse all &rarr;</span>
+            </a>
+        </div>
+    </div>
+    <input type="hidden" name="tags" value="{{ filter.tags_value }}">
+    <div class="ml-auto shrink-0">
         <select name="sort"
+                aria-label="Sort bookmarks"
                 class="bg-[#1a1d2e] border border-gray-700 rounded-lg px-3 py-1 text-sm text-gray-300"
                 hx-get="/bookmarks"
                 hx-trigger="change"

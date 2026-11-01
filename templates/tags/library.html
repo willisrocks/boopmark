@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}Tags - BoopMark{% endblock %}
+{% block content %}
+{% include "components/header.html" %}
+
+<main class="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-8" data-testid="tag-library-page">
+    <section class="rounded-xl border border-gray-700 bg-[#1e2235] p-4 sm:p-6">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+                <h1 class="text-xl font-semibold text-white">Tag Library</h1>
+                <p class="mt-1 text-sm text-gray-400">Rename and merge tags. Merged spellings stay as aliases, so they keep resolving to the same tag.</p>
+            </div>
+            <a href="/tags/review"
+               data-testid="tag-review-link"
+               class="whitespace-nowrap rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-700">
+                Review merge suggestions
+            </a>
+        </div>
+
+        <div id="tag-library-controls" class="mt-5 flex gap-3">
+            <input type="search"
+                   name="q"
+                   value="{{ body.q }}"
+                   data-testid="tag-library-filter"
+                   aria-label="Filter tags or aliases"
+                   placeholder="Filter tags or aliases"
+                   autocomplete="off"
+                   class="min-w-0 flex-1 rounded-lg border border-gray-700 bg-[#1a1d2e] px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+                   hx-get="/tags"
+                   hx-trigger="input changed delay:200ms, search"
+                   hx-target="#tag-library-body"
+                   hx-include="#tag-library-controls"
+                   hx-replace-url="true"
+                   hx-sync="this:replace">
+            <select name="sort"
+                    data-testid="tag-library-sort"
+                    aria-label="Sort tags"
+                    class="rounded-lg border border-gray-700 bg-[#1a1d2e] px-3 py-2 text-sm text-gray-300"
+                    hx-get="/tags"
+                    hx-trigger="change"
+                    hx-target="#tag-library-body"
+                    hx-include="#tag-library-controls"
+                    hx-replace-url="true">
+                <option value="most" {% if body.sort == "most" %}selected{% endif %}>Most used</option>
+                <option value="az" {% if body.sort == "az" %}selected{% endif %}>A&ndash;Z</option>
+                <option value="least" {% if body.sort == "least" %}selected{% endif %}>Least used</option>
+            </select>
+        </div>
+
+        {# Undo buttons inside inherit the target and the filter/sort values. #}
+        <div id="tag-library-body" class="mt-4" hx-target="#tag-library-body" hx-include="#tag-library-controls">
+            {% include "tags/library_body.html" %}
+        </div>
+
+        <div data-tag-bulk-bar
+             data-testid="tag-bulk-bar"
+             class="sticky bottom-4 mt-4 hidden flex-wrap items-center gap-3 rounded-lg border border-gray-700 bg-[#151827] px-4 py-3 shadow-lg shadow-black/40">
+            <span class="text-sm text-gray-300"><span data-tag-selected-count>0</span> selected</span>
+            <button type="button"
+                    data-tag-action="merge-selected"
+                    data-testid="tag-merge-selected"
+                    class="rounded-md bg-gray-700 px-3 py-1.5 text-sm text-gray-100 hover:bg-gray-600">
+                Merge selected into&hellip;
+            </button>
+            <button type="button" data-tag-action="clear-selection" class="text-sm text-gray-400 hover:text-gray-200">Clear</button>
+        </div>
+    </section>
+</main>
+
+{% include "tags/tag_names.html" %}
+
+<dialog id="tag-merge-dialog"
+        data-testid="tag-merge-dialog"
+        class="w-[min(28rem,calc(100vw-2rem))] rounded-xl border border-gray-700 bg-[#1e2235] p-0 text-gray-200 backdrop:bg-black/60">
+    <form hx-post="/tags/merge"
+          hx-target="#tag-library-body"
+          hx-include="#tag-library-controls"
+          class="p-5">
+        <h2 class="text-lg font-semibold text-white" data-tag-dialog-title></h2>
+        <input type="hidden" name="kind">
+        <div data-tag-dialog-sources></div>
+        <label class="mt-4 block text-sm text-gray-400">
+            <span data-tag-dialog-label>Tag</span>
+            <input type="text"
+                   name="target"
+                   list="tag-names"
+                   required
+                   autocomplete="off"
+                   data-testid="tag-merge-target"
+                   class="mt-1 w-full rounded-lg border border-gray-700 bg-[#1a1d2e] px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none">
+        </label>
+        <p class="mt-2 text-xs text-gray-500" data-tag-dialog-hint></p>
+        <p role="alert" data-testid="tag-merge-error" class="mt-3 hidden rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200" data-tag-dialog-error></p>
+        <div class="mt-5 flex justify-end gap-2">
+            <button type="button" data-tag-action="close-dialog" class="rounded-lg px-4 py-2 text-sm text-gray-300 hover:bg-gray-700">Cancel</button>
+            <button type="submit" data-testid="tag-merge-submit" class="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700" data-tag-dialog-submit>Save</button>
+        </div>
+    </form>
+</dialog>
+
+<script>
+(() => {
+    const dialog = document.getElementById("tag-merge-dialog");
+    const form = dialog.querySelector("form");
+    const part = (name) => dialog.querySelector(`[data-tag-dialog-${name}]`);
+    const bulkBar = document.querySelector("[data-tag-bulk-bar]");
+    const selected = () => [...document.querySelectorAll("[data-tag-select]:checked")].map((box) => box.value);
+
+    function openDialog(kind, names) {
+        if (names.length === 0) return;
+        form.elements.kind.value = kind;
+        part("sources").replaceChildren(...names.map((name) =>
+            Object.assign(document.createElement("input"), { type: "hidden", name: "source", value: name })));
+        const target = form.elements.target;
+        if (kind === "rename") {
+            part("title").textContent = `Rename “${names[0]}”`;
+            part("label").textContent = "New name";
+            part("hint").textContent = "Bookmarks get the new name. The old name stays as an alias.";
+            part("submit").textContent = "Rename";
+            target.value = names[0];
+        } else {
+            part("title").textContent = names.length === 1 ? `Merge “${names[0]}” into…` : `Merge ${names.length} tags into…`;
+            part("label").textContent = "Target tag";
+            part("hint").textContent = "The merged tags become aliases of the target. You can undo this from History.";
+            part("submit").textContent = "Merge";
+            target.value = "";
+        }
+        showError("");
+        dialog.showModal();
+        target.focus();
+        target.select();
+    }
+
+    function showError(message) {
+        part("error").textContent = message;
+        part("error").classList.toggle("hidden", !message);
+    }
+
+    function syncBulkBar() {
+        const count = selected().length;
+        bulkBar.querySelector("[data-tag-selected-count]").textContent = count;
+        bulkBar.classList.toggle("hidden", count === 0);
+        bulkBar.classList.toggle("flex", count > 0);
+        const all = document.querySelector("[data-tag-select-all]");
+        if (all) all.checked = count > 0 && count === document.querySelectorAll("[data-tag-select]").length;
+    }
+
+    document.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-tag-action]");
+        if (!button) return;
+        const action = button.dataset.tagAction;
+        if (action === "rename" || action === "merge") {
+            openDialog(action, [button.dataset.tag]);
+        } else if (action === "merge-selected") {
+            openDialog("merge", selected());
+        } else if (action === "clear-selection") {
+            document.querySelectorAll("[data-tag-select]").forEach((box) => { box.checked = false; });
+            syncBulkBar();
+        } else if (action === "close-dialog") {
+            dialog.close();
+        }
+    });
+
+    document.addEventListener("change", (event) => {
+        if (event.target.matches("[data-tag-select-all]")) {
+            document.querySelectorAll("[data-tag-select]").forEach((box) => { box.checked = event.target.checked; });
+        }
+        if (event.target.matches("[data-tag-select], [data-tag-select-all]")) syncBulkBar();
+    });
+
+    // Keep the draft when nothing was swapped in (network or server error).
+    form.addEventListener("htmx:afterRequest", (event) => {
+        if (event.detail.successful) {
+            dialog.close();
+        } else {
+            showError("Could not save the change. Check your connection and try again.");
+        }
+    });
+    document.body.addEventListener("htmx:afterSwap", (event) => {
+        if (event.detail.target.id === "tag-library-body") syncBulkBar();
+    });
+})();
+</script>
+{% endblock %}

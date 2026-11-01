@@ -292,18 +292,6 @@ impl BookmarkRepository for PostgresPool {
         Ok(())
     }
 
-    async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT unnest(tags) AS tag FROM bookmarks WHERE user_id = $1 ORDER BY tag",
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DomainError::Internal(e.to_string()))?;
-
-        Ok(rows.into_iter().map(|(t,)| t).collect())
-    }
-
     async fn tags_with_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT unnest(tags) AS tag, COUNT(*) AS count FROM bookmarks WHERE user_id = $1 GROUP BY tag ORDER BY count DESC",

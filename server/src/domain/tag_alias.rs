@@ -241,7 +241,7 @@ impl TagIndex {
 
     /// The canonical tag for a compact key: the alias row if there is one,
     /// otherwise the display form of the existing spellings with that key.
-    fn canonical_for_key(&self, key: &str) -> Option<String> {
+    pub(crate) fn canonical_for_key(&self, key: &str) -> Option<String> {
         self.aliases
             .get(key)
             .cloned()
