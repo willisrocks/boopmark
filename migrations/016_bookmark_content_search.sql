@@ -32,6 +32,7 @@ CREATE TABLE bookmark_contents (
     content_hash    TEXT,                       -- sha256(text)
     search          tsvector NOT NULL,          -- bookmark_search_document(...)
     meta_text       TEXT NOT NULL DEFAULT '',   -- title || ' ' || description, for the trigram leg
+    embedded_model  TEXT,                       -- Embedder::model_id() of the chunks (vector leg)
     fetched_at      TIMESTAMPTZ,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

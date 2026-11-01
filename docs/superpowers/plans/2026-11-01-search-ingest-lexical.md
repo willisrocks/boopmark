@@ -32,8 +32,8 @@ with `pg_trgm` (contrib, ships in `postgres:16`), `dom_smoothie` 0.19 (MIT).
 ## Decisions (auto-pilot; answered from the spec, the code and the task)
 
 1. **Migration number is 016, not the spec's 015.** 015 belongs to the tag
-   worker. No `vector` extension, no chunks, no `embedded_model` column: all
-   of that is 017's.
+   worker. No `vector` extension and no chunks: those are 017's. The
+   plain `embedded_model` column is in 016, as the final spec has it.
 2. **The queue lives in `bookmark_contents`** (`status = 'pending'`,
    `next_attempt_at`, partial index `idx_bookmark_contents_queue`), exactly as
    the spec's Schema section. The task's "ingest queue table" is this table;
@@ -129,7 +129,7 @@ Modified (small, additive): `domain/mod.rs`, `domain/ports/mod.rs`,
 ### Task 1: Migration 016
 - [ ] `pg_trgm`; `bookmark_search_document()` (IMMUTABLE, A title, B
       description, C url + tags, D body); `bookmark_contents` with the spec's
-      columns minus `embedded_model`; GIN on `search`, GIN trigram on
+      columns (`embedded_model` included, unused until 017); GIN on `search`, GIN trigram on
       `meta_text`, the queue partial index, the user index.
 - [ ] Trigger `bookmarks_sync_content` (AFTER INSERT OR UPDATE OF title,
       description, url, tags): upsert the row; a URL change resets it to a
