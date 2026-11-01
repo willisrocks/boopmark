@@ -73,7 +73,7 @@ class SpendGuard(Exception):
 class OpenAI:
     """Minimal embeddings client with a hard spend cap."""
 
-    def __init__(self, model: str, max_usd: float, spent: dict):
+    def __init__(self, model: str, max_usd: float, spent: dict, url: str = OPENAI_URL):
         key = os.environ.get("OPENAI_API_KEY")
         if not key:
             sys.exit("OPENAI_API_KEY is not set")
@@ -82,6 +82,7 @@ class OpenAI:
         self.max_usd = max_usd
         self.spent = spent  # shared across models: {"usd": float, ...}
         self.calls = self.tokens = 0
+        self.url = url
         self.client = httpx.Client(timeout=120, headers={"Authorization": f"Bearer {key}"})
 
     def embed(self, texts: list[str]) -> np.ndarray:
@@ -93,7 +94,7 @@ class OpenAI:
     def _call(self, batch: list[str]) -> list[list[float]]:
         for attempt in range(6):
             try:
-                r = self.client.post(OPENAI_URL, json={"model": self.model, "input": batch})
+                r = self.client.post(self.url, json={"model": self.model, "input": batch})
             except httpx.HTTPError as e:
                 print(f"  network error ({type(e).__name__}), retrying")
                 time.sleep(2 ** attempt)
@@ -157,6 +158,7 @@ def main() -> None:
                     help="local model run on the same text; '' to skip")
     ap.add_argument("--runs", type=pathlib.Path, default=HERE / "results" / "lexical_runs.json")
     ap.add_argument("--max-usd", type=float, default=3.0)
+    ap.add_argument("--openai-url", default=OPENAI_URL, help=argparse.SUPPRESS)  # tests only
     ap.add_argument("--out", type=pathlib.Path,
                     default=HERE / "results" / f"hosted-{dt.datetime.now(dt.timezone.utc):%Y-%m-%d}.json")
     args = ap.parse_args()
@@ -203,14 +205,14 @@ def main() -> None:
     n_tokens = sum(len(enc.encode(t)) for t in chunk_in + meta_in + texts) + 10 * 20
     projected = {m: n_tokens * PRICES[m] / 1e6 for m in hosted}
     print(f"projected tokens per model: {n_tokens:,}; projected spend: "
-          + ", ".join(f"{m} ${v:.4f}" for m, v in projected.items())
+          + (", ".join(f"{m} ${v:.4f}" for m, v in projected.items()) or "none")
           + f"; total ${sum(projected.values()):.4f} (cap ${args.max_usd})")
     if sum(projected.values()) > args.max_usd:
         sys.exit("projected spend exceeds --max-usd; nothing was called")
 
     spent = {"usd": 0.0}
     specs = ([args.baseline] if args.baseline else []) + hosted
-    embedded, spend, latency = {}, {}, {}
+    embedded, spend, latency, aborted = {}, {}, {}, None
     for spec in specs:
         provider, model = spec.split(":", 1)
         print(f"embedding with {spec} ...")
@@ -226,7 +228,7 @@ def main() -> None:
             def query_fn(t, local=local, prefix=prefix):
                 return doc_fn([prefix + x for x in t])
         else:
-            client = OpenAI(model, args.max_usd, spent)
+            client = OpenAI(model, args.max_usd, spent, args.openai_url)
             doc_fn = query_fn = client.embed
         try:
             vecs = {kind: embed_cached(spec, kind, inp, fn) for kind, inp, fn in
@@ -239,11 +241,13 @@ def main() -> None:
             latency[spec] = {"p50_ms": statistics.median(ms), "max_ms": max(ms), "n": len(ms)}
         except SpendGuard as e:
             print(f"SPEND GUARD: {e}; stopping before any further call")
+            aborted = str(e)
             break
+        finally:
+            if provider != "fastembed":
+                spend[spec] = {"calls": client.calls, "tokens": client.tokens,
+                               "usd": round(client.tokens * client.price / 1e6, 6)}
         embedded[spec] = vecs
-        if provider != "fastembed":
-            spend[spec] = {"calls": client.calls, "tokens": client.tokens,
-                           "usd": round(client.tokens * client.price / 1e6, 6)}
 
     scraped_ids = sorted(manifest)
     scen = scenarios(scraped_ids, [d["id"] for d in unscraped])
@@ -252,7 +256,7 @@ def main() -> None:
     out: dict = {"date": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                  "corpus": {"rebuilt": len(corpus), "pinned": len(manifest), "edited": changed,
                             "missing": missing, "queries": len(queries)},
-                 "spend": spend, "spend_total_usd": round(spent["usd"], 6),
+                 "spend": spend, "spend_total_usd": round(spent["usd"], 6), "aborted": aborted,
                  "query_latency": latency, "models": {}}
     for spec, vecs in embedded.items():
         native = vecs["chunks"].shape[1]

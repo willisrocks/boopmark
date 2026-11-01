@@ -14,7 +14,7 @@ failure rate.
 
     uv run scripts/search-eval/eval.py --db postgres://boopmark@127.0.0.1:55432/boopmark \
         --email eval@example.com [--bm25] [--pool pool.jsonl] [--json results/local.json] \
-        [--export-runs results/lexical_runs.json]
+        [--per-query per_query.json] [--export-runs results/lexical_runs.json]
 
 --export-runs writes every lexical leg's ranked ids. hosted_eval.py fuses them
 with hosted-model vectors, so it does not need Postgres.
@@ -265,7 +265,8 @@ def main() -> None:
                     help="lists the scraped corpus ids")
     ap.add_argument("--bm25", action="store_true", help="also measure ParadeDB pg_search")
     ap.add_argument("--pool", type=pathlib.Path, help="write unjudged top-10 hits here")
-    ap.add_argument("--json", type=pathlib.Path, help="write summaries + per-query results here")
+    ap.add_argument("--json", type=pathlib.Path, help="write the summaries, gap table and latency here")
+    ap.add_argument("--per-query", type=pathlib.Path, help="write every method's per-query results here")
     ap.add_argument("--export-runs", type=pathlib.Path,
                     help="write every lexical leg's ranked ids (input of hosted_eval.py)")
     args = ap.parse_args()
@@ -417,7 +418,9 @@ def main() -> None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps({
             "summaries": summaries, "fallback_gap": gap, "latency_ms": latency,
-            "dropped_sim": dropped, "per_query": results}, indent=1))
+            "dropped_sim": dropped}, indent=1))
+    if args.per_query:
+        args.per_query.write_text(json.dumps(results, separators=(",", ":")))
     if args.export_runs:
         args.export_runs.parent.mkdir(parents=True, exist_ok=True)
         lex = {s: {m: v for m, v in r.items() if not m.startswith("vector")} for s, r in runs.items()}
