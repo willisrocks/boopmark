@@ -45,14 +45,16 @@ fn error_response(e: DomainError) -> axum::response::Response {
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
-/// Parse the comma-separated `tags` filter of `/bookmarks`.
+/// Parse the comma-separated `tags` filter of `/bookmarks`, without blanks
+/// or repeats.
 pub(crate) fn parse_tag_list(tags: Option<&str>) -> Vec<String> {
-    tags.unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .collect()
+    let mut list: Vec<String> = Vec::new();
+    for tag in tags.unwrap_or_default().split(',').map(str::trim) {
+        if !tag.is_empty() && !list.iter().any(|t| t == tag) {
+            list.push(tag.to_string());
+        }
+    }
+    list
 }
 
 fn bookmarks_url(tags: &[String]) -> String {
@@ -102,7 +104,7 @@ impl FilterBar {
         let active_used = active.iter().filter(|t| count_of(t).is_some()).count();
         Self {
             active: active.iter().map(|t| chip(t, count_of(t))).collect(),
-            more_count: rows.len() - top.len() - active_used,
+            more_count: rows.len().saturating_sub(top.len() + active_used),
             top,
             tags_value: active.join(","),
         }
@@ -577,6 +579,7 @@ mod tests {
     #[test]
     fn tag_lists_parse_and_toggle() {
         assert_eq!(parse_tag_list(Some(" rust, ,go ")), s(&["rust", "go"]));
+        assert_eq!(parse_tag_list(Some("rust,rust,go")), s(&["rust", "go"]));
         assert!(parse_tag_list(None).is_empty());
         assert_eq!(toggled(&s(&["rust", "go"]), "rust"), s(&["go"]));
         assert_eq!(toggled(&s(&["rust"]), "c++"), s(&["rust", "c++"]));
@@ -604,6 +607,12 @@ mod tests {
         assert_eq!(bar.top[0].url, "/bookmarks?tags=tag03%2Cgone%2Ctag00");
         assert_eq!(bar.more_count, 15 - TOP_TAGS - 1);
         assert_eq!(bar.tags_value, "tag03,gone");
+
+        let one = FilterBar::new(
+            &[("rust".to_string(), 1)],
+            &parse_tag_list(Some("rust,rust")),
+        );
+        assert_eq!(one.more_count, 0);
     }
 
     #[test]
