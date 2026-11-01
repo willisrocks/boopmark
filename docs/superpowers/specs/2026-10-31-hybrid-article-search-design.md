@@ -137,10 +137,32 @@ scored against labels that only another method could find. Each query has
 | hybrid RRF: full-text OR + vector | 0.950 | 0.844 | 0.858 | 0% | 0.965 | 0.753 | 0.883 | 15.4 |
 | hybrid RRF: BM25 + vector — *not on Fly MPG* | 0.939 | 0.943 | 0.912 | 0% | 0.981 | 0.780 | 1.000 | 15.3 |
 
-VARIANTS_TABLE
+**Embedding variants** (`embed_variant.py`; the same labels, the same
+full-text AND lexical leg in the hybrid; exact KNN):
+
+| variant | dims | embed speed (4 shared vCPU) | vector nDCG@10 | hybrid nDCG@10 | hybrid MRR@10 | vector nDCG keyword / natural / deep |
+|---|---|---|---|---|---|---|
+| **bge-small-en-v1.5, article chunks** (prototype default) | 384 | 9.6 chunks/s | 0.918 | 0.936 | 0.979 | 0.960 / 0.814 / 1.000 |
+| bge-small-en-v1.5, **metadata only** (title + description + URL; 1 vector per bookmark) | 384 | 39 docs/s | 0.813 | 0.915 | 0.946 | 0.713 / 0.765 / 0.954 |
+| all-MiniLM-L6-v2, article chunks | 384 | 35 chunks/s | 0.919 | 0.926 | 0.979 | 0.961 / 0.855 / 0.954 |
+| bge-base-en-v1.5, article chunks | 768 | 3.2 chunks/s | 0.905 | **0.941** | 0.979 | 0.942 / 0.859 / 0.923 |
+| OpenAI text-embedding-3-small, article chunks | 1536 | — | pending | pending | — | not run: no API key was available (see Open questions) |
+
+The variants show three things:
+
+- **Chunk embeddings of the article add +0.105 vector nDCG** over embedding
+  only the metadata (0.813 → 0.918). Most of that is on keyword queries
+  (0.713 → 0.960).
+- **Inside the hybrid, the article's lexical leg recovers much of the
+  difference** (0.915 vs 0.936). A cheap "one vector per bookmark" variant is
+  a credible fallback if storage or embedding cost ever matters (see Option
+  A, variant A2).
+- **The three local models are within noise of each other** (0.926–0.941
+  hybrid). Model choice can rest on cost, speed and RAM rather than quality.
+
 
 Latency is the SQL time only (warm, local, 490 bookmarks / 5k chunks). Query
-embedding is extra: about QEMB ms locally with bge-small, or one HTTPS
+embedding is extra: **4.1 ms p50 / 7.0 ms p95** locally with bge-small (warm; the process RSS with ONNX Runtime and the model loaded was 274 MB in Python), or one HTTPS
 round trip (~100–300 ms) for a hosted model. With
 `hnsw.iterative_scan = relaxed_order` and `ef_search = 100`, the HNSW index
 gave identical rankings and latency at this size. Per-user corpora are small
@@ -220,6 +242,11 @@ These facts were checked on 2026-11-01:
   - `ts_rank` is not BM25. Measured, it doesn't matter once fused.
   - The vector index adds RAM pressure on the 1 GB MPG plan at scale (see
     Cost).
+- **Variant A2: one vector per bookmark.** Embed only title + description +
+  URL, and keep the full article in the lexical leg. Measured hybrid nDCG is
+  0.915 vs 0.936, with about 10× fewer vectors and no chunk table. Keep it in
+  reserve for very large libraries; it is not the default, because the
+  article chunks also supply the snippets for semantic hits.
 
 ### Option B — Postgres + ParadeDB pg_search (BM25) + pgvector
 
@@ -255,9 +282,9 @@ These facts were checked on 2026-11-01:
 
 | option | quality (this eval) | ingest cost / 1k bookmarks | query cost | ops | verdict |
 |---|---|---|---|---|---|
-| **E1. Operator-paid hosted, `text-embedding-3-small`** | HOSTED_QUALITY | 2.7M tok × $0.02/M = **$0.054** | ~12 tok/query: $0.24 per 1M queries | API key in Fly secrets; network call per query | ⭐ **production default** |
+| **E1. Operator-paid hosted, `text-embedding-3-small`** | not measured (no key, see Open questions) | 2.7M tok × $0.02/M = **$0.054** | ~12 tok/query: $0.24 per 1M queries | API key in Fly secrets; network call per query | ⭐ **production default** |
 | E1'. Hosted, Voyage `voyage-4-lite` | not measured | $0.054 (200M free tokens) | same | same | Equivalent alternative; 32k context |
-| **E2. Local fastembed (`bge-small-en-v1.5`, ONNX)** | vector 0.918 / hybrid 0.936 | $0 API cost; measured **9.6 chunks/s** (≈1 bookmark/s) on 4 shared vCPUs | ~QEMB ms CPU | about 130 MB model + ONNX runtime; does **not** fit next to the app in the current 512 MB `shared-cpu-1x` VM; needs ≥1 GB | ⭐ **self-host option** |
+| **E2. Local fastembed (`bge-small-en-v1.5`, ONNX)** | vector 0.918 / hybrid 0.936 | $0 API cost; measured **9.6 chunks/s** (≈1 bookmark/s) on 4 shared vCPUs | 4 ms CPU (measured) | about 130 MB model + ONNX runtime; does **not** fit next to the app in the current 512 MB `shared-cpu-1x` VM; needs ≥1 GB | ⭐ **self-host option** |
 | E3. Per-user BYO key (like `user_llm_settings`) | — | user pays | user pays; needs the user's key on every search | Anthropic, the default text provider, has no embeddings API, so most users get nothing. Index coverage differs per user. A key rotation or removal breaks query embedding, and a model switch means a full re-embed per user. | reject for v1 |
 | E4. `disabled` (full-text only) | full-text AND 0.635 | $0 | $0 | none | ⭐ fallback / default when unconfigured |
 
@@ -583,7 +610,7 @@ bookmarks.
 | storage: article text + tsvector + GIN | ≈27 MB | ≈27 MB | ≈27 MB |
 | storage: chunks + HNSW | ≈35 MB¹ | ≈30 MB¹ | 0 |
 | storage $ on MPG ($0.28/GB-mo) | ≈$0.017/mo | ≈$0.016/mo | ≈$0.008/mo |
-| query | ≈12 tok → **$0.00000024**/query ($0.24 per 1M) + ~100–300 ms RTT | ~QEMB ms CPU per query | $0 |
+| query | ≈12 tok → **$0.00000024**/query ($0.24 per 1M) + ~100–300 ms RTT | 4.1 ms CPU per query (measured p50) | $0 |
 | fixed | none | VM 512 MB → ≥1 GB (about +$5/mo on Fly) | none |
 
 ¹ Measured: the 490-bookmark prototype at 384-d float32 used 24 MB for
@@ -595,7 +622,7 @@ That stays manageable on Starter (2 GB RAM, $72/mo). On Basic (1 GB),
 queries fall back to a mostly exact scan of the *user's* rows (fine per
 user), and the shared HNSW won't stay cached. Revisit the plan at that size.
 
-**Hosted spend while prototyping:** SPEND_LINE
+**Hosted spend while prototyping:** $0.00. No hosted API was called, because no embedding key was available in this worker's environment. The hosted path is implemented and ready (`embedders.py`, which logs every call to `spend.jsonl`). A full `text-embedding-3-small` run is estimated at 1.32M corpus tokens plus about 300 query tokens, roughly **$0.03**.
 
 ---
 
@@ -664,7 +691,13 @@ user), and the shared HNSW won't stay cached. Revisit the plan at that size.
 
 ## Open questions
 
-1. **Hosted vs local quality.** HOSTED_OPEN
+1. **Hosted vs local quality.** This is still unmeasured, because no embedding key was available. To close it, run
+   `embed_variant.py --variant oai-small --embedder openai:text-embedding-3-small`, then
+   `eval.py --variants oai-small=openai:text-embedding-3-small` (about $0.03), and fill the
+   pending row. Published MTEB retrieval scores put `text-embedding-3-small` and
+   `bge-small-en-v1.5` close together. The recommendation does not depend on the result:
+   E1 is the production default for operational reasons (RAM on the 512 MB VM, no ONNX in
+   the default build), and every local model already reaches 0.926–0.941 hybrid nDCG.
 2. **pgvector version on MPG.** It isn't published. `iterative_scan` needs
    ≥ 0.8.0 and `halfvec` needs ≥ 0.7.0. Check with `SELECT extversion FROM
    pg_extension` once it's enabled.
