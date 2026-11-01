@@ -5,7 +5,7 @@ COPY package.json .
 RUN npm install --omit=dev
 RUN npx playwright install chromium
 
-COPY index.js .
+COPY index.js guard.js proxy.js ./
 
 EXPOSE 3001
 CMD ["node", "index.js"]
