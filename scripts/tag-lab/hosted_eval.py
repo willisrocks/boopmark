@@ -127,7 +127,7 @@ class Spend:
 
 
 def make_ask(args, spend):
-    def ask(step, system, user, schema, max_tokens, empty):
+    def ask(step, system, user, schema, max_tokens, empty, meta=None):
         req = StructuredRequest(provider=args.provider, model=args.model, system=system, user=user,
                                 json_schema=schema, max_output_tokens=max_tokens, effort=args.effort,
                                 base_url=args.base_url)
@@ -146,6 +146,9 @@ def make_ask(args, spend):
             spend.steps[step]["failed_calls"] += 1
             return empty
         spend.add(step, resp.usage)
+        if meta is not None:
+            meta.append({"stop_reason": resp.stop_reason, "input_tokens": resp.usage.input_tokens,
+                         "output_tokens": resp.usage.output_tokens})
         return resp.json
     return ask
 
@@ -173,16 +176,25 @@ def summary(s):
     return {k: s[k] for k in ("tags", "merges", "correct", "ambiguous", "wrong", "precision", "recall")}
 
 
-def step_consolidate(ask, truth, det, samples):
+def step_consolidate(ask, truth, det, samples, retries=1):
     lines = []
     for g in det:
         title = (samples.get(g["canonical"]) or [""])[0]
         lines.append(f"- {json.dumps(g['canonical'])} ({g['count']})" + (f" e.g. {json.dumps(title)}" if title else ""))
     user = ("<untrusted_tag_data>\nTags (bookmark count, one sample title):\n" + "\n".join(lines)
             + "\n</untrusted_tag_data>\n\nReturn the JSON object.")
-    out = ask("consolidate", INSTRUCTIONS, user, SCHEMA, 16000, {"merges": []})
-    merges = out.get("merges", []) if isinstance(out, dict) else []
-    final, dropped = apply(det, merges)
+    # A schema-valid but empty answer happens (one Haiku run returned 40
+    # output tokens and no valid group); retry once, as the product would.
+    attempts = []
+    for _ in range(1 + retries):
+        meta = []
+        out = ask("consolidate", INSTRUCTIONS, user, SCHEMA, 16000, {"merges": []}, meta)
+        merges = out.get("merges", []) if isinstance(out, dict) else []
+        final, dropped = apply(det, merges)
+        attempts.append({**(meta[0] if meta else {}), "returned_groups": len(merges),
+                         "valid_groups": len(merges) - len(dropped)})
+        if len(merges) - len(dropped) > 0:
+            break
     s = score(final, truth)
     p = score_proposals(final, truth)
     by_conf = {}
@@ -196,7 +208,7 @@ def step_consolidate(ask, truth, det, samples):
     proposals = [(m, g["canonical"], g.get("confidence")) for g in final if "proposed" in g
                  for m in g["proposed"] if m != g["canonical"]]
     result = {
-        "proposed_groups": len(merges), "dropped_invalid": len(dropped),
+        "proposed_groups": len(merges), "dropped_invalid": len(dropped), "attempts": attempts,
         "applied_unreviewed": summary(s),
         "llm_only": {"proposals": n + len(p["ambiguous"]), "correct": len(p["correct"]),
                      "wrong": len(p["wrong"]), "ambiguous": len(p["ambiguous"]),

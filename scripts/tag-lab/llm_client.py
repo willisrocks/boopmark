@@ -47,6 +47,8 @@ class TokenUsage:
 class StructuredResponse:
     json: dict
     usage: TokenUsage = field(default_factory=TokenUsage)
+    # Vendor stop reason ("end_turn", "completed", ...), kept for diagnostics.
+    stop_reason: str = ""
 
 
 class LlmError(Exception):
@@ -112,7 +114,7 @@ def _anthropic(req):
         raise LlmError(f"Anthropic stopped with {stop}", usage)
     # Thinking blocks may come first; the answer is the text block.
     text = next((b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text"), "")
-    return StructuredResponse(_parse(text, "Anthropic"), usage)
+    return StructuredResponse(_parse(text, "Anthropic"), usage, stop or "")
 
 
 def _openai(req):
@@ -129,7 +131,7 @@ def _openai(req):
     text = resp.get("output_text") or "".join(
         c.get("text", "") for item in resp.get("output", []) if item.get("type") == "message"
         for c in item.get("content", []))
-    return StructuredResponse(_parse(text, "OpenAI"), usage)
+    return StructuredResponse(_parse(text, "OpenAI"), usage, resp.get("status") or "")
 
 
 def _llamacpp(req):
@@ -142,7 +144,8 @@ def _llamacpp(req):
                  timeout=1800)
     u = resp.get("usage", {})
     return StructuredResponse(_parse(resp["choices"][0]["message"]["content"], "llama.cpp"),
-                              TokenUsage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0)))
+                              TokenUsage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0)),
+                              resp["choices"][0].get("finish_reason") or "")
 
 
 ADAPTERS = {"anthropic": _anthropic, "openai": _openai, "llamacpp": _llamacpp}

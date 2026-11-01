@@ -1,0 +1,591 @@
+{
+ "source": "anthropic-claude-haiku-5-5-20261101T190559Z.json",
+ "second": "results/openai-gpt-5.6-luna-20261101T190738Z.json",
+ "guards": {
+  "baseline: pair check high": {
+   "accepted": 78,
+   "correct": 62,
+   "wrong": 9,
+   "ambiguous": 7,
+   "pipeline": {
+    "tags": 230,
+    "merges": 370,
+    "correct": 335,
+    "ambiguous": 12,
+    "wrong": 23,
+    "precision": 0.9358,
+    "recall": 0.8634,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 237,
+    "merges": 363,
+    "correct": 342,
+    "ambiguous": 8,
+    "wrong": 13,
+    "precision": 0.9634,
+    "recall": 0.8814,
+    "skipped_by_cannot_link": 9
+   },
+   "wrong_pairs": [
+    [
+     "design",
+     "design-system"
+    ],
+    [
+     "design-system",
+     "system design"
+    ],
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "type systems",
+     "ts"
+    ],
+    [
+     "Go",
+     "algos"
+    ],
+    [
+     "Ruby",
+     "ruby on rails"
+    ],
+    [
+     "cyber-security",
+     "Privacy"
+    ],
+    [
+     "db",
+     "sql"
+    ]
+   ]
+  },
+  "pair check high + echo matches": {
+   "accepted": 78,
+   "correct": 62,
+   "wrong": 9,
+   "ambiguous": 7,
+   "pipeline": {
+    "tags": 230,
+    "merges": 370,
+    "correct": 335,
+    "ambiguous": 12,
+    "wrong": 23,
+    "precision": 0.9358,
+    "recall": 0.8634,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 237,
+    "merges": 363,
+    "correct": 342,
+    "ambiguous": 8,
+    "wrong": 13,
+    "precision": 0.9634,
+    "recall": 0.8814,
+    "skipped_by_cannot_link": 9
+   },
+   "wrong_pairs": [
+    [
+     "design",
+     "design-system"
+    ],
+    [
+     "design-system",
+     "system design"
+    ],
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "type systems",
+     "ts"
+    ],
+    [
+     "Go",
+     "algos"
+    ],
+    [
+     "Ruby",
+     "ruby on rails"
+    ],
+    [
+     "cyber-security",
+     "Privacy"
+    ],
+    [
+     "db",
+     "sql"
+    ]
+   ]
+  },
+  "candidates only (no whole-list pairs)": {
+   "accepted": 60,
+   "correct": 51,
+   "wrong": 7,
+   "ambiguous": 2,
+   "pipeline": {
+    "tags": 244,
+    "merges": 356,
+    "correct": 330,
+    "ambiguous": 9,
+    "wrong": 17,
+    "precision": 0.951,
+    "recall": 0.8505,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 249,
+    "merges": 351,
+    "correct": 335,
+    "ambiguous": 5,
+    "wrong": 11,
+    "precision": 0.9682,
+    "recall": 0.8634,
+    "skipped_by_cannot_link": 5
+   },
+   "wrong_pairs": [
+    [
+     "design",
+     "design-system"
+    ],
+    [
+     "design-system",
+     "system design"
+    ],
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "type systems",
+     "ts"
+    ],
+    [
+     "Go",
+     "algos"
+    ],
+    [
+     "Ruby",
+     "ruby on rails"
+    ]
+   ]
+  },
+  "fix: symbol-aware candidates": {
+   "accepted": 78,
+   "correct": 62,
+   "wrong": 9,
+   "ambiguous": 7,
+   "pipeline": {
+    "tags": 230,
+    "merges": 370,
+    "correct": 335,
+    "ambiguous": 12,
+    "wrong": 23,
+    "precision": 0.9358,
+    "recall": 0.8634,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 237,
+    "merges": 363,
+    "correct": 342,
+    "ambiguous": 8,
+    "wrong": 13,
+    "precision": 0.9634,
+    "recall": 0.8814,
+    "skipped_by_cannot_link": 9
+   },
+   "wrong_pairs": [
+    [
+     "design",
+     "design-system"
+    ],
+    [
+     "design-system",
+     "system design"
+    ],
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "type systems",
+     "ts"
+    ],
+    [
+     "Go",
+     "algos"
+    ],
+    [
+     "Ruby",
+     "ruby on rails"
+    ],
+    [
+     "cyber-security",
+     "Privacy"
+    ],
+    [
+     "db",
+     "sql"
+    ]
+   ]
+  },
+  "veto: narrower-topic rule": {
+   "accepted": 66,
+   "correct": 53,
+   "wrong": 7,
+   "ambiguous": 6,
+   "pipeline": {
+    "tags": 240,
+    "merges": 360,
+    "correct": 330,
+    "ambiguous": 12,
+    "wrong": 18,
+    "precision": 0.9483,
+    "recall": 0.8505,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 244,
+    "merges": 356,
+    "correct": 335,
+    "ambiguous": 6,
+    "wrong": 15,
+    "precision": 0.9571,
+    "recall": 0.8634,
+    "skipped_by_cannot_link": 5
+   },
+   "wrong_pairs": [
+    [
+     "design-system",
+     "system design"
+    ],
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "type systems",
+     "ts"
+    ],
+    [
+     "Go",
+     "algos"
+    ],
+    [
+     "cyber-security",
+     "Privacy"
+    ],
+    [
+     "db",
+     "sql"
+    ]
+   ]
+  },
+  "symbol fix + narrower-topic veto": {
+   "accepted": 66,
+   "correct": 53,
+   "wrong": 7,
+   "ambiguous": 6,
+   "pipeline": {
+    "tags": 240,
+    "merges": 360,
+    "correct": 330,
+    "ambiguous": 12,
+    "wrong": 18,
+    "precision": 0.9483,
+    "recall": 0.8505,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 244,
+    "merges": 356,
+    "correct": 335,
+    "ambiguous": 6,
+    "wrong": 15,
+    "precision": 0.9571,
+    "recall": 0.8634,
+    "skipped_by_cannot_link": 5
+   },
+   "wrong_pairs": [
+    [
+     "design-system",
+     "system design"
+    ],
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "type systems",
+     "ts"
+    ],
+    [
+     "Go",
+     "algos"
+    ],
+    [
+     "cyber-security",
+     "Privacy"
+    ],
+    [
+     "db",
+     "sql"
+    ]
+   ]
+  },
+  "agreement: pair high AND whole-list proposed it": {
+   "accepted": 58,
+   "correct": 49,
+   "wrong": 4,
+   "ambiguous": 5,
+   "pipeline": {
+    "tags": 245,
+    "merges": 355,
+    "correct": 340,
+    "ambiguous": 7,
+    "wrong": 8,
+    "precision": 0.977,
+    "recall": 0.8763,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 245,
+    "merges": 355,
+    "correct": 340,
+    "ambiguous": 7,
+    "wrong": 8,
+    "precision": 0.977,
+    "recall": 0.8763,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": [
+    [
+     "design",
+     "design-system"
+    ],
+    [
+     "Ruby",
+     "ruby on rails"
+    ],
+    [
+     "cyber-security",
+     "Privacy"
+    ],
+    [
+     "db",
+     "sql"
+    ]
+   ]
+  },
+  "agreement: pair high AND whole-list proposed it high": {
+   "accepted": 32,
+   "correct": 32,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 271,
+    "merges": 329,
+    "correct": 329,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8479,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 271,
+    "merges": 329,
+    "correct": 329,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8479,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "whole-list high OR pair check high": {
+   "accepted": 83,
+   "correct": 67,
+   "wrong": 9,
+   "ambiguous": 7,
+   "pipeline": {
+    "tags": 226,
+    "merges": 374,
+    "correct": 339,
+    "ambiguous": 12,
+    "wrong": 23,
+    "precision": 0.9365,
+    "recall": 0.8737,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 236,
+    "merges": 364,
+    "correct": 343,
+    "ambiguous": 8,
+    "wrong": 13,
+    "precision": 0.9635,
+    "recall": 0.884,
+    "skipped_by_cannot_link": 13
+   },
+   "wrong_pairs": [
+    [
+     "design",
+     "design-system"
+    ],
+    [
+     "design-system",
+     "system design"
+    ],
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "type systems",
+     "ts"
+    ],
+    [
+     "Go",
+     "algos"
+    ],
+    [
+     "Ruby",
+     "ruby on rails"
+    ],
+    [
+     "cyber-security",
+     "Privacy"
+    ],
+    [
+     "db",
+     "sql"
+    ]
+   ]
+  },
+  "whole-list proposals at high, no pair check": {
+   "accepted": 37,
+   "correct": 37,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 266,
+    "merges": 334,
+    "correct": 334,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8608,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 270,
+    "merges": 330,
+    "correct": 330,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8505,
+    "skipped_by_cannot_link": 4
+   },
+   "wrong_pairs": []
+  },
+  "cross-model: both say high (pairs both were asked)": {
+   "accepted": 52,
+   "correct": 52,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 252,
+    "merges": 348,
+    "correct": 348,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8969,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 253,
+    "merges": 347,
+    "correct": 347,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8943,
+    "skipped_by_cannot_link": 1
+   },
+   "wrong_pairs": []
+  },
+  "cross-model: both say high, or only this one was asked": {
+   "accepted": 65,
+   "correct": 58,
+   "wrong": 2,
+   "ambiguous": 5,
+   "pipeline": {
+    "tags": 240,
+    "merges": 360,
+    "correct": 345,
+    "ambiguous": 11,
+    "wrong": 4,
+    "precision": 0.9885,
+    "recall": 0.8892,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 243,
+    "merges": 357,
+    "correct": 347,
+    "ambiguous": 8,
+    "wrong": 2,
+    "precision": 0.9943,
+    "recall": 0.8943,
+    "skipped_by_cannot_link": 3
+   },
+   "wrong_pairs": [
+    [
+     "cyber-security",
+     "Privacy"
+    ],
+    [
+     "db",
+     "sql"
+    ]
+   ]
+  }
+ }
+}

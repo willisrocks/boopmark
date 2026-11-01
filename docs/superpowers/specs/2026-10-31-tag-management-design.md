@@ -27,9 +27,11 @@ This spec fixes the problem in three layers. Each layer is useful without the ne
    (**6% precision**). The same model checking one pair at a time had **100% precision** (27/27,
    all hand-checked) at 26% recall. The fully local pipeline reached **600 → 303 → 276 tags with 0
    wrong merges**. Claude Haiku 5.5 (hosted, measured) raises recall to 0.89 (231 tags) but its
-   pair check let 11 wrong pairs through (23 wrong merges). Haiku stays the default, with free
-   guards in front of the review screen
-   (see [Hosted measurement](#hosted-measurement-claude-haiku-55)).
+   pair check let 9–11 wrong pairs through (23 wrong merges). Haiku stays the default. Three guards
+   took the wrong pre-checked merges to 0 at a recall of 0.89 in the measured run, with
+   replication pending: the pair check echoes both tags, only `high` verdicts are pre-checked,
+   and cannot-link applies in union-find
+   (see [Guards](#guards-for-the-haiku-default)).
 3. **A compact filter bar and a tag library page**: top tags by use, a searchable "More tags"
    popover that also matches aliases, multi-select, and a management page for rename, merge, delete
    and undo.
@@ -295,47 +297,122 @@ merges. They were of the same kinds: broader/narrower (`aws` → `Serverless`, `
 #### Guards for the Haiku default
 
 The wrong merges above would be pre-checked rows on the review screen, not silent rewrites, and
-every apply can be undone. Still, a pre-checked wrong row is a trap, so the goal is close to 0
-wrong among pre-checked rows, with the rest shown unchecked under "Check these". Guards, measured
-offline on the saved outputs with `scripts/tag-lab/guards.py` where the saved data allows:
+every apply can be undone. Still, a pre-checked wrong row is a trap. The goal is close to 0 wrong
+among pre-checked rows; the rest are shown unchecked under "Check these".
 
-| Guard | Extra cost | Haiku's 11 wrong pairs at `high` | Recall cost | Measured |
-|-------|------------|----------------------------------|-------------|----------|
-| **Symbol-aware candidates**: spell `#`/`+` out in the candidate pass (a bug fix) | none | removes `c#`~`continuous integration` (and `c#`~`cpp` at medium) | 0 of the 102 same-concept pairs | offline, exact |
-| **Narrower-topic veto**: word subset with a non-generic extra word, or a prefix/suffix within one word | none | removes 3 (`sql`, `design`, `Ruby` pairs) | would veto up to 21 of 102 correct pairs (`rails`~`ruby on rails`, `climate`~`climate change`, `cloud`~`cloud computing`, `perf`~`performance`) | offline, exact; **rejected**, because the same lexical shape is a synonym as often as a narrower topic |
-| **Candidates only** (do not pair-check whole-list proposals) | none | 7 wrong instead of 11 | recall of residual 0.63 → 0.52 | from the saved aggregates |
-| **Pre-check only whole-list proposals marked `high`**; every pair-check result goes unchecked under "Check these" | none | 0 wrong among 47 pre-checked | pre-checked recall smaller; the rest still shown | proposal level exact (47/0); pipeline numbers need the rerun |
-| **Agreement**: pre-check a pair only if the pair check says `high` *and* the whole-list call proposed it | none | needs per-pair data | needs per-pair data | rerun |
-| **Cannot-link** in union-find: never join two groups if any pair across them was judged "not same" | none | targets chains (`seo` → `selfhosted` → `homelab`) | small | rerun |
-| **Echo**: the pair answer repeats both tags, and mismatches are dropped | ~+50% pair output, about +$0.003 per run | targets the `seo` misalignments | none | rerun (`--pair-echo`) |
-| **Second opinion from luna** on Haiku's accepted pairs | about +$0.01 per run, and a second provider key | likely most | small | rerun |
-| **gpt-5.6-luna as the consolidation model** (user option) | +$0.005 per run | 2 wrong pairs, 7 wrong merges | none (recall 0.91) | measured |
+**Data.** A second round of helper runs on 2026-11-01 ($0.033) saved per-pair verdicts, which
+are tag names and answers only, no prompts or response text:
 
-**Proposed guard set (pending the rerun):**
+- Haiku 5.5: `…haiku-5-5-20261101T190559Z.json`
+- Haiku 5.5 with `--pair-echo`: `…haiku-5-5-echo-20261101T190653Z.json`
+- gpt-5.6-luna: `…gpt-5.6-luna-20261101T190738Z.json`
 
-1. Fix symbol handling in the candidate pass.
-2. Pre-check a merge only with two agreeing signals: a whole-list `high` proposal, or a whole-list
-   proposal that the pair check also judged `same`/`high`.
-3. Apply cannot-link in union-find.
-4. Show everything else the pair check accepted unchecked under "Check these".
+`scripts/tag-lab/guards.py` replays each guard offline on those verdicts, folds the accepted pairs
+into the deterministic groups as the product would, and scores the result. Its output is in
+`results/*.guards.json`.
 
-All four are free and keep the Haiku default. If the rerun shows misaligned answers, add echo
-(+$0.003 per run). The narrower-topic veto is rejected. luna stays a user option, not the default.
+**Guards on the Haiku run without echo** (pair check at `high` accepted 78 pairs, 9 of them wrong):
 
-**Rerun for the per-pair data** (the first runs saved aggregates only, so most guards cannot be
-measured from them; `hosted_eval.py` now saves per-pair verdicts, which are tag names and answers
-only, no prompts or bodies). Helper commands, about $0.04 in total, of the $9.90 left:
+| Guard (what gets pre-checked) | Extra cost | Pre-checked: correct / wrong | Pipeline: tags / wrong merges / recall | With cannot-link: wrong / recall |
+|--------------------------------|------------|------------------------------|----------------------------------------|----------------------------------|
+| Pair check `high` (baseline) | — | 62 / 9 | 230 / 23 / 0.86 | 13 / 0.88 |
+| Candidates only (no whole-list pairs) | none | 51 / 7 | 244 / 17 / 0.85 | 11 / 0.86 |
+| Narrower-topic lexical veto | none | 53 / 7 | 240 / 18 / 0.85 | 15 / 0.86 |
+| Agreement: pair `high` and the whole-list call proposed it | none | 49 / 4 | 245 / 8 / 0.88 | 8 / 0.88 |
+| Agreement: pair `high` and a whole-list `high` proposal | none | 32 / 0 | 271 / **0** / 0.85 | 0 / 0.85 |
+| Whole-list `high` proposals only, no pair check | none | 37 / 0 | 266 / **0** / 0.86 | 0 / 0.85 |
+| Cross-model: Haiku and luna both say `high` | +$0.015 per run, and a second provider key | 52 / 0 | 252 / **0** / 0.90 | 0 / 0.89 |
+| **Echo** (separate run; the answer repeats both tags) | +$0.001 per run (more pair output) | **52 / 0** | 253 / **0** / 0.89 (`high`+`medium`: 239 / **0** / 0.91) | 0 / 0.89 |
+| gpt-5.6-luna instead of Haiku (rerun) | +$0.006 per run | 68 / 0 | 238 / **0** / 0.93 | 0 / 0.93 |
+
+**Is it echo, or easier inputs?** The echo run's whole-list call came back empty (see below), so
+its pair check saw only the 287 string candidates, while the non-echo run also checked 55
+whole-list pairs. Two effects have to be separated:
+
+1. **Fewer whole-list pairs going in.** In the non-echo run, 2 of its 9 wrong pairs came only
+   from the whole-list call (`cyber-security`~`Privacy`, `db`~`sql`, both proposed at `low`), and
+   2 more came from both sources.
+2. **Echo itself.** Compare only the 287 candidate pairs. They are the same set, in the same
+   order and in identical batches of 40 for the first 280, in both runs:
+
+   | On the same 287 candidate pairs | Without echo | With echo |
+   |----------------------------------|--------------|-----------|
+   | Different-concept pairs judged "same" (any confidence) | **9 of 192** | **0 of 192** |
+   | Same-concept pairs judged "same" | 57 of 72 | 64 of 72 |
+   | Accepted at `high`: correct / wrong | 51 / **7** | 52 / **0** |
+
+   All 7 wrong candidate pairs (`design`~`design-system`, `design-system`~`system design`, `ui`~`user
+   experience`, `seo`~`selfhosted`, `type systems`~`ts`, `Go`~`algos`, `Ruby`~`ruby on rails`) were
+   answered "not same" with echo. Echo also recovered 7 true pairs the non-echo run missed at `high`
+   (`rust`~`rust-lang`, `Kubernetes`~`kubernets`, `neovim`~`nvim`, …). The non-echo runs are
+   consistent: both made 7 wrong candidate pairs at `high` (first run 7, rerun 7).
+
+   The echo *filter* dropped nothing: there were 0 mismatches. What changed is the model's answers.
+   Writing out both tags before answering anchors each verdict to its own pair. This fits the
+   `seo`~`self-hosting` and `Go`~`algos` answers, which look like verdicts meant for a neighbouring
+   pair.
+
+So effect 2 alone takes the wrong candidate pairs from 7 to 0 at no recall cost, on identical
+inputs. Effect 1 accounts for the rest. One echo run is not enough to rely on (see variance), so
+replication runs are requested below.
+
+**Run-to-run variance (Haiku, same inputs):**
+
+| | First run | Rerun |
+|---|-----------|-------|
+| Whole-list proposals, overall precision | 0.81 (75 / 18) | 0.76 (66 / 21) |
+| … at `high` | **1.00 (47 / 0)** | **1.00 (37 / 0)** |
+| … at `medium` / `low` | 0.80 / 0.25 | 0.96 / 0.23 |
+| Pair check `high`: wrong pairs (of them, from candidates) | 11 (7) | 9 (7) |
+| Pipeline wrong merges | 23 | 23 |
+
+The overall precision moves because of the `medium`/`low` buckets. The `high` bucket was perfect
+in both runs, and that bucket is what the guard pre-checks.
+
+**The empty whole-list answer.** In the echo run, the whole-list call (identical to the
+non-echo request; echo only changes the pair check) returned 40 output tokens: one group, which
+validation then dropped. It was not a refusal or `max_tokens`, since those raise and would be
+logged as failed calls, and none were. It was not a parse or schema error either, since those
+raise too. It was a schema-valid, nearly empty answer, which is model variance at `effort: low`.
+
+- The harness now records each attempt's `stop_reason`, returned and valid group counts, and
+  retries once when no valid group comes back.
+- The product does the same: retry once, then fall back to the pair check over string
+  candidates, which still runs and is what the echo run shows.
+
+**Recommendation (Haiku 5.5 stays the default):**
+
+1. **Fix symbol handling** in the candidate pass (`c#` is not `c`). It is free, and costs 0 of the
+   102 correct pairs.
+2. **The pair check echoes both tags** in every answer, and mismatched answers are dropped.
+   About +$0.001 per run.
+3. **Pre-check** the whole-list `high` proposals plus the pair-check `high` verdicts.
+4. **Cannot-link in union-find**: never join two groups if any pair across them was judged "not
+   same".
+5. Everything else the pair check accepted (`medium`) appears unchecked under "Check these".
+6. **Retry the whole-list call once** if it returns no valid group.
+
+Expected result, from this round: 0 wrong pre-checked merges at a pipeline recall of about
+0.89–0.91, for about $0.011 per consolidation run.
+
+**If echo does not replicate,** the fallback is to pre-check only whole-list `high` proposals and
+pairs where the pair check and a whole-list `high` proposal agree. That rule had 0 wrong in every
+run that had proposals, at a recall of 0.85–0.86, and is free. The narrower-topic veto stays
+rejected (recall cost up to 21 of 102 correct pairs). gpt-5.6-luna stays a user option: 0 wrong
+and recall 0.93 in its rerun, for $0.015 per run.
+
+**Replication runs (requested, helper).** Three Haiku echo runs with all consolidation steps,
+about $0.011 each, so about $0.035 in total (a retry adds about $0.004 if one triggers):
 
 ```sh
 git pull
-ANTHROPIC_API_KEY=... python3 scripts/tag-lab/hosted_eval.py --steps consolidate,pairs              # ~$0.010
-ANTHROPIC_API_KEY=... python3 scripts/tag-lab/hosted_eval.py --steps consolidate,pairs --pair-echo  # ~$0.013
-OPENAI_API_KEY=... python3 scripts/tag-lab/hosted_eval.py --provider openai --model gpt-5.6-luna --steps consolidate,pairs  # ~$0.015
-git add scripts/tag-lab/results/*.json && git commit -m "tag-lab: hosted reruns with per-pair details" && git push
+export ANTHROPIC_API_KEY=...
+for i in 1 2 3; do python3 scripts/tag-lab/hosted_eval.py --steps consolidate,pairs --pair-echo; done
+git add scripts/tag-lab/results/*.json && git commit -m "tag-lab: Haiku echo replication runs" && git push
 ```
 
-Then `python3 scripts/tag-lab/guards.py results/<haiku run>.json --second results/<luna run>.json`
-gives every guard's pipeline numbers. This spec's guard choice will be updated from them.
+Then `python3 scripts/tag-lab/guards.py results/<each echo run>.json` checks the recommended rule
+("whole-list high OR pair check high", with the cannot-link column) on each run.
 
 Differences from the local runs, by design:
 
@@ -879,12 +956,14 @@ half the size of the raw list (measured 1,980 vs 3,050 input tokens per save).
 | Hosted run, all steps (helper, 2026-11-01) | Anthropic claude-haiku-5-5, effort low | 70 | 317,304 | 18,539 | **0.041** |
 | Hosted run, all steps (helper, 2026-11-01) | OpenAI gpt-5.6-luna | 69 | 194,187 | 16,843 | **0.059** |
 | Decision APIs | — | 0 | 0 | 0 | 0 |
-| **Total paid** | | | | | **$0.10 of the $10 approved** (guard reruns ≈ $0.04 more, pending) |
+| Guard reruns with per-pair details: Haiku, Haiku echo, luna (helper, 2026-11-01) | Anthropic, OpenAI | 28 | 78,652 | 32,141 | **0.033** |
+| **Total paid** | | | | | **$0.13 of the $10 approved** (echo replication ≈ $0.035 more, pending) |
 
 ## Open items
 
-- **Guard rerun (helper, ≈ $0.04).** Commands in
-  [Guards for the Haiku default](#guards-for-the-haiku-default). It finalizes the pre-check rule.
+- **Echo replication (helper, ≈ $0.035).** Three Haiku `--pair-echo` runs; commands in
+  [Guards for the Haiku default](#guards-for-the-haiku-default). They confirm, or replace with the
+  fallback, the pre-check rule.
   The first run's setup still works from a clean clone: macOS system `python3` 3.9+, no Postgres,
   Rust or pip; `python3 scripts/tag-lab/hosted_eval.py --dry-run` checks it without a key.
 - **Decision API access.** The OpenAI Decisions guide says GA, but secondary reports from October

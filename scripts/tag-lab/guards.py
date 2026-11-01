@@ -112,6 +112,9 @@ def main():
                                              and not (r["source"] == "candidate" and symbol_artifact(r["a"], r["b"]))],
         "agreement: pair high AND whole-list proposed it": [r for r in high if r["source"] != "candidate"],
         "agreement: pair high AND whole-list proposed it high": [r for r in high if r["proposal_confidence"] == "high"],
+        "whole-list high OR pair check high": high + [
+            {"a": p["a"], "b": p["b"], "label": p["label"]} for p in proposals
+            if p["confidence"] == "high" and frozenset((p["a"], p["b"])) not in {frozenset((r["a"], r["b"])) for r in high}],
         "whole-list proposals at high, no pair check": [
             {"a": p["a"], "b": p["b"], "label": p["label"]} for p in proposals if p["confidence"] == "high"],
     }
