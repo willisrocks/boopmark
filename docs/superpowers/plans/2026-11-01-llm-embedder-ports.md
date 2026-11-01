@@ -65,10 +65,10 @@ behaviour changes.
 
 ## Steps
 
-- [ ] **1. Ports.** Add `domain/ports/llm_client.rs` and
+- [x] **1. Ports.** Add `domain/ports/llm_client.rs` and
   `domain/ports/embedder.rs`; register them in `ports/mod.rs`. Doc
   comments state the error contract.
-- [ ] **2. LLM adapters.** `adapters/llm_client.rs`: shared `post_json`
+- [x] **2. LLM adapters.** `adapters/llm_client.rs`: shared `post_json`
   with status mapping, `strip_unenforced`, `validate_schema`,
   `AnthropicLlmClient`, `OpenAiLlmClient`, `LlamaCppLlmClient`,
   `LlmClientConfig::from_env`, `LlmClientRouter`. Tests against a local
@@ -76,17 +76,18 @@ behaviour changes.
   request body), 401, 429, 5xx, malformed JSON, schema mismatch, refusal,
   truncation; llama.cpp success; router dispatch; config parsing; body
   never leaks into an error.
-- [ ] **3. Embedder adapters.** `adapters/embedder.rs`: `OpenAiEmbedder`
+- [x] **3. Embedder adapters.** `adapters/embedder.rs`: `OpenAiEmbedder`
   (default `text-embedding-3-large@1024`), `DisabledEmbedder`,
   `FastembedEmbedder` behind `local-embeddings`, `EmbeddingSettings`,
   `EmbedderRouter::from_env`. Add the optional `fastembed` dependency and
   the feature in `server/Cargo.toml`. Tests: settings, router, dimensions,
   batching and order, 401, 429, 5xx, malformed JSON, wrong vector
   count/size; the fastembed test is `#[ignore]` (downloads a model).
-- [ ] **4. Wiring.** Build `LlmClientRouter::from_config(&LlmClientConfig::from_env())`
+- [x] **4. Wiring.** Build `LlmClientRouter::from_config(&LlmClientConfig::from_env())`
   and `EmbedderRouter::from_env()` in `main.rs`; add `llm_client:
   Arc<dyn LlmClient>` and `embedder: Arc<dyn Embedder>` to `AppState`.
   Add the env vars to `.env.example` and the self-hosting docs.
-- [ ] **5. Verify.** `cargo test -p boopmark-server llm_client embedder`,
+- [x] **5. Verify.** `cargo test -p boopmark-server -- llm_client embedder` (cargo takes
+  several filters only after `--`),
   `cargo clippy --all-targets -- -D warnings` with and without
   `--features local-embeddings`, `cargo test` for the whole workspace.
