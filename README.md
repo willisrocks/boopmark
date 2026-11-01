@@ -226,6 +226,8 @@ SCREENSHOT_BACKEND=playwright
 SCREENSHOT_SERVICE_URL=http://screenshot-svc:3001
 ```
 
+The service only loads public `http`/`https` URLs on ports 80, 443, 8080 and 8443. Every browser request, redirects and subresources included, goes through a built-in proxy that refuses hosts resolving to private, loopback, link-local or other non-public addresses. Pages hosted on your own network cannot be captured. Run its tests with `node --test screenshot-svc/test`.
+
 ## CLI (`boop`)
 
 ```bash
