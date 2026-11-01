@@ -84,6 +84,14 @@ git push
   the comparison stays like for like. On 2026-11-01 the rebuild got 489 of
   490 pages, 4 of them edited, and the baseline reproduced the Postgres
   numbers to within 0.002 nDCG.
+- **Lexical runs stay pinned.** The full-text and trigram runs in
+  `results/lexical_runs.json` come from the pinned 2026-10-31 text, because
+  this path has no Postgres; only the vectors use the rebuilt text. So for
+  edited pages the fusion mixes pinned lexical ranks with current vectors.
+  Every model in a run, the local baseline included, gets the same lexical
+  runs, so model-to-model comparisons are unaffected, and the baseline
+  matching Postgres bounds the drift. To remove it, rebuild the runs with
+  `eval.py --export-runs` (path B) on the rebuilt corpus.
 
 ## B. Full reproduction with Postgres
 
