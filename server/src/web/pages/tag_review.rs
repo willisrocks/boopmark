@@ -16,7 +16,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::app::tag_consolidation::{NO_PROVIDER, StartOutcome};
+use crate::app::tag_consolidation::StartOutcome;
 use crate::domain::error::DomainError;
 use crate::domain::tag_alias::{ChangeKind, Confidence, ProposalSource, TagChangeBatch};
 use crate::domain::tag_consolidation::{
@@ -63,7 +63,8 @@ impl From<ReviewRow> for RowView {
                 ProposalSource::Llm => "AI",
                 ProposalSource::Deterministic => "Spelling",
             },
-            prechecked: row.prechecked,
+            // Only `high` rows start checked; the rest wait under "Check these".
+            prechecked: row.confidence == Confidence::High,
         }
     }
 }
@@ -219,16 +220,15 @@ async fn review_page(
         state.settings.get_text_provider_credentials(user.id).await,
         Ok(Some(_))
     );
-    let (high_rows, check_rows): (Vec<RowView>, Vec<RowView>) = review
+    let (high_rows, check_rows): (Vec<ReviewRow>, Vec<ReviewRow>) = review
         .rows
         .into_iter()
-        .map(RowView::from)
-        .partition(|row| row.confidence == Confidence::High.as_str());
+        .partition(|row| row.confidence == Confidence::High);
     render(&ReviewPage {
         user: Some(user.into()),
         header_shows_bookmark_actions: false,
-        check_rows,
-        high_rows,
+        check_rows: check_rows.into_iter().map(RowView::from).collect(),
+        high_rows: high_rows.into_iter().map(RowView::from).collect(),
         batches: review.batches.into_iter().map(BatchView::from).collect(),
         status: status_view(review.job.as_ref()),
         has_provider,
@@ -262,9 +262,6 @@ async fn run(State(state): State<AppState>, AuthUser(user): AuthUser) -> Respons
     match state.tag_consolidation.start(user.id).await {
         Ok(StartOutcome::Started) => Redirect::to(PAGE).into_response(),
         Ok(StartOutcome::AlreadyRunning) => back("notice", "A run is already going.", None),
-        Err(DomainError::InvalidInput(message)) if message == NO_PROVIDER => {
-            back("error", NO_PROVIDER, None)
-        }
         Err(e) => back_with_error(e),
     }
 }

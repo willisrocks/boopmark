@@ -17,11 +17,14 @@
 
 use crate::domain::error::DomainError;
 use crate::domain::tag_alias::{
-    Confidence, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagMerge,
-    TagMergeProposal,
+    ChangeKind, Confidence, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias,
+    TagMerge, TagMergeProposal, string_enum,
 };
-use crate::domain::tag_normalize::{Level, choose_display, clean_tag, compact_key, group_tags};
+use crate::domain::tag_normalize::{
+    Level, bounded_tag, choose_display, clean_tag, compact_key, group_tags,
+};
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
@@ -29,9 +32,6 @@ use uuid::Uuid;
 pub const MAX_UNITS: usize = 1_000;
 /// The most pairs one run checks (20 calls of 40).
 pub const MAX_PAIRS: usize = 800;
-/// Tags the LLM writes are bounded like every other tag.
-pub const MAX_TAG_CHARS: usize = 100;
-
 /// One distinct tag on the user's bookmarks, with a sample title for
 /// disambiguation (`go` the language or the game).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,21 +104,6 @@ fn spell_symbols(tag: &str) -> String {
         .replace('+', "plus")
 }
 
-fn letters(tag: &str) -> Vec<char> {
-    spell_symbols(tag)
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect()
-}
-
-fn words(tag: &str) -> Vec<String> {
-    spell_symbols(tag)
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 fn is_subsequence(short: &[char], long: &[char]) -> bool {
     let mut rest = long.iter();
     short.iter().all(|c| rest.any(|l| l == c))
@@ -144,31 +129,50 @@ fn contains(long: &[char], short: &[char]) -> bool {
     long.windows(short.len()).any(|w| w == short)
 }
 
+/// What the candidate pass compares, computed once per tag.
+struct CandidateKey {
+    letters: Vec<char>,
+    words: HashSet<String>,
+    initials: Vec<char>,
+}
+
+impl CandidateKey {
+    fn new(tag: &str) -> Self {
+        let spelled = spell_symbols(tag);
+        let words: Vec<&str> = spelled
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
+        Self {
+            letters: spelled.chars().filter(|c| c.is_alphanumeric()).collect(),
+            initials: words.iter().filter_map(|w| w.chars().next()).collect(),
+            words: words.into_iter().map(str::to_string).collect(),
+        }
+    }
+}
+
 /// The string-candidate pass (`scripts/tag-lab/verify.py`), symbol-aware.
 /// Free and deterministic; the pair check decides.
-pub fn candidate_reason(a: &str, b: &str) -> Option<CandidateReason> {
-    let (la, lb) = (letters(a), letters(b));
+#[cfg(test)]
+fn candidate_reason(a: &str, b: &str) -> Option<CandidateReason> {
+    key_reason(&CandidateKey::new(a), &CandidateKey::new(b))
+}
+
+fn key_reason(a: &CandidateKey, b: &CandidateKey) -> Option<CandidateReason> {
+    let (la, lb) = (&a.letters, &b.letters);
     if la.is_empty() || lb.is_empty() {
         return None;
     }
-    let (short, long, long_tag) = if la.len() <= lb.len() {
-        (&la, &lb, b)
+    let (short, long, long_key) = if la.len() <= lb.len() {
+        (la, lb, b)
     } else {
-        (&lb, &la, a)
+        (lb, la, a)
     };
-    let long_words = words(long_tag);
     // One letter is not an abbreviation: `c` would match every `c...` tag.
     if (2..=5).contains(&short.len()) && short[0] == long[0] && is_subsequence(short, long) {
         return Some(CandidateReason::Abbreviation);
     }
-    if short.len() <= 5
-        && long_words.len() > 1
-        && *short
-            == long_words
-                .iter()
-                .filter_map(|w| w.chars().next())
-                .collect::<Vec<_>>()
-    {
+    if short.len() <= 5 && long_key.initials.len() > 1 && *short == long_key.initials {
         return Some(CandidateReason::Initials);
     }
     if short.len() >= 3
@@ -186,16 +190,12 @@ pub fn candidate_reason(a: &str, b: &str) -> Option<CandidateReason> {
     if short.len() >= 2 && contains(long, short) {
         return Some(CandidateReason::Substring);
     }
-    if short.len() >= 5 && edit_distance(&la, &lb) <= 2 {
+    if short.len() >= 5 && long.len() - short.len() <= 2 && edit_distance(la, lb) <= 2 {
         return Some(CandidateReason::Typo);
     }
-    let (wa, wb): (HashSet<String>, HashSet<String>) = (
-        words(a).into_iter().collect(),
-        words(b).into_iter().collect(),
-    );
-    let shared = wa.intersection(&wb).count();
-    let all = wa.union(&wb).count();
-    (all > 0 && shared * 2 >= all && shared > 0).then_some(CandidateReason::SharedWords)
+    let shared = a.words.intersection(&b.words).count();
+    let all = a.words.union(&b.words).count();
+    (shared > 0 && shared * 2 >= all).then_some(CandidateReason::SharedWords)
 }
 
 /// A whole-list proposal that survived validation, as unit indices.
@@ -233,10 +233,7 @@ pub fn validate_whole_list(groups: &[RawGroup], units: &[TagUnit]) -> Vec<Propos
             .or_insert(Some(i));
     }
     let lookup = |tag: &str| -> Option<usize> {
-        if tag.chars().count() > MAX_TAG_CHARS || tag.chars().any(char::is_control) {
-            return None;
-        }
-        let tag = tag.trim();
+        let tag = bounded_tag(tag)?;
         exact
             .get(tag)
             .copied()
@@ -271,15 +268,11 @@ pub fn validate_whole_list(groups: &[RawGroup], units: &[TagUnit]) -> Vec<Propos
     out
 }
 
-/// A pair to check, as unit indices with what put it on the list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A pair of units to check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CandidatePair {
     pub a: usize,
     pub b: usize,
-    /// Set when the string pass found it.
-    pub reason: Option<CandidateReason>,
-    /// The whole-list proposal's confidence, when that call proposed it.
-    pub proposed: Option<Confidence>,
 }
 
 /// Every pair from either source, once, capped at [`MAX_PAIRS`]. Whole-list
@@ -287,34 +280,25 @@ pub struct CandidatePair {
 /// (`wfh` / `remote work`).
 pub fn candidate_pairs(units: &[TagUnit], groups: &[ProposedGroup]) -> Vec<CandidatePair> {
     let mut pairs: Vec<CandidatePair> = Vec::new();
-    let mut index: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
     let key = |a: usize, b: usize| (a.min(b), a.max(b));
     for group in groups {
         for &member in group.members.iter().filter(|&&m| m != group.canonical) {
-            index.insert(key(member, group.canonical), pairs.len());
+            seen.insert(key(member, group.canonical));
             pairs.push(CandidatePair {
                 a: member,
                 b: group.canonical,
-                reason: candidate_reason(&units[member].tag, &units[group.canonical].tag),
-                proposed: Some(group.confidence),
             });
         }
     }
+    let keys: Vec<CandidateKey> = units.iter().map(|u| CandidateKey::new(&u.tag)).collect();
     'outer: for a in 0..units.len() {
         for b in a + 1..units.len() {
             if pairs.len() >= MAX_PAIRS {
                 break 'outer;
             }
-            if index.contains_key(&key(a, b)) {
-                continue;
-            }
-            if let Some(reason) = candidate_reason(&units[a].tag, &units[b].tag) {
-                pairs.push(CandidatePair {
-                    a,
-                    b,
-                    reason: Some(reason),
-                    proposed: None,
-                });
+            if !seen.contains(&key(a, b)) && key_reason(&keys[a], &keys[b]).is_some() {
+                pairs.push(CandidatePair { a, b });
             }
         }
     }
@@ -378,9 +362,10 @@ impl Groups {
 /// True when `short` is an abbreviation, initials or numeronym of `long`
 /// (`js` of `javascript`, `k8s` of `kubernetes`).
 fn is_short_form(short: &str, long: &str) -> bool {
-    letters(short).len() < letters(long).len()
+    let (short, long) = (CandidateKey::new(short), CandidateKey::new(long));
+    short.letters.len() < long.letters.len()
         && matches!(
-            candidate_reason(short, long),
+            key_reason(&short, &long),
             Some(
                 CandidateReason::Abbreviation
                     | CandidateReason::Initials
@@ -515,31 +500,14 @@ pub fn build_proposals(
     out.into_iter().map(|(_, p)| p).collect()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JobStatus {
-    Running,
-    Succeeded,
-    Failed,
-}
-
-impl JobStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-        }
+string_enum!(
+    /// Where the latest consolidation run of a user stands.
+    JobStatus {
+        Running => "running",
+        Succeeded => "succeeded",
+        Failed => "failed",
     }
-
-    pub fn parse(value: &str) -> Result<Self, DomainError> {
-        match value {
-            "running" => Ok(Self::Running),
-            "succeeded" => Ok(Self::Succeeded),
-            "failed" => Ok(Self::Failed),
-            other => Err(DomainError::Internal(format!("unknown JobStatus: {other}"))),
-        }
-    }
-}
+);
 
 /// A run still marked running this long after it started died with its
 /// process; a new run may replace it. This is longer than the slowest
@@ -606,8 +574,6 @@ pub struct ReviewRow {
     /// Uses of the spellings that change: at most this many bookmarks.
     pub bookmarks: i64,
     pub sample_title: Option<String>,
-    /// Only `high` rows start checked; the rest wait under "Check these".
-    pub prechecked: bool,
 }
 
 /// The pending deterministic proposals an LLM proposal covers: those whose
@@ -629,18 +595,21 @@ fn covered<'a>(
     })
 }
 
-/// The ids to apply for a selection: the selected pending proposals plus
-/// the deterministic ones their LLM rows cover, each once.
-pub fn expand_selection(selected: &[Uuid], pending: &[TagMergeProposal]) -> Vec<Uuid> {
-    let mut ids: Vec<Uuid> = Vec::new();
+/// The proposals to apply for a selection: the selected pending proposals
+/// plus the deterministic ones their LLM rows cover, each once.
+fn expand_selection<'a>(
+    selected: &[Uuid],
+    pending: &'a [TagMergeProposal],
+) -> Vec<&'a TagMergeProposal> {
+    let mut out: Vec<&TagMergeProposal> = Vec::new();
     for proposal in pending.iter().filter(|p| selected.contains(&p.id)) {
-        for id in std::iter::once(proposal.id).chain(covered(proposal, pending).map(|p| p.id)) {
-            if !ids.contains(&id) {
-                ids.push(id);
+        for p in std::iter::once(proposal).chain(covered(proposal, pending)) {
+            if !out.iter().any(|o| o.id == p.id) {
+                out.push(p);
             }
         }
     }
-    ids
+    out
 }
 
 /// Every spelling that applying `proposal` merges: its members, then the
@@ -725,8 +694,8 @@ pub struct ReviewedApply {
     pub merges: Vec<TagMerge>,
     /// Edited targets to save on their proposals.
     pub edited: Vec<(Uuid, String)>,
-    /// True when an AI proposal is among them (an `llm_merge` batch).
-    pub llm: bool,
+    /// `llm_merge` when an AI proposal is among them, else `normalize`.
+    pub kind: ChangeKind,
 }
 
 /// Plan applying the checked rows against the proposals pending now
@@ -738,6 +707,11 @@ pub fn plan_reviewed_apply(
     rows: &[ReviewedRow],
     pending: &[TagMergeProposal],
 ) -> Result<ReviewedApply, DomainError> {
+    if rows.is_empty() {
+        return Err(DomainError::InvalidInput(
+            "Check at least one merge.".into(),
+        ));
+    }
     let changed = || DomainError::InvalidInput(LIST_CHANGED.into());
     let mut targets: HashMap<Uuid, String> = HashMap::new();
     let mut edited = Vec::new();
@@ -752,8 +726,7 @@ pub fn plan_reviewed_apply(
             return Err(changed());
         }
         let target = match &row.canonical {
-            Some(submitted) => clean_tag(submitted)
-                .filter(|t| t.chars().count() <= MAX_TAG_CHARS)
+            Some(submitted) => bounded_tag(submitted)
                 .ok_or_else(|| {
                     DomainError::InvalidInput(format!(
                         "\"{}\" is not a valid tag name.",
@@ -769,11 +742,7 @@ pub fn plan_reviewed_apply(
         targets.insert(proposal.id, target);
     }
     let selected: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
-    let ids = expand_selection(&selected, pending);
-    let applied: Vec<&TagMergeProposal> = ids
-        .iter()
-        .filter_map(|id| pending.iter().find(|p| p.id == *id))
-        .collect();
+    let applied = expand_selection(&selected, pending);
     Ok(ReviewedApply {
         merges: applied
             .iter()
@@ -782,8 +751,12 @@ pub fn plan_reviewed_apply(
                 members: p.members.clone(),
             })
             .collect(),
-        llm: applied.iter().any(|p| p.source == ProposalSource::Llm),
-        ids,
+        kind: if applied.iter().any(|p| p.source == ProposalSource::Llm) {
+            ChangeKind::LlmMerge
+        } else {
+            ChangeKind::Normalize
+        },
+        ids: applied.iter().map(|p| p.id).collect(),
         edited,
     })
 }
@@ -824,7 +797,6 @@ pub fn review_rows(pending: &[TagMergeProposal], samples: &[TagSample]) -> Vec<R
                     .iter()
                     .find_map(|tag| by_tag.get(tag.as_str())?.sample_title.clone()),
                 chips,
-                prechecked: proposal.confidence == Confidence::High,
             }
         })
         .collect();
@@ -865,12 +837,7 @@ mod tests {
     }
 
     fn pair(a: usize, b: usize) -> CandidatePair {
-        CandidatePair {
-            a,
-            b,
-            reason: None,
-            proposed: None,
-        }
+        CandidatePair { a, b }
     }
 
     fn verdict(pair: usize, same: bool, confidence: Confidence) -> PairVerdict {
@@ -1012,11 +979,8 @@ mod tests {
         }];
         let pairs = candidate_pairs(&units, &groups);
         assert_eq!(
-            pairs
-                .iter()
-                .map(|p| (p.a, p.b, p.proposed))
-                .collect::<Vec<_>>(),
-            vec![(2, 3, Some(Confidence::Medium)), (0, 1, None)]
+            pairs.iter().map(|p| (p.a, p.b)).collect::<Vec<_>>(),
+            vec![(2, 3), (0, 1)]
         );
     }
 
@@ -1178,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn review_lists_check_these_first_and_prechecks_only_high() {
+    fn review_lists_check_these_first_then_high() {
         use ProposalSource::*;
         let pending = vec![
             proposal(
@@ -1207,24 +1171,17 @@ mod tests {
             sample("vim", 6, None),
         ];
         let rows = review_rows(&pending, &samples);
-        let summary: Vec<(&str, Confidence, bool, i64)> = rows
+        let summary: Vec<(&str, Confidence, i64)> = rows
             .iter()
-            .map(|r| {
-                (
-                    r.canonical.as_str(),
-                    r.confidence,
-                    r.prechecked,
-                    r.bookmarks,
-                )
-            })
+            .map(|r| (r.canonical.as_str(), r.confidence, r.bookmarks))
             .collect();
         assert_eq!(
             summary,
             vec![
-                ("remote work", Confidence::Medium, false, 1),
-                ("vim", Confidence::Low, false, 2),
-                ("javascript", Confidence::High, true, 4),
-                ("github", Confidence::High, true, 2),
+                ("remote work", Confidence::Medium, 1),
+                ("vim", Confidence::Low, 2),
+                ("javascript", Confidence::High, 4),
+                ("github", Confidence::High, 2),
             ]
         );
         assert_eq!(rows[2].sample_title.as_deref(), Some("Closures"));
@@ -1241,6 +1198,10 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn ids(proposals: Vec<&TagMergeProposal>) -> Vec<Uuid> {
+        proposals.iter().map(|p| p.id).collect()
     }
 
     #[test]
@@ -1266,11 +1227,11 @@ mod tests {
         assert_eq!(llm_row.bookmarks, 3);
 
         assert_eq!(
-            expand_selection(&[llm.id], &pending),
+            ids(expand_selection(&[llm.id], &pending)),
             vec![llm.id, variants.id]
         );
         assert_eq!(
-            expand_selection(&[variants.id, llm.id, other.id], &pending),
+            ids(expand_selection(&[variants.id, llm.id, other.id], &pending)),
             vec![variants.id, llm.id, other.id]
         );
         // Unknown ids are not invented.
@@ -1321,7 +1282,7 @@ mod tests {
 
         let plan = plan_reviewed_apply(&[row.clone()], &pending).unwrap();
         assert_eq!(plan.ids, vec![llm.id, variants.id]);
-        assert!(plan.llm);
+        assert_eq!(plan.kind, ChangeKind::LlmMerge);
         assert_eq!(plan.edited, vec![(llm.id, "JavaScript".to_string())]);
         assert_eq!(
             plan.merges,

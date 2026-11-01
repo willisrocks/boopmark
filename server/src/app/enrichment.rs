@@ -1,4 +1,4 @@
-use crate::app::settings::SettingsService;
+use crate::app::settings::{SettingsService, TextProviderCredentials};
 use crate::domain::ports::llm_enricher::{EnrichmentInput, LlmEnricher};
 use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
 use crate::domain::ports::metadata::MetadataExtractor;
@@ -166,18 +166,36 @@ mod tests {
             fail: provider_fail,
             partial: provider_partial,
         });
-        let mut service = EnrichmentService::new(
+        let service = EnrichmentService::new(
             Arc::new(FakeMetadata { fail: scrape_fail }),
             enricher.clone(),
             settings,
+            vocabulary.unwrap_or_else(|| Arc::new(NoTags)),
         );
-        if let Some(vocabulary) = vocabulary {
-            service = service.with_tag_vocabulary(vocabulary);
-        }
         let result = service
             .suggest(user_id, "https://example.com/article?capture=1#section")
             .await;
         (result, enricher)
+    }
+
+    /// A library with no tags; previews keep the tags as given.
+    struct NoTags;
+
+    impl TagVocabulary for NoTags {
+        fn canonical_tags(
+            &self,
+            _user_id: Uuid,
+        ) -> BoxFuture<'_, Result<Vec<(String, i64)>, DomainError>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn preview_tags(
+            &self,
+            _user_id: Uuid,
+            tags: Vec<String>,
+        ) -> BoxFuture<'_, Result<Vec<String>, DomainError>> {
+            Box::pin(async move { Ok(tags) })
+        }
     }
 
     /// Canonical tags `rust` and `GitHub`; previews map `ai-tag` to `AI`.
@@ -323,7 +341,9 @@ pub struct EnrichmentService<M, R> {
     metadata: Arc<M>,
     enricher: Arc<dyn LlmEnricher>,
     settings: Arc<SettingsService<R>>,
-    vocabulary: Option<Arc<dyn TagVocabulary>>,
+    /// The user's canonical tags are offered to the LLM, and its answer is
+    /// resolved against them before it is shown (tag spec §5).
+    vocabulary: Arc<dyn TagVocabulary>,
 }
 
 impl<M, R> EnrichmentService<M, R>
@@ -335,20 +355,14 @@ where
         metadata: Arc<M>,
         enricher: Arc<dyn LlmEnricher>,
         settings: Arc<SettingsService<R>>,
+        vocabulary: Arc<dyn TagVocabulary>,
     ) -> Self {
         Self {
             metadata,
             enricher,
             settings,
-            vocabulary: None,
+            vocabulary,
         }
-    }
-
-    /// Offer the user's canonical tags to the LLM and resolve its answer
-    /// against them before it is shown (tag spec §5).
-    pub fn with_tag_vocabulary(mut self, vocabulary: Arc<dyn TagVocabulary>) -> Self {
-        self.vocabulary = Some(vocabulary);
-        self
     }
 
     pub async fn suggest(&self, user_id: Uuid, url: &str) -> SuggestionResult {
@@ -362,8 +376,10 @@ where
             };
         }
 
-        // Scrape metadata
-        let metadata = match self.metadata.extract(url).await {
+        // The scrape is a network call; load what the LLM needs meanwhile.
+        let (metadata, context) =
+            tokio::join!(self.metadata.extract(url), self.llm_context(user_id));
+        let metadata = match metadata {
             Ok(meta) => Some(meta),
             Err(e) => {
                 tracing::warn!(url = %url, error = %e, "metadata scrape failed");
@@ -372,7 +388,13 @@ where
         };
 
         // Attempt LLM enrichment
-        let enrichment = self.try_llm_enrich(user_id, url, &metadata).await;
+        let enrichment = match context {
+            Some((credentials, canonical_tags)) => {
+                self.try_llm_enrich(user_id, url, &metadata, credentials, canonical_tags)
+                    .await
+            }
+            None => None,
+        };
 
         // Merge: LLM takes priority over scrape for title/description/tags
         SuggestionResult {
@@ -390,12 +412,12 @@ where
         }
     }
 
-    async fn try_llm_enrich(
+    /// The provider credentials and the canonical tags, or `None` when AI is
+    /// not configured (then no tag list is loaded).
+    async fn llm_context(
         &self,
         user_id: Uuid,
-        url: &str,
-        metadata: &Option<crate::domain::bookmark::UrlMetadata>,
-    ) -> Option<crate::domain::ports::llm_enricher::EnrichmentOutput> {
+    ) -> Option<(TextProviderCredentials, Vec<(String, i64)>)> {
         let credentials = match self.settings.get_text_provider_credentials(user_id).await {
             Ok(Some(credentials)) => credentials,
             Ok(None) => return None,
@@ -404,17 +426,25 @@ where
                 return None;
             }
         };
+        let canonical_tags = self
+            .vocabulary
+            .canonical_tags(user_id)
+            .await
+            .inspect_err(|e| {
+                tracing::warn!(user_id = %user_id, error = %e, "failed to load canonical tags for enrichment");
+            })
+            .unwrap_or_default();
+        Some((credentials, canonical_tags))
+    }
 
-        let canonical_tags = match &self.vocabulary {
-            Some(vocabulary) => vocabulary
-                .canonical_tags(user_id)
-                .await
-                .inspect_err(|e| {
-                    tracing::warn!(user_id = %user_id, error = %e, "failed to load canonical tags for enrichment");
-                })
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
+    async fn try_llm_enrich(
+        &self,
+        user_id: Uuid,
+        url: &str,
+        metadata: &Option<crate::domain::bookmark::UrlMetadata>,
+        credentials: TextProviderCredentials,
+        canonical_tags: Vec<(String, i64)>,
+    ) -> Option<crate::domain::ports::llm_enricher::EnrichmentOutput> {
         let input = EnrichmentInput {
             url: url.to_string(),
             scraped_title: metadata.as_ref().and_then(|m| m.title.clone()),
@@ -438,10 +468,12 @@ where
                 return None;
             }
         };
-        if let Some(vocabulary) = &self.vocabulary
-            && !output.tags.is_empty()
-        {
-            match vocabulary.preview_tags(user_id, output.tags.clone()).await {
+        if !output.tags.is_empty() {
+            match self
+                .vocabulary
+                .preview_tags(user_id, output.tags.clone())
+                .await
+            {
                 Ok(tags) => output.tags = tags,
                 Err(e) => {
                     tracing::warn!(user_id = %user_id, error = %e, "failed to resolve suggested tags");

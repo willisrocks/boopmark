@@ -35,5 +35,9 @@ pub(super) async fn lock_user_tags(
         .execute(conn)
         .await
         .map(|_| ())
-        .map_err(|e| crate::domain::error::DomainError::Internal(e.to_string()))
+        .map_err(db_err)
+}
+
+pub(super) fn db_err(e: sqlx::Error) -> crate::domain::error::DomainError {
+    crate::domain::error::DomainError::Internal(e.to_string())
 }

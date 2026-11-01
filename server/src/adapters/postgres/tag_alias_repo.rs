@@ -1,4 +1,4 @@
-use super::{PostgresPool, lock_user_tags};
+use super::{PostgresPool, db_err, lock_user_tags};
 use crate::domain::error::DomainError;
 use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::tag_alias::{
@@ -14,10 +14,6 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, Postgres, Transaction};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
-
-fn db_err(e: sqlx::Error) -> DomainError {
-    DomainError::Internal(e.to_string())
-}
 
 type AliasRow = (String, String, String, String, Option<Uuid>);
 
@@ -636,13 +632,8 @@ impl TagAliasRepository for PostgresPool {
             .await
             .map_err(db_err)?;
         }
-        let kind = if plan.llm {
-            ChangeKind::LlmMerge
-        } else {
-            ChangeKind::Normalize
-        };
         let batch =
-            apply_proposal_merges_tx(&mut tx, user_id, kind, &plan.merges, &plan.ids).await?;
+            apply_proposal_merges_tx(&mut tx, user_id, plan.kind, &plan.merges, &plan.ids).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(batch)
     }

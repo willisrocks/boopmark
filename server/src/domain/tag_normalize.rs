@@ -103,6 +103,15 @@ pub fn existing_singular(raw: &str, exists: impl Fn(&str) -> bool) -> Option<Str
         .find(|sk| *sk != own && exists(sk))
 }
 
+/// The longest tag the LLM may write or a user may type as a merge target.
+pub const MAX_TAG_CHARS: usize = 100;
+
+/// [`clean_tag`], bounded to [`MAX_TAG_CHARS`]: a tag the LLM or an edited
+/// merge target may introduce.
+pub fn bounded_tag(raw: &str) -> Option<&str> {
+    clean_tag(raw).filter(|t| t.chars().count() <= MAX_TAG_CHARS)
+}
+
 /// Trim a tag as written by a client. Empty tags and tags containing control
 /// characters are not tags; they return `None`.
 pub fn clean_tag(raw: &str) -> Option<&str> {

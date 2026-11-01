@@ -193,10 +193,12 @@ async fn main() {
     let auth_service = Arc::new(AuthService::new(db.clone(), db.clone(), db.clone()));
     let enricher: Arc<dyn LlmEnricher> = Arc::new(LlmClientEnricher::new(llm_client.clone()));
     let tag_vocabulary: Arc<dyn TagVocabulary> = tag_alias_service.clone();
-    let enrichment_service = Arc::new(
-        EnrichmentService::new(metadata_for_enrichment, enricher, settings_service.clone())
-            .with_tag_vocabulary(tag_vocabulary),
-    );
+    let enrichment_service = Arc::new(EnrichmentService::new(
+        metadata_for_enrichment,
+        enricher,
+        settings_service.clone(),
+        tag_vocabulary,
+    ));
     let tag_consolidation_service = Arc::new(TagConsolidationService::new(
         tag_alias_service.clone(),
         db.clone(),

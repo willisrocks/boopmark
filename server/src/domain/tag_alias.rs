@@ -32,7 +32,7 @@ macro_rules! string_enum {
         }
 
         impl $name {
-            pub fn as_str(self) -> &'static str {
+            pub const fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $text),+
                 }
@@ -50,6 +50,7 @@ macro_rules! string_enum {
         }
     };
 }
+pub(crate) use string_enum;
 
 string_enum!(
     /// Who decided that a spelling belongs to a canonical tag.

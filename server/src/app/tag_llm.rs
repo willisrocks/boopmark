@@ -19,7 +19,7 @@ use crate::domain::tag_consolidation::{
     CandidatePair, PairVerdict, RawGroup, TagUnit, build_proposals, candidate_pairs,
     validate_whole_list,
 };
-use crate::domain::tag_normalize::clean_tag;
+use crate::domain::tag_normalize::{MAX_TAG_CHARS, bounded_tag};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -31,8 +31,6 @@ pub const MAX_PROMPT_TAGS: usize = 300;
 pub const MAX_ENUM_TAGS: usize = 500;
 /// Tags kept from one suggestion.
 pub const MAX_SUGGESTED_TAGS: usize = 5;
-/// The length limit for a new tag, as for every tag the LLM writes.
-pub const MAX_TAG_CHARS: usize = 100;
 
 const SUGGEST_SYSTEM: &str = "You organize one person's bookmark library. For the bookmark in the \
 user message, write a concise title, a one or two sentence description, and pick 2 to 5 tags.\n\n\
@@ -169,12 +167,7 @@ pub fn parse_suggestion(json: &Value, canonical: &[String]) -> EnrichmentOutput 
             push(tag, &mut tags);
         }
     }
-    if let Some(new) = strings("new")
-        .into_iter()
-        .next()
-        .and_then(clean_tag)
-        .filter(|t| t.chars().count() <= MAX_TAG_CHARS)
-    {
+    if let Some(new) = strings("new").into_iter().next().and_then(bounded_tag) {
         push(new, &mut tags);
     }
     tags.truncate(MAX_SUGGESTED_TAGS);
@@ -258,7 +251,11 @@ const PAIR_MAX_OUTPUT_TOKENS: u32 = 6_144;
 /// One retry for an empty whole-list answer or a failed pair batch.
 const ATTEMPTS: usize = 2;
 
-const CONFIDENCE: [&str; 3] = ["high", "medium", "low"];
+const CONFIDENCE: [&str; 3] = [
+    Confidence::High.as_str(),
+    Confidence::Medium.as_str(),
+    Confidence::Low.as_str(),
+];
 
 /// A tag name or title as a JSON string, safe inside a delimited block.
 fn quote(value: &str, max_chars: usize) -> String {
@@ -269,12 +266,7 @@ fn quote(value: &str, max_chars: usize) -> String {
 }
 
 fn parse_confidence(value: Option<&Value>) -> Option<Confidence> {
-    match value?.as_str()? {
-        "high" => Some(Confidence::High),
-        "medium" => Some(Confidence::Medium),
-        "low" => Some(Confidence::Low),
-        _ => None,
-    }
+    Confidence::parse(value?.as_str()?).ok()
 }
 
 pub fn whole_list_schema() -> Value {
@@ -495,9 +487,7 @@ pub async fn find_merges(
                     break;
                 }
             }
-            Err(DomainError::InvalidInput(message)) => {
-                return Err(DomainError::InvalidInput(message));
-            }
+            Err(error @ DomainError::InvalidInput(_)) => return Err(error),
             Err(error) => {
                 tracing::warn!(error = %error, "whole-list tag consolidation call failed")
             }
@@ -527,9 +517,7 @@ pub async fn find_merges(
                     answered_calls += 1;
                     break;
                 }
-                Err(DomainError::InvalidInput(message)) => {
-                    return Err(DomainError::InvalidInput(message));
-                }
+                Err(error @ DomainError::InvalidInput(_)) => return Err(error),
                 Err(error) => tracing::warn!(error = %error, "tag pair check call failed"),
             }
         }
@@ -869,20 +857,7 @@ pub(crate) mod tests {
     #[test]
     fn pair_verdicts_ignore_unknown_and_repeated_ids_and_keep_batch_offsets() {
         let units = units(&[("javascript", 9), ("js", 4), ("kubernetes", 5), ("k8s", 3)]);
-        let batch = [
-            CandidatePair {
-                a: 0,
-                b: 1,
-                reason: None,
-                proposed: None,
-            },
-            CandidatePair {
-                a: 2,
-                b: 3,
-                reason: None,
-                proposed: None,
-            },
-        ];
+        let batch = [CandidatePair { a: 0, b: 1 }, CandidatePair { a: 2, b: 3 }];
         let (verdicts, mismatches) = parse_pair_verdicts(
             &json!({"pairs": [
                 {"id": 1, "a": "k8s", "b": "Kubernetes", "same": false, "confidence": "high"},

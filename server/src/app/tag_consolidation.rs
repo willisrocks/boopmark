@@ -13,6 +13,7 @@ use crate::domain::ports::llm_client::LlmClient;
 use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
 use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::ports::tag_consolidation_job_repo::TagConsolidationJobRepository;
+use crate::domain::ports::tag_vocabulary::TagVocabulary;
 use crate::domain::tag_alias::{ChangeKind, ProposalStatus, TagChangeBatch, TagMergeProposal};
 use crate::domain::tag_consolidation::{
     ConsolidationJob, JobOutcome, JobStatus, ReviewRow, ReviewedRow, STALE_RUN_MINUTES,
@@ -31,6 +32,19 @@ pub const NO_PROVIDER: &str = "Add an AI provider key and enable AI in Settings 
 const REJECTED: &str =
     "Your AI provider rejected the request. Check the API key and model in Settings.";
 const UNAVAILABLE: &str = "The AI provider did not answer. Try again in a minute.";
+
+/// Why a run ended without proposals.
+enum RunFailure {
+    /// The provider key was removed or AI disabled after the run started.
+    NoProvider,
+    Failed(DomainError),
+}
+
+impl From<DomainError> for RunFailure {
+    fn from(error: DomainError) -> Self {
+        Self::Failed(error)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartOutcome {
@@ -85,8 +99,7 @@ where
         {
             return Err(DomainError::InvalidInput(NO_PROVIDER.into()));
         }
-        let distinct = self.tags.tag_samples(user_id).await?.len();
-        if distinct < MIN_TAGS_FOR_CONSOLIDATION {
+        if self.tags.canonical_tags(user_id).await?.len() < MIN_TAGS_FOR_CONSOLIDATION {
             return Err(DomainError::InvalidInput(
                 "Add a few more tags before looking for duplicates.".into(),
             ));
@@ -116,17 +129,21 @@ where
                 input_tokens: i64::from(search.usage.input_tokens),
                 output_tokens: i64::from(search.usage.output_tokens),
             },
-            Err(error) => {
-                // Errors carry the vendor and status, never a key or prompt.
-                tracing::warn!(user_id = %user_id, error = %error, "tag consolidation run failed");
-                let message = match error {
-                    DomainError::InvalidInput(message) if message == NO_PROVIDER => message,
-                    DomainError::InvalidInput(_) => REJECTED.into(),
-                    _ => UNAVAILABLE.into(),
+            Err(failure) => {
+                let message = match failure {
+                    RunFailure::NoProvider => NO_PROVIDER,
+                    RunFailure::Failed(error) => {
+                        // Errors carry the vendor and status, never a key or prompt.
+                        tracing::warn!(user_id = %user_id, error = %error, "tag consolidation run failed");
+                        match error {
+                            DomainError::InvalidInput(_) => REJECTED,
+                            _ => UNAVAILABLE,
+                        }
+                    }
                 };
                 JobOutcome {
                     status: JobStatus::Failed,
-                    error: Some(message),
+                    error: Some(message.into()),
                     proposals: 0,
                     pairs_checked: 0,
                     input_tokens: 0,
@@ -145,12 +162,12 @@ where
         &self,
         user_id: Uuid,
         run_id: Uuid,
-    ) -> Result<Option<(MergeSearch, usize)>, DomainError> {
+    ) -> Result<Option<(MergeSearch, usize)>, RunFailure> {
         let credentials = self
             .settings
             .get_text_provider_credentials(user_id)
             .await?
-            .ok_or_else(|| DomainError::InvalidInput(NO_PROVIDER.into()))?;
+            .ok_or(RunFailure::NoProvider)?;
         // The LLM rows build on the spelling-variant rows, so refresh them.
         self.tags.propose_normalization(user_id).await?;
         let units = tag_units(&self.tags.tag_samples(user_id).await?);
@@ -184,26 +201,24 @@ where
     }
 
     pub async fn review(&self, user_id: Uuid) -> Result<Review, DomainError> {
-        let pending = self
-            .tags
-            .list_proposals(user_id, Some(ProposalStatus::Pending))
-            .await?;
-        let samples = self.tags.tag_samples(user_id).await?;
-        let aliases = self.tags.list_aliases(user_id).await?;
+        let (pending, samples, aliases, batches, job) = tokio::try_join!(
+            self.tags
+                .list_proposals(user_id, Some(ProposalStatus::Pending)),
+            self.tags.tag_samples(user_id),
+            self.tags.list_aliases(user_id),
+            self.tags.list_batches(user_id, RECENT_BATCHES * 4),
+            self.job(user_id),
+        )?;
         let on_bookmarks: HashSet<String> = samples.iter().map(|s| s.tag.clone()).collect();
         let pending = resolve_through_aliases(&pending, &aliases, &on_bookmarks);
-        let batches = self
-            .tags
-            .list_batches(user_id, RECENT_BATCHES * 4)
-            .await?
-            .into_iter()
-            .filter(|b| matches!(b.kind, ChangeKind::Normalize | ChangeKind::LlmMerge))
-            .take(RECENT_BATCHES as usize)
-            .collect();
         Ok(Review {
             rows: review_rows(&pending, &samples),
-            job: self.job(user_id).await?,
-            batches,
+            job,
+            batches: batches
+                .into_iter()
+                .filter(|b| matches!(b.kind, ChangeKind::Normalize | ChangeKind::LlmMerge))
+                .take(RECENT_BATCHES as usize)
+                .collect(),
         })
     }
 

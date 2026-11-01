@@ -1,6 +1,7 @@
 //! Image-prompt assistance on the shared `LlmClient` port: the selected text
 //! provider turns bookmark context into one direction for the image model.
 
+use crate::app::tag_llm::bound;
 use crate::domain::error::DomainError;
 use crate::domain::llm_settings::TextProvider;
 use crate::domain::ports::image_generator::ImageGenerationContext;
@@ -39,26 +40,17 @@ impl LlmClientPromptAssistant {
     }
 }
 
-fn prompt_source(value: &str, max_chars: usize) -> String {
-    value
-        .chars()
-        .take(max_chars)
-        .collect::<String>()
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 fn user_prompt(context: &ImageGenerationContext, instruction: Option<&str>) -> String {
     let optional = |value: Option<&str>, max_chars: usize| {
         value
-            .map(|value| prompt_source(value, max_chars))
+            .map(|value| bound(value, max_chars))
             .unwrap_or_else(|| "(none)".to_string())
     };
     format!(
         "<untrusted_article_context>\nURL: {}\nTitle: {}\nDescription: {}\n\
          </untrusted_article_context>\n<authorized_user_creative_direction>\n{}\n\
          </authorized_user_creative_direction>",
-        prompt_source(&context.url, 2_000),
+        bound(&context.url, 2_000),
         optional(context.title.as_deref(), 500),
         optional(context.description.as_deref(), 4_000),
         optional(instruction, 2_000),
@@ -108,29 +100,7 @@ impl LlmPromptAssistant for LlmClientPromptAssistant {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ports::llm_client::{StructuredResponse, TokenUsage};
-    use std::sync::Mutex;
-
-    struct Recording {
-        answer: Value,
-        seen: Mutex<Vec<StructuredRequest>>,
-    }
-
-    impl LlmClient for Recording {
-        fn complete_structured(
-            &self,
-            req: StructuredRequest,
-        ) -> BoxFuture<'_, Result<StructuredResponse, DomainError>> {
-            self.seen.lock().unwrap().push(req);
-            let json = self.answer.clone();
-            Box::pin(async move {
-                Ok(StructuredResponse {
-                    json,
-                    usage: TokenUsage::default(),
-                })
-            })
-        }
-    }
+    use crate::app::tag_llm::tests::StubLlm;
 
     fn context() -> ImageGenerationContext {
         ImageGenerationContext {
@@ -142,10 +112,9 @@ mod tests {
 
     #[tokio::test]
     async fn sends_delimited_context_and_the_owner_direction_through_the_port() {
-        let client = Arc::new(Recording {
-            answer: json!({"prompt": "  A warm, close crop of a lighthouse  "}),
-            seen: Mutex::new(vec![]),
-        });
+        let client = Arc::new(StubLlm::answering(json!({
+            "prompt": "  A warm, close crop of a lighthouse  "
+        })));
         let assistant = LlmClientPromptAssistant::new(client.clone());
         let prompt = assistant
             .assist_image_prompt(
@@ -159,8 +128,8 @@ mod tests {
             .unwrap();
         assert_eq!(prompt, "A warm, close crop of a lighthouse");
 
-        let seen = client.seen.lock().unwrap();
-        let req = &seen[0];
+        let requests = client.requests();
+        let req = &requests[0];
         assert_eq!(req.provider, TextProvider::OpenAi);
         assert_eq!(req.model, "gpt-5.6-luna");
         assert_eq!(req.json_schema["required"], json!(["prompt"]));
@@ -176,10 +145,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_prompt_is_an_error() {
-        let assistant = LlmClientPromptAssistant::new(Arc::new(Recording {
-            answer: json!({"prompt": "   "}),
-            seen: Mutex::new(vec![]),
-        }));
+        let assistant =
+            LlmClientPromptAssistant::new(Arc::new(StubLlm::answering(json!({"prompt": "   "}))));
         let error = assistant
             .assist_image_prompt(TextProvider::Anthropic, "key", "m", context(), None)
             .await

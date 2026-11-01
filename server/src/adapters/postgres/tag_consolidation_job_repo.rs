@@ -1,5 +1,5 @@
 use super::tag_alias_repo::replace_pending_tx;
-use super::{PostgresPool, lock_user_tags};
+use super::{PostgresPool, db_err, lock_user_tags};
 use crate::domain::error::DomainError;
 use crate::domain::ports::tag_consolidation_job_repo::TagConsolidationJobRepository;
 use crate::domain::tag_alias::{NewTagMergeProposal, ProposalSource};
@@ -7,21 +7,36 @@ use crate::domain::tag_consolidation::{ConsolidationJob, JobOutcome, JobStatus};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-fn db_err(e: sqlx::Error) -> DomainError {
-    DomainError::Internal(e.to_string())
+#[derive(sqlx::FromRow)]
+struct JobRow {
+    run_id: Uuid,
+    status: String,
+    started_at: DateTime<Utc>,
+    finished_at: Option<DateTime<Utc>>,
+    error: Option<String>,
+    proposals: i32,
+    pairs_checked: i32,
+    input_tokens: i64,
+    output_tokens: i64,
 }
 
-type JobRow = (
-    Uuid,
-    String,
-    DateTime<Utc>,
-    Option<DateTime<Utc>>,
-    Option<String>,
-    i32,
-    i32,
-    i64,
-    i64,
-);
+impl TryFrom<JobRow> for ConsolidationJob {
+    type Error = DomainError;
+
+    fn try_from(row: JobRow) -> Result<Self, DomainError> {
+        Ok(Self {
+            run_id: row.run_id,
+            status: JobStatus::parse(&row.status)?,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+            error: row.error,
+            proposals: row.proposals,
+            pairs_checked: row.pairs_checked,
+            input_tokens: row.input_tokens,
+            output_tokens: row.output_tokens,
+        })
+    }
+}
 
 impl TagConsolidationJobRepository for PostgresPool {
     async fn start_job(
@@ -102,7 +117,7 @@ impl TagConsolidationJobRepository for PostgresPool {
     }
 
     async fn get_job(&self, user_id: Uuid) -> Result<Option<ConsolidationJob>, DomainError> {
-        let row = sqlx::query_as::<_, JobRow>(
+        sqlx::query_as::<_, JobRow>(
             "SELECT run_id, status, started_at, finished_at, error, proposals, pairs_checked,
                     input_tokens, output_tokens
              FROM tag_consolidation_jobs WHERE user_id = $1",
@@ -110,32 +125,8 @@ impl TagConsolidationJobRepository for PostgresPool {
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(db_err)?;
-        row.map(
-            |(
-                run_id,
-                status,
-                started_at,
-                finished_at,
-                error,
-                proposals,
-                pairs_checked,
-                input_tokens,
-                output_tokens,
-            )| {
-                Ok(ConsolidationJob {
-                    run_id,
-                    status: JobStatus::parse(&status)?,
-                    started_at,
-                    finished_at,
-                    error,
-                    proposals,
-                    pairs_checked,
-                    input_tokens,
-                    output_tokens,
-                })
-            },
-        )
+        .map_err(db_err)?
+        .map(ConsolidationJob::try_from)
         .transpose()
     }
 }
@@ -151,7 +142,7 @@ mod tag_consolidation_postgres_tests {
         BoxFuture, LlmClient, StructuredRequest, StructuredResponse, TokenUsage,
     };
     use crate::domain::ports::tag_resolver::TagResolver;
-    use crate::domain::tag_alias::{ProposalSource, TagWrite};
+    use crate::domain::tag_alias::{Confidence, ProposalSource, TagWrite};
     use crate::domain::tag_consolidation::{
         LIST_CHANGED, ReviewRow, ReviewedRow, STALE_RUN_MINUTES,
     };
@@ -434,7 +425,11 @@ mod tag_consolidation_postgres_tests {
                     r.canonical,
                     r.source,
                     r.confidence.as_str(),
-                    if r.prechecked { "checked" } else { "unchecked" },
+                    if r.confidence == Confidence::High {
+                        "checked"
+                    } else {
+                        "unchecked"
+                    },
                     chips.join(", ")
                 )
             })
