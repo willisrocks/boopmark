@@ -43,6 +43,10 @@ async function seedLibrary(page) {
     title,
     tags: [tag],
   }));
+  await importRecords(page, records);
+}
+
+async function importRecords(page, records) {
   const response = await page.request.post(
     "/api/v1/bookmarks/import?format=jsonl&mode=restore&strategy=upsert",
     {
@@ -162,25 +166,15 @@ test("a spelling that differs only by spaces shows its spaces", async ({ page })
   await signIn(page);
   await clearSuggestions(page);
   // HTML collapses spaces, so without a marker " zig " would look like "zig".
-  const records = ["zig", " zig "].map((tag, i) => ({
-    id: crypto.randomUUID(),
-    url: `https://tags.example.com/zig-${i}`,
-    title: `Zig ${i}`,
-    tags: [tag],
-  }));
-  const response = await page.request.post(
-    "/api/v1/bookmarks/import?format=jsonl&mode=restore&strategy=upsert",
-    {
-      multipart: {
-        file: {
-          name: "zig.jsonl",
-          mimeType: "application/x-ndjson",
-          buffer: Buffer.from(records.map((r) => JSON.stringify(r)).join("\n")),
-        },
-      },
-    },
+  await importRecords(
+    page,
+    ["zig", " zig "].map((tag, i) => ({
+      id: crypto.randomUUID(),
+      url: `https://tags.example.com/zig-${i}`,
+      title: `Zig ${i}`,
+      tags: [tag],
+    })),
   );
-  expect(response.status()).toBe(200);
 
   await page.goto("/tags/review");
   await page.getByTestId("review-run-normalize").click();

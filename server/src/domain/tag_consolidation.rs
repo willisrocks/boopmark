@@ -615,17 +615,23 @@ fn expand_selection<'a>(
 /// Every spelling that applying `proposal` merges: its members, then the
 /// members of the spelling-variant rows it covers, each once.
 pub fn row_spellings(proposal: &TagMergeProposal, pending: &[TagMergeProposal]) -> Vec<String> {
-    let mut spellings: Vec<String> = Vec::new();
-    for tag in proposal
-        .members
-        .iter()
-        .chain(covered(proposal, pending).flat_map(|p| &p.members))
-    {
-        if !spellings.contains(tag) {
-            spellings.push(tag.clone());
+    unique(
+        proposal
+            .members
+            .iter()
+            .chain(covered(proposal, pending).flat_map(|p| &p.members)),
+    )
+}
+
+/// `tags` in order, each once.
+fn unique<'a>(tags: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tag in tags {
+        if !out.contains(tag) {
+            out.push(tag.clone());
         }
     }
-    spellings
+    out
 }
 
 /// Pending proposals as they apply now. A member or target that is on no
@@ -776,32 +782,25 @@ pub fn plan_reviewed_apply(
     // spelling row. Its spellings go with one of them only (the highest
     // confidence, then the first), so an edited target cannot give them two
     // targets; the other row's shared member still chains to its target.
-    let rank = |c: Confidence| match c {
-        Confidence::High => 0,
-        Confidence::Medium => 1,
-        Confidence::Low => 2,
-    };
-    let owner = |variants: &TagMergeProposal| {
-        merging
-            .iter()
-            .filter(|c| covered(c, pending).any(|v| v.id == variants.id))
-            .min_by_key(|c| rank(c.confidence))
-            .map(|c| c.id)
-    };
+    let mut by_rank = merging.clone();
+    by_rank.sort_by_key(|p| p.confidence.rank());
+    let mut owner: HashMap<Uuid, Uuid> = HashMap::new();
+    for p in &by_rank {
+        for v in covered(p, pending) {
+            owner.entry(v.id).or_insert(p.id);
+        }
+    }
     let merges = merging
         .iter()
-        .map(|p| {
-            let mut members: Vec<String> = Vec::new();
-            let owned = covered(p, pending).filter(|v| owner(v) == Some(p.id));
-            for tag in p.members.iter().chain(owned.flat_map(|v| &v.members)) {
-                if !members.contains(tag) {
-                    members.push(tag.clone());
-                }
-            }
-            TagMerge {
-                canonical: targets[&p.id].clone(),
-                members,
-            }
+        .map(|p| TagMerge {
+            canonical: targets[&p.id].clone(),
+            members: unique(
+                p.members.iter().chain(
+                    covered(p, pending)
+                        .filter(|v| owner[&v.id] == p.id)
+                        .flat_map(|v| &v.members),
+                ),
+            ),
         })
         .collect();
     Ok(ReviewedApply {

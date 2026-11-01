@@ -18,9 +18,7 @@ use uuid::Uuid;
 
 use crate::app::tag_consolidation::StartOutcome;
 use crate::domain::error::DomainError;
-use crate::domain::tag_alias::{
-    ChangeKind, Confidence, ProposalSource, TagChangeBatch, undo_cutoff,
-};
+use crate::domain::tag_alias::{ChangeKind, Confidence, ProposalSource, TagChangeBatch};
 use crate::domain::tag_consolidation::{
     ConsolidationJob, JobStatus, ReviewChip, ReviewRow, ReviewedRow,
 };
@@ -125,7 +123,7 @@ impl From<TagChangeBatch> for BatchView {
             bookmarks: batch.summary.bookmarks_changed,
             when: batch.created_at.format("%b %d, %H:%M UTC").to_string(),
             undone: batch.undone_at.is_some(),
-            expired: batch.created_at < undo_cutoff(Utc::now()),
+            expired: batch.undo_expired(Utc::now()),
         }
     }
 }

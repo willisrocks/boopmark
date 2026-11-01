@@ -4,7 +4,7 @@ use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::tag_alias::{
     AliasSource, ChangeKind, Confidence, NewTagMergeProposal, ProposalSource, ProposalStatus,
     TagAlias, TagChangeBatch, TagChangeSummary, TagIndex, TagMerge, TagMergeProposal, TagWrite,
-    UNDO_WINDOW_DAYS, merge_mapping, resolve_writes, rewrite_tags, undo_cutoff, undo_tags,
+    UNDO_WINDOW_DAYS, merge_mapping, resolve_writes, rewrite_tags, undo_tags,
 };
 use crate::domain::tag_consolidation::{
     ReviewedRow, TagSample, plan_reviewed_apply, resolve_through_aliases,
@@ -685,7 +685,7 @@ impl TagAliasRepository for PostgresPool {
                 "this change was already undone".into(),
             ));
         }
-        if batch.created_at < undo_cutoff(Utc::now()) {
+        if batch.undo_expired(Utc::now()) {
             return Err(DomainError::InvalidInput(format!(
                 "This change is more than {UNDO_WINDOW_DAYS} days old and can no longer be undone."
             )));
