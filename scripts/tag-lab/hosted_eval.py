@@ -30,6 +30,7 @@ JSON file under scripts/tag-lab/results/.
 import argparse
 import datetime
 import json
+import os
 import pathlib
 import random
 import sys
@@ -79,6 +80,9 @@ CURRENT_SCHEMA = {
 
 class BudgetExceeded(Exception):
     pass
+
+
+KEY_VARS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
 
 class Spend:
@@ -135,6 +139,8 @@ def make_ask(args, spend):
         except LlmError as e:
             if len(e.args) > 1 and isinstance(e.args[1], TokenUsage):
                 spend.add(step, e.args[1])
+            if e.fatal:
+                raise
             print(f"  {step}: call failed ({e.args[0]}); counted as no answer", flush=True)
             spend.steps.setdefault(step, {}).setdefault("failed_calls", 0)
             spend.steps[step]["failed_calls"] += 1
@@ -349,6 +355,9 @@ def main():
     cap = min(args.budget_usd, HARD_CAP_USD)
     steps = [s.strip() for s in args.steps.split(",") if s.strip()]
 
+    key_var = KEY_VARS.get(args.provider)
+    if key_var and not args.dry_run and not os.environ.get(key_var, "").strip():
+        sys.exit(f"{key_var} is not set (use --dry-run to check the setup without a key)")
     spend = Spend(args.provider, args.model, cap, args.dry_run)
     ask = make_ask(args, spend)
     truth, counts, det, samples, bookmarks = load()
@@ -369,9 +378,11 @@ def main():
             results["suggest"] = step_suggest(ask, truth, counts, det, bookmarks, args.suggest_n)
     except BudgetExceeded as e:
         stopped = str(e)
+    except LlmError as e:
+        stopped = f"fatal API error, stopped: {e.args[0]}"
     results.update({"seconds": round(time.time() - t0, 1), "usd_total": round(spend.usd, 6),
                     "worst_case_usd_of_requests_built": round(spend.worst_case_total, 4),
-                    "tokens_by_step": spend.steps, "stopped_by_budget": stopped})
+                    "tokens_by_step": spend.steps, "stopped": stopped})
 
     RESULTS.mkdir(exist_ok=True)
     path = RESULTS / f"{run}{'.dry-run' if args.dry_run else ''}.json"
@@ -400,7 +411,7 @@ def main():
               f"out={s.get('output_tokens', 0)} usd={s.get('usd', 0.0):.4f}")
     print(f"spent ${spend.usd:.4f}  worst case of requests built ${spend.worst_case_total:.4f}  {results['seconds']}s")
     if stopped:
-        print(f"STOPPED BY SPEND GUARD: {stopped}")
+        print(f"STOPPED: {stopped}")
     print(f"results: {path.relative_to(HERE.parent.parent)}")
     return 2 if stopped else 0
 

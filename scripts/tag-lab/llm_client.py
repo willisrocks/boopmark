@@ -50,7 +50,14 @@ class StructuredResponse:
 
 
 class LlmError(Exception):
-    pass
+    """args: (message[, TokenUsage billed before the failure]). `fatal` marks
+    errors that will repeat on every call (no key, rejected key, unknown
+    model, invalid request), so a caller should stop instead of retrying."""
+    fatal = False
+
+
+class FatalLlmError(LlmError):
+    fatal = True
 
 
 def strip_unenforced(schema):
@@ -64,7 +71,7 @@ def strip_unenforced(schema):
 def _key(name):
     value = os.environ.get(name, "").strip()
     if not value:
-        raise LlmError(f"{name} is not set")
+        raise FatalLlmError(f"{name} is not set")
     return value
 
 
@@ -75,7 +82,8 @@ def _post(url, headers, body, timeout):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        raise LlmError(f"HTTP {e.code} from {url.split('/')[2]}") from None
+        error = FatalLlmError if e.code in (400, 401, 403, 404) else LlmError
+        raise error(f"HTTP {e.code} from {url.split('/')[2]}") from None
     except urllib.error.URLError as e:
         raise LlmError(f"cannot reach {url.split('/')[2]}: {e.reason}") from None
 
