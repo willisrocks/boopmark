@@ -31,6 +31,10 @@ pub struct Config {
     pub metadata_fallback_backend: MetadataFallbackBackend,
     pub iframely_api_key: Option<String>,
     pub opengraph_io_api_key: Option<String>,
+    /// `ARTICLE_INGEST_ENABLED=0` stops fetching articles; text that was
+    /// already stored stays searchable.
+    pub article_ingest_enabled: bool,
+    pub article_ingest_concurrency: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -110,8 +114,31 @@ impl Config {
             },
             iframely_api_key: env::var("IFRAMELY_API_KEY").ok(),
             opengraph_io_api_key: env::var("OPENGRAPH_IO_API_KEY").ok(),
+            article_ingest_enabled: parse_flag(
+                env::var("ARTICLE_INGEST_ENABLED").ok().as_deref(),
+                true,
+            ),
+            article_ingest_concurrency: parse_ingest_concurrency(
+                env::var("ARTICLE_INGEST_CONCURRENCY").ok().as_deref(),
+            ),
         }
     }
+}
+
+fn parse_flag(value: Option<&str>, default: bool) -> bool {
+    match value.map(str::trim) {
+        Some("1" | "true" | "TRUE") => true,
+        Some("0" | "false" | "FALSE") => false,
+        _ => default,
+    }
+}
+
+/// Concurrent article fetches, 4 by default and at most 32.
+fn parse_ingest_concurrency(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .map_or(4, |n| n.min(32))
 }
 
 fn llm_settings_encryption_key() -> String {
@@ -136,6 +163,7 @@ fn llm_settings_encryption_key() -> String {
 mod tests {
     use super::{
         LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, llm_settings_encryption_key,
+        parse_flag, parse_ingest_concurrency,
     };
 
     /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.
@@ -222,6 +250,24 @@ mod tests {
             _ => MetadataFallbackBackend::None,
         };
         assert!(matches!(backend, MetadataFallbackBackend::OpengraphIo));
+    }
+
+    #[test]
+    fn article_ingest_is_enabled_unless_switched_off() {
+        assert!(parse_flag(None, true));
+        assert!(parse_flag(Some("1"), true));
+        assert!(!parse_flag(Some("0"), true));
+        assert!(!parse_flag(Some("false"), true));
+        assert!(parse_flag(Some("bogus"), true));
+    }
+
+    #[test]
+    fn article_ingest_concurrency_defaults_to_four_and_is_bounded() {
+        assert_eq!(parse_ingest_concurrency(None), 4);
+        assert_eq!(parse_ingest_concurrency(Some("8")), 8);
+        assert_eq!(parse_ingest_concurrency(Some("0")), 4);
+        assert_eq!(parse_ingest_concurrency(Some("nope")), 4);
+        assert_eq!(parse_ingest_concurrency(Some("500")), 32);
     }
 
     #[test]

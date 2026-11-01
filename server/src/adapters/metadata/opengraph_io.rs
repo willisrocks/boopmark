@@ -47,7 +47,7 @@ impl MetadataExtractor for OpengraphIoExtractor {
     ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
         let url = url.to_string();
         Box::pin(async move {
-            let clean_url = super::validate_public_url(&url)?;
+            let clean_url = crate::adapters::net::validate_public_url(&url)?;
             let encoded_url = urlencoding::encode(&clean_url);
             let resp = self
                 .client

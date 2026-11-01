@@ -86,6 +86,11 @@ jobs:
           cargo test -p boopmark-server
           adapters::postgres::tag_alias_repo::tag_alias_postgres_tests::
           -- --ignored
+      - name: Test search and ingest DB
+        run: >-
+          cargo test -p boopmark-server
+          adapters::postgres::search_repo::search_tests
+          -- --ignored
 
   install-script:
     name: Install script tests

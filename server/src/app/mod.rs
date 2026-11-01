@@ -1,7 +1,9 @@
 pub mod auth;
 pub mod bookmarks;
 pub mod enrichment;
+pub mod ingest;
 pub mod invite;
+pub mod search;
 pub mod secrets;
 pub mod settings;
 // Merge and undo are called by the /tags page and review screen (later steps).

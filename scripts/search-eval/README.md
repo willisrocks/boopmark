@@ -27,6 +27,7 @@ There are two ways to run it:
 | `embedders.py` | Embedding providers used by B: fastembed, OpenAI and Voyage. |
 | `eval.py` | B: every leg as SQL in four index scenarios, the fusions, the fallback-gap table and latency. It writes `results/local.json` and `results/lexical_runs.json`. |
 | `hosted_eval.py` | A: embeds with hosted models and the local baseline, ranks with exact cosine in numpy, and fuses with `results/lexical_runs.json`. Spend guard included. |
+| `app_eval.py` | C: seeds the corpus into the app's own tables (migration 016 on) and runs the 48 queries through a running server's `/api/v1/bookmarks?search=`. It measures the search the app serves. |
 | `results/` | Committed results. `results/cache/` holds local embedding caches and is gitignored. |
 
 ## A. Hosted-model comparison from a clean macOS clone
@@ -141,3 +142,35 @@ git push
    checks that the Python RRF equals the production SQL from the spec; this
    matched on 48 of 48 queries. To judge new hits, look at the unlabelled
    results in `pool.jsonl` and add the relevant ones to `queries.jsonl`.
+
+## C. The app's own search, through its API
+
+`app_eval.py` measures what the server actually serves: its migrations, its
+search query and its `EMBEDDING_BACKEND`. It needs a database migrated by the
+server (migration 016 or later), the server running against it, and the
+rebuilt corpus from step A1. No Docker, and no pgvector for the lexical-only
+search.
+
+```bash
+# Postgres 16 on 55432 as in B1 (pg_trgm is enough), then the server:
+DATABASE_URL=postgres://boopmark@127.0.0.1:55432/boopmark PORT=4100 \
+    EMBEDDING_BACKEND=disabled cargo run --release -p boopmark-server &
+
+uv run scripts/search-eval/app_eval.py --db postgres://boopmark@127.0.0.1:55432/boopmark \
+    --server http://127.0.0.1:4100 --corpus ~/search-eval-data/corpus.jsonl
+```
+
+- `--text corpus` (the default) stores the pinned corpus text as fetched
+  articles and the 72 failed links as `failed`, the spec's `main/fallback`
+  scenario. Same text as `eval.py`, so the result compares with its table.
+- `--text ingest` leaves every bookmark pending and lets the server's ingest
+  worker fetch and extract the live pages (`ARTICLE_INGEST_ENABLED=1`, the
+  default). Wikipedia is one host, so at one request per host per second the
+  run takes about six minutes.
+- It creates the user if needed, replaces their bookmarks, and uses a
+  temporary API key that it deletes afterwards.
+
+On 2026-11-01, with the lexical-only search (migration 016,
+`EMBEDDING_BACKEND=disabled`), `--text corpus` scored nDCG@10 **0.791**, the
+same as `eval.py`'s "fts AND→OR + trgm title+description" row in every query
+type.

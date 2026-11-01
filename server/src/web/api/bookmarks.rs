@@ -181,13 +181,32 @@ fn idempotency_from_headers(
 
 // --- Handlers ---
 
+/// A listed bookmark. Searches add a `snippet`: the passage of the article
+/// that matched, as plain text.
+#[derive(Serialize)]
+struct ListedBookmark {
+    #[serde(flatten)]
+    bookmark: Bookmark,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
+}
+
 async fn list_bookmarks(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
-    let filter = BookmarkFilter::from(params);
-    let result = with_bookmarks!(&state.bookmarks, svc => svc.list(user.id, filter).await);
+    let result = state
+        .find_bookmarks(user.id, BookmarkFilter::from(params))
+        .await
+        .map(|hits| {
+            hits.into_iter()
+                .map(|hit| ListedBookmark {
+                    snippet: hit.snippet.map(|s| s.plain_text()),
+                    bookmark: hit.bookmark,
+                })
+                .collect::<Vec<_>>()
+        });
     match result {
         Ok(bookmarks) => Ok(Json(bookmarks)),
         Err(e) => Err(error_response(e)),
@@ -365,6 +384,37 @@ pub fn routes() -> Router<AppState> {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn listed_bookmarks_only_carry_a_snippet_from_a_search() {
+        let bookmark: Bookmark = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(),
+            "user_id": Uuid::nil(),
+            "url": "https://example.com/",
+            "title": "Example",
+            "description": null,
+            "image_url": null,
+            "override_image_url": null,
+            "domain": "example.com",
+            "tags": [],
+            "created_at": "2026-11-01T00:00:00Z",
+            "updated_at": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        let listed = serde_json::to_value(ListedBookmark {
+            bookmark: bookmark.clone(),
+            snippet: None,
+        })
+        .unwrap();
+        assert_eq!(listed, serde_json::to_value(&bookmark).unwrap());
+        let searched = serde_json::to_value(ListedBookmark {
+            bookmark,
+            snippet: Some("the borrow checker".into()),
+        })
+        .unwrap();
+        assert_eq!(searched["snippet"], "the borrow checker");
+        assert_eq!(searched["title"], "Example");
+    }
 
     fn reviewed_input() -> CreateBookmark {
         serde_json::from_value(serde_json::json!({

@@ -3,10 +3,11 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::{
     BookmarkRepository, CreateIdempotency, CreateIdempotencyClaim,
 };
+use crate::domain::ports::image_fetcher::ImageFetcher;
 use crate::domain::ports::image_generator::{ImageGenerationContext, ImageGenerator};
 use crate::domain::ports::metadata::MetadataExtractor;
 use crate::domain::ports::screenshot::ScreenshotProvider;
-use crate::domain::ports::storage::ObjectStorage;
+use crate::domain::ports::storage::{ObjectStorage, is_plain_object_key};
 use crate::domain::ports::tag_resolver::TagResolver;
 use crate::domain::tag_alias::TagWrite;
 use std::sync::Arc;
@@ -35,7 +36,8 @@ pub struct BookmarkService<R, M, S> {
     metadata: Arc<M>,
     storage: Arc<S>,
     screenshot: Arc<dyn ScreenshotProvider>,
-    http_client: reqwest::Client,
+    /// Downloads and checks card images (a guarded HTTP client).
+    image_fetcher: Arc<dyn ImageFetcher>,
     image_generator: Option<Arc<dyn ImageGenerator>>,
     tag_resolver: Option<Arc<dyn TagResolver>>,
     generated_image_processing_slots: Arc<tokio::sync::Semaphore>,
@@ -52,18 +54,14 @@ where
         metadata: Arc<M>,
         storage: Arc<S>,
         screenshot: Arc<dyn ScreenshotProvider>,
+        image_fetcher: Arc<dyn ImageFetcher>,
     ) -> Self {
-        let http_client = reqwest::Client::builder()
-            .user_agent("Boopmark/1.0 (+https://boopmark.app)")
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("failed to build HTTP client");
         Self {
             repo,
             metadata,
             storage,
             screenshot,
-            http_client,
+            image_fetcher,
             image_generator: None,
             tag_resolver: None,
             generated_image_processing_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -633,39 +631,38 @@ where
         user_id: Uuid,
         image_url: &str,
     ) -> Result<String, DomainError> {
-        let resp = self
-            .http_client
-            .get(image_url)
-            .send()
-            .await
-            .map_err(|e| DomainError::Internal(format!("image fetch error: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(DomainError::Internal(format!(
-                "image fetch returned HTTP {}",
-                resp.status()
-            )));
-        }
-
-        let content_type = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("image/jpeg")
-            .to_string();
-
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| DomainError::Internal(format!("image read error: {e}")))?;
-
+        let image = self.image_fetcher.fetch(image_url).await?;
         let key = format!(
             "images/base/{user_id}/{}.{}",
             Uuid::new_v4(),
-            extension_from_content_type(&content_type)
+            extension_from_content_type(&image.content_type)
         );
-        self.storage.put(&key, bytes.to_vec(), &content_type).await
+        self.storage
+            .put(&key, image.bytes, &image.content_type)
+            .await
     }
+}
+
+/// The storage key behind a URL served by our own storage, if `url` is one.
+/// The URL is parsed (which resolves `..` and `%2e%2e` segments), must have
+/// the storage's origin and path prefix and no query, and the rest must be a
+/// plain object key. Every URL-to-key conversion goes through here.
+fn storage_key_from_url<S: ObjectStorage>(storage: &S, url: &str) -> Option<String> {
+    let url = url::Url::parse(url).ok()?;
+    let prefix = url::Url::parse(&storage.public_url("")).ok()?;
+    if url.origin() != prefix.origin() || url.query().is_some() {
+        return None;
+    }
+    let key = url
+        .path()
+        .strip_prefix(prefix.path().trim_end_matches('/'))?
+        .strip_prefix('/')?;
+    is_plain_object_key(key).then(|| key.to_string())
+}
+
+/// The key of a card image in our own storage, if `url` is one.
+fn stored_object_key<S: ObjectStorage>(storage: &S, url: &str) -> Option<String> {
+    storage_key_from_url(storage, url).filter(|key| key.starts_with("images/"))
 }
 
 fn owned_override_storage_key<S: ObjectStorage>(
@@ -673,11 +670,7 @@ fn owned_override_storage_key<S: ObjectStorage>(
     user_id: Uuid,
     url: &str,
 ) -> Option<String> {
-    let prefix = storage.public_url("");
-    let key = url
-        .strip_prefix(prefix.trim_end_matches('/'))
-        .map(|rest| rest.trim_start_matches('/').to_string())
-        .filter(|key| !key.is_empty())?;
+    let key = storage_key_from_url(storage, url)?;
     let mut components = key.split('/');
     let image_dir = components.next()?;
     let override_dir = components.next()?;
@@ -699,12 +692,8 @@ fn owned_image_storage_key<S: ObjectStorage>(
     user_id: Uuid,
     url: &str,
 ) -> Option<String> {
-    let prefix = storage.public_url("").trim_end_matches('/').to_string();
-    let key = url.strip_prefix(&prefix)?.strip_prefix('/')?;
+    let key = storage_key_from_url(storage, url)?;
     let components: Vec<_> = key.split('/').collect();
-    if components.iter().any(|component| component.is_empty()) || components[0] != "images" {
-        return None;
-    }
 
     match components.as_slice() {
         ["images", kind, owner, filename] if matches!(*kind, "base" | "ai" | "overrides") => {
@@ -894,42 +883,15 @@ where
         self.generate_and_store_image(user_id, context, None).await
     }
 
-    /// Check whether a stored image is still reachable.
-    ///
-    /// Some image hosts (including common CDNs) reject HEAD while serving the
-    /// same resource over GET. In that case, fall back to a bounded GET request
-    /// and inspect only its headers; the service client's 30-second timeout
-    /// bounds the fallback without downloading the response body.
+    /// Check whether a bookmark's image is still there. Images in our own
+    /// storage are looked up there: its URLs may be private (local storage,
+    /// MinIO), which the outbound guard rightly refuses. Anything else goes
+    /// through the guarded image fetcher.
     async fn image_url_is_valid(&self, image_url: &str) -> bool {
-        match self.http_client.head(image_url).send().await {
-            Ok(response) if response.status().is_success() => true,
-            Ok(response) => {
-                tracing::debug!(
-                    url = %image_url,
-                    status = %response.status(),
-                    "HEAD image check failed; retrying with bounded GET"
-                );
-                self.get_image_url_status(image_url).await
-            }
-            Err(error) => {
-                tracing::debug!(
-                    url = %image_url,
-                    error = %error,
-                    "HEAD image check errored; retrying with bounded GET"
-                );
-                self.get_image_url_status(image_url).await
-            }
+        match stored_object_key(self.storage.as_ref(), image_url) {
+            Some(key) => self.storage.exists(&key).await.unwrap_or(false),
+            None => self.image_fetcher.is_reachable(image_url).await,
         }
-    }
-
-    async fn get_image_url_status(&self, image_url: &str) -> bool {
-        self.http_client
-            .get(image_url)
-            .header(reqwest::header::RANGE, "bytes=0-0")
-            .send()
-            .await
-            .map(|response| response.status().is_success())
-            .unwrap_or(false)
     }
 
     async fn generate_and_store_image(
@@ -1150,6 +1112,10 @@ mod tests {
 
         async fn delete(&self, _key: &str) -> Result<(), DomainError> {
             unreachable!()
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+            Ok(self.get(key).await.is_ok())
         }
 
         fn public_url(&self, key: &str) -> String {
@@ -1512,6 +1478,10 @@ mod tests {
             async fn delete(&self, _key: &str) -> Result<(), DomainError> {
                 Ok(())
             }
+            async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+                Ok(self.get(key).await.is_ok())
+            }
+
             fn public_url(&self, key: &str) -> String {
                 key.to_string()
             }
@@ -1525,6 +1495,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             )
         }
 
@@ -1536,6 +1507,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             )
         }
 
@@ -1924,6 +1896,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let past = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
                 .unwrap()
@@ -1975,6 +1948,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let past = chrono::DateTime::parse_from_rfc3339("2021-06-15T12:00:00Z")
                 .unwrap()
@@ -2512,6 +2486,10 @@ mod tests {
             async fn delete(&self, _key: &str) -> Result<(), DomainError> {
                 Ok(())
             }
+            async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+                Ok(self.get(key).await.is_ok())
+            }
+
             fn public_url(&self, key: &str) -> String {
                 format!("https://stored/{}", key)
             }
@@ -2555,6 +2533,10 @@ mod tests {
             async fn delete(&self, key: &str) -> Result<(), DomainError> {
                 self.files.lock().unwrap().remove(key);
                 Ok(())
+            }
+
+            async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+                Ok(self.get(key).await.is_ok())
             }
 
             fn public_url(&self, key: &str) -> String {
@@ -2635,6 +2617,57 @@ mod tests {
             }
         }
 
+        #[test]
+        fn stored_object_keys_refuse_traversal() {
+            let storage = crate::adapters::storage::local::LocalStorage::new(
+                std::env::temp_dir().join(format!("boopmark-keys-{}", Uuid::new_v4())),
+                "http://localhost:4000/uploads".into(),
+            );
+            let key = |url: &str| stored_object_key(&storage, url);
+            assert_eq!(
+                key("http://localhost:4000/uploads/images/base/u/a.jpg").as_deref(),
+                Some("images/base/u/a.jpg")
+            );
+            for url in [
+                "http://localhost:4000/uploads/../../../../dev/zero",
+                "http://localhost:4000/uploads/images/../../../etc/passwd",
+                "http://localhost:4000/uploads/images/%2e%2e/%2e%2e/%2e%2e/etc/passwd",
+                "http://localhost:4000/uploads/images/%252e%252e/x.jpg",
+                "http://localhost:4000/uploads/images/..%2f..%2fetc%2fpasswd",
+                "http://localhost:4000/uploads//etc/passwd",
+                "http://localhost:4000/uploads/avatars/a.jpg",
+                "http://localhost:4000/uploads/images/a.jpg?x=../../etc",
+                "http://evil.example/uploads/images/a.jpg",
+                "file:///etc/passwd",
+            ] {
+                assert_eq!(key(url), None, "{url}");
+            }
+        }
+
+        #[tokio::test]
+        async fn own_stored_images_are_checked_in_storage_not_over_the_network() {
+            let user_id = Uuid::new_v4();
+            let key = format!("images/base/{user_id}/a.jpg");
+            let storage = Arc::new(EditStorage::with_file(key.clone(), vec![1, 2, 3]));
+            // The production fetcher: it would refuse any of these URLs.
+            let svc = BookmarkService::new(
+                Arc::new(MockRepo::new(vec![])),
+                Arc::new(NoopMetadata),
+                storage.clone(),
+                Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::new()),
+            );
+            assert!(svc.image_url_is_valid(&storage.public_url(&key)).await);
+            assert!(
+                !svc.image_url_is_valid(&storage.public_url("images/base/gone.jpg"))
+                    .await
+            );
+            assert_eq!(
+                storage.gets.lock().unwrap().as_slice(),
+                [key, "images/base/gone.jpg".to_string()]
+            );
+        }
+
         #[tokio::test]
         async fn edits_an_ordinary_stored_base_image() {
             let user_id = Uuid::new_v4();
@@ -2651,6 +2684,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 storage.clone(),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             )
             .with_image_generator(generator.clone());
 
@@ -2686,6 +2720,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 storage.clone(),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             )
             .with_image_generator(generator.clone());
 
@@ -2720,6 +2755,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 storage.clone(),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             )
             .with_image_generator(generator.clone());
 
@@ -2873,6 +2909,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
@@ -2899,6 +2936,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
@@ -2920,6 +2958,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
@@ -2970,6 +3009,7 @@ mod tests {
                 }),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
@@ -2993,6 +3033,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(PlaywrightScreenshot::new(screenshot_url)),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
@@ -3015,6 +3056,7 @@ mod tests {
                     "http://{}",
                     screenshot_addr
                 ))),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
 
             let bookmark = svc
@@ -3059,6 +3101,7 @@ mod tests {
                     "http://{}",
                     screenshot_addr
                 ))),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let (tx, rx) = mpsc::channel(32);
 
@@ -3083,6 +3126,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let (tx, rx) = mpsc::channel(32);
 
@@ -3106,6 +3150,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let (tx, rx) = mpsc::channel(32);
 
@@ -3125,6 +3170,7 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
+                Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback()),
             );
             let (tx, rx) = mpsc::channel(32);
 

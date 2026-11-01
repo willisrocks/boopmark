@@ -38,7 +38,8 @@ mod tests {
         assert!(body.contains("OpenAI"));
         assert!(body.contains("Chrome extension"));
         assert!(body.contains("extension-local storage"));
-        assert!(body.contains("August 30, 2026"));
+        assert!(body.contains("Article text"));
+        assert!(body.contains("November 1, 2026"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod web;
 
 use adapters::anthropic::AnthropicEnricher;
 use adapters::anthropic_tag_consolidator::AnthropicTagConsolidator;
+use adapters::article::readability::HtmlArticleFetcher;
 use adapters::embedder::EmbedderRouter;
 use adapters::llm_client::{LlmClientConfig, LlmClientRouter};
 use adapters::llm_router::{LlmEnricherRouter, LlmPromptAssistantRouter, TagConsolidatorRouter};
@@ -26,6 +27,7 @@ use app::auth::AuthService;
 use app::bookmarks::BookmarkService;
 use app::enrichment::EnrichmentService;
 use app::invite::InviteService;
+use app::search::SearchService;
 use app::secrets::SecretBox;
 use app::settings::{ConfiguredImageAiSettingsProvider, SettingsService};
 use app::tag_alias::TagAliasService;
@@ -115,6 +117,8 @@ async fn main() {
     let image_settings: Arc<dyn ImageAiSettingsProvider> = Arc::new(
         ConfiguredImageAiSettingsProvider::new(settings_service.clone(), prompt_assistant),
     );
+    let image_fetcher: Arc<dyn domain::ports::image_fetcher::ImageFetcher> =
+        Arc::new(adapters::image_fetch::GuardedImageFetcher::new());
     let image_generator: Arc<dyn ImageGenerator> =
         Arc::new(OpenAiImageGenerator::new(image_settings));
 
@@ -130,9 +134,15 @@ async fn main() {
             ));
             (
                 Bookmarks::Local(Arc::new(
-                    BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
-                        .with_image_generator(image_generator.clone())
-                        .with_tag_resolver(tag_resolver.clone()),
+                    BookmarkService::new(
+                        db.clone(),
+                        metadata,
+                        storage,
+                        screenshot.clone(),
+                        image_fetcher.clone(),
+                    )
+                    .with_image_generator(image_generator.clone())
+                    .with_tag_resolver(tag_resolver.clone()),
                 )),
                 images,
             )
@@ -169,9 +179,15 @@ async fn main() {
             ));
             (
                 Bookmarks::S3(Arc::new(
-                    BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
-                        .with_image_generator(image_generator.clone())
-                        .with_tag_resolver(tag_resolver.clone()),
+                    BookmarkService::new(
+                        db.clone(),
+                        metadata,
+                        storage,
+                        screenshot.clone(),
+                        image_fetcher.clone(),
+                    )
+                    .with_image_generator(image_generator.clone())
+                    .with_tag_resolver(tag_resolver.clone()),
                 )),
                 images,
             )
@@ -209,6 +225,29 @@ async fn main() {
     );
     tracing::info!("embeddings: {}", embedder.model_id());
 
+    let search_service = Arc::new(SearchService::new(db.clone()));
+
+    if config.article_ingest_enabled {
+        // Its own connection, so background fetching never takes one from
+        // the request pool; the listener holds one more.
+        let ingest_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&config.database_url)
+            .await
+            .expect("Failed to connect the article ingest worker to the database");
+        let wake = Arc::new(tokio::sync::Notify::new());
+        adapters::postgres::ingest_listener::spawn_ingest_listener(
+            config.database_url.clone(),
+            wake.clone(),
+        );
+        app::ingest::IngestWorker::new(
+            Arc::new(PostgresPool::new(ingest_pool)),
+            Arc::new(HtmlArticleFetcher::new()),
+            config.article_ingest_concurrency,
+        )
+        .spawn(wake);
+    }
+
     let login_provider: Arc<dyn LoginProvider> = match config.login_adapter {
         LoginAdapter::Google => {
             let client_id = config
@@ -245,6 +284,8 @@ async fn main() {
         invites: invite_service,
         llm_client,
         embedder,
+
+        search: search_service,
     };
 
     let app = web::router::create_router(state);
