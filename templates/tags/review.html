@@ -96,6 +96,8 @@
                 <span class="text-gray-300">{{ batch.label }}: {{ batch.merges }} merge{% if batch.merges != 1 %}s{% endif %}, {{ batch.bookmarks }} bookmark{% if batch.bookmarks != 1 %}s{% endif %} · {{ batch.when }}</span>
                 {% if batch.undone %}
                 <span class="text-xs text-gray-500">Undone</span>
+                {% else if batch.expired %}
+                <span data-testid="review-undo-expired" class="text-xs text-gray-500">Undo expired</span>
                 {% else %}
                 <form method="post" action="/tags/review/undo/{{ batch.id }}">
                     <button type="submit" data-testid="review-undo" class="rounded-lg border border-gray-600 px-3 py-1 text-xs font-medium text-gray-200 hover:bg-gray-700">Undo</button>

@@ -1189,8 +1189,10 @@ mod tag_alias_postgres_tests {
         .unwrap();
         assert!(stored.iter().all(|c| *c == zig), "{stored:?} vs {zig}");
 
-        bookmark(&pool, user, &["Zig Lang"]).await;
-        let merge = manual(ChangeKind::Merge, &["Zig Lang"], &zig);
+        // A spelling no resolver write above has claimed, so the merge is
+        // allowed whichever canonical the concurrent writes settled on.
+        bookmark(&pool, user, &["zig-language"]).await;
+        let merge = manual(ChangeKind::Merge, &["zig-language"], &zig);
         let (left, right) =
             tokio::join!(svc.merge_tags(user, &merge), svc.merge_tags(user, &merge));
         // The second sees the first's result under the lock and is refused.

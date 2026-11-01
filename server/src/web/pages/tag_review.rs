@@ -18,7 +18,9 @@ use uuid::Uuid;
 
 use crate::app::tag_consolidation::StartOutcome;
 use crate::domain::error::DomainError;
-use crate::domain::tag_alias::{ChangeKind, Confidence, ProposalSource, TagChangeBatch};
+use crate::domain::tag_alias::{
+    ChangeKind, Confidence, ProposalSource, TagChangeBatch, undo_cutoff,
+};
 use crate::domain::tag_consolidation::{
     ConsolidationJob, JobStatus, ReviewChip, ReviewRow, ReviewedRow,
 };
@@ -106,6 +108,8 @@ struct BatchView {
     bookmarks: u64,
     when: String,
     undone: bool,
+    /// Older than the undo window: the server refuses its undo.
+    expired: bool,
 }
 
 impl From<TagChangeBatch> for BatchView {
@@ -121,6 +125,7 @@ impl From<TagChangeBatch> for BatchView {
             bookmarks: batch.summary.bookmarks_changed,
             when: batch.created_at.format("%b %d, %H:%M UTC").to_string(),
             undone: batch.undone_at.is_some(),
+            expired: batch.created_at < undo_cutoff(Utc::now()),
         }
     }
 }
@@ -415,6 +420,7 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::tag_alias::UNDO_WINDOW_DAYS;
 
     #[test]
     fn selection_reads_checked_rows_with_their_shown_spellings_and_targets() {
@@ -449,6 +455,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn batches_past_the_undo_window_offer_no_undo() {
+        let batch = |days: i64| {
+            BatchView::from(TagChangeBatch {
+                id: Uuid::nil(),
+                user_id: Uuid::nil(),
+                kind: ChangeKind::Normalize,
+                summary: Default::default(),
+                undone_at: None,
+                created_at: Utc::now() - chrono::Duration::days(days),
+            })
+            .expired
+        };
+        assert!(!batch(UNDO_WINDOW_DAYS - 1));
+        assert!(batch(UNDO_WINDOW_DAYS + 1));
     }
 
     #[test]
