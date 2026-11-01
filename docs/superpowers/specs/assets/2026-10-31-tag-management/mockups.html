@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tag management mockups</title>
+<script src="https://cdn.tailwindcss.com/3.4.5"></script>
+<style>body{background:#0f1117;font-family:ui-sans-serif,system-ui,sans-serif}</style>
+</head>
+<body class="text-gray-200 p-0 m-0">
+
+<!-- 1. Filter bar: search + top tags + More popover -->
+<section id="filter" class="w-[1440px] bg-[#0f1117]">
+  <header class="flex items-center gap-6 px-6 py-3 border-b border-gray-800">
+    <div class="font-semibold text-white text-lg">BoopMark</div>
+    <input class="flex-1 max-w-xl bg-[#1a1d2e] border border-gray-700 rounded-lg px-4 py-2 text-sm" placeholder="Search bookmarks...">
+    <button class="ml-auto bg-blue-600 text-white rounded-lg px-4 py-2 text-sm">+ Add Bookmark</button>
+  </header>
+  <div class="flex items-center gap-2 px-6 py-3 relative">
+    <span class="text-sm text-gray-400">Tags</span>
+    <span class="px-3 py-1 text-xs rounded-full bg-blue-600 border border-blue-500 text-white">rust ✕</span>
+    <span class="px-3 py-1 text-xs rounded-full bg-[#1a1d2e] border border-gray-700 text-gray-300">keyboards <span class="text-gray-500">35</span></span>
+    <span class="px-3 py-1 text-xs rounded-full bg-[#1a1d2e] border border-gray-700 text-gray-300">hardware <span class="text-gray-500">31</span></span>
+    <span class="px-3 py-1 text-xs rounded-full bg-[#1a1d2e] border border-gray-700 text-gray-300">swift <span class="text-gray-500">27</span></span>
+    <span class="px-3 py-1 text-xs rounded-full bg-[#1a1d2e] border border-gray-700 text-gray-300">android <span class="text-gray-500">24</span></span>
+    <span class="px-3 py-1 text-xs rounded-full bg-[#1a1d2e] border border-gray-700 text-gray-300">kotlin <span class="text-gray-500">24</span></span>
+    <span class="px-3 py-1 text-xs rounded-full bg-[#1a1d2e] border border-gray-700 text-gray-300">react native <span class="text-gray-500">23</span></span>
+    <span class="px-3 py-1 text-xs rounded-full bg-[#1a1d2e] border border-gray-700 text-gray-300">frontend <span class="text-gray-500">22</span></span>
+    <span class="px-3 py-1 text-xs rounded-full bg-[#1a1d2e] border border-gray-700 text-gray-300">compilers <span class="text-gray-500">21</span></span>
+    <span class="px-3 py-1 text-xs rounded-full bg-[#1a1d2e] border border-gray-700 text-gray-300">python <span class="text-gray-500">20</span></span>
+    <span class="px-3 py-1 text-xs rounded-full border border-dashed border-gray-500 text-gray-200">More tags (241) ▾</span>
+    <select class="ml-auto bg-[#1a1d2e] border border-gray-700 rounded-lg px-3 py-1 text-sm"><option>Newest First</option></select>
+
+    <div class="absolute left-[880px] top-12 w-[420px] rounded-xl border border-gray-700 bg-[#1e2235] shadow-2xl p-3 z-10">
+      <input class="w-full bg-[#141724] border border-gray-600 rounded-lg px-3 py-2 text-sm" value="ag">
+      <div class="mt-2 text-xs text-gray-500">Matches name or alias · ↑↓ to move, Enter to add</div>
+      <ul class="mt-2 text-sm divide-y divide-gray-700/60">
+        <li class="flex justify-between py-2 bg-blue-600/20 px-2 rounded"><span>coding agents <span class="text-gray-500 text-xs">also: ai coding agents, coding-agent</span></span><span class="text-gray-400">18</span></li>
+        <li class="flex justify-between py-2 px-2"><span>ai agents <span class="text-gray-500 text-xs">also: agentic ai, agents</span></span><span class="text-gray-400">15</span></li>
+        <li class="flex justify-between py-2 px-2"><span>image generation <span class="text-gray-500 text-xs">also: ai art</span></span><span class="text-gray-400">6</span></li>
+        <li class="flex justify-between py-2 px-2"><span>tags A–Z</span><span class="text-blue-400 text-xs">Browse all →</span></li>
+      </ul>
+    </div>
+  </div>
+  <div class="grid grid-cols-4 gap-4 px-6 pb-6 pt-2">
+    <div class="h-56 rounded-xl bg-[#1a1d2e] border border-gray-800"></div>
+    <div class="h-56 rounded-xl bg-[#1a1d2e] border border-gray-800"></div>
+    <div class="h-56 rounded-xl bg-[#1a1d2e] border border-gray-800"></div>
+    <div class="h-56 rounded-xl bg-[#1a1d2e] border border-gray-800"></div>
+    <div class="h-56 rounded-xl bg-[#1a1d2e] border border-gray-800"></div>
+    <div class="h-56 rounded-xl bg-[#1a1d2e] border border-gray-800"></div>
+    <div class="h-56 rounded-xl bg-[#1a1d2e] border border-gray-800"></div>
+    <div class="h-56 rounded-xl bg-[#1a1d2e] border border-gray-800"></div>
+  </div>
+</section>
+
+<!-- 2. Tag library page -->
+<section id="library" class="w-[1100px] bg-[#0f1117] p-6">
+  <div class="rounded-xl border border-gray-700 bg-[#1e2235] p-6">
+    <div class="flex items-start justify-between">
+      <div>
+        <h2 class="text-lg font-semibold text-white">Tag Library</h2>
+        <p class="text-sm text-gray-400 mt-1">252 tags · 341 spellings folded in as aliases · last cleanup 3 days ago (<a class="text-blue-400">undo</a>)</p>
+      </div>
+      <button class="bg-blue-600 text-white rounded-lg px-4 py-2 text-sm">Find duplicates with AI</button>
+    </div>
+    <div class="flex gap-3 mt-4">
+      <input class="flex-1 bg-[#141724] border border-gray-600 rounded-lg px-3 py-2 text-sm" placeholder="Filter tags or aliases">
+      <select class="bg-[#141724] border border-gray-600 rounded-lg px-3 py-2 text-sm"><option>Most used</option><option>A–Z</option><option>Unused</option></select>
+    </div>
+    <table class="w-full mt-4 text-sm">
+      <thead class="text-left text-gray-400 text-xs uppercase"><tr><th class="py-2 w-8"><input type="checkbox"></th><th>Tag</th><th>Aliases</th><th class="text-right">Bookmarks</th><th class="text-right">Actions</th></tr></thead>
+      <tbody class="divide-y divide-gray-700/60">
+        <tr><td class="py-2"><input type="checkbox"></td><td class="text-white">github</td><td class="text-gray-400">GitHub, Github, git hub</td><td class="text-right">18</td><td class="text-right text-blue-400">Rename · Merge into… · Delete</td></tr>
+        <tr><td class="py-2"><input type="checkbox" checked></td><td class="text-white">coding agents</td><td class="text-gray-400">AI coding agents, ai-coding-agents, coding-agent, +4</td><td class="text-right">18</td><td class="text-right text-blue-400">Rename · Merge into… · Delete</td></tr>
+        <tr><td class="py-2"><input type="checkbox" checked></td><td class="text-white">ai agents</td><td class="text-gray-400">AI agents, agentic ai, Agentic-AI</td><td class="text-right">15</td><td class="text-right text-blue-400">Rename · Merge into… · Delete</td></tr>
+        <tr><td class="py-2"><input type="checkbox"></td><td class="text-white">software engineering</td><td class="text-gray-400">software-engineering, Software Engineering, swe</td><td class="text-right">14</td><td class="text-right text-blue-400">Rename · Merge into… · Delete</td></tr>
+        <tr><td class="py-2"><input type="checkbox"></td><td class="text-white">rust</td><td class="text-gray-400">Rust, rust-lang, rustlang, Rust Lang</td><td class="text-right">12</td><td class="text-right text-blue-400">Rename · Merge into… · Delete</td></tr>
+      </tbody>
+    </table>
+    <div class="mt-4 flex items-center gap-3 rounded-lg bg-[#141724] border border-gray-700 px-4 py-3 text-sm">
+      <span>2 selected</span><button class="bg-gray-700 rounded px-3 py-1">Merge selected into…</button><button class="bg-gray-700 rounded px-3 py-1">Delete</button>
+    </div>
+  </div>
+</section>
+
+<!-- 3. Merge review screen -->
+<section id="review" class="w-[1100px] bg-[#0f1117] p-6">
+  <div class="rounded-xl border border-gray-700 bg-[#1e2235] p-6">
+    <h2 class="text-lg font-semibold text-white">Review proposed merges</h2>
+    <p class="text-sm text-gray-400 mt-1">claude-sonnet-5 proposed 41 merges. Nothing changes until you apply. You can undo the whole batch afterwards.</p>
+    <div class="flex gap-2 mt-4 text-xs">
+      <span class="px-3 py-1 rounded-full bg-blue-600 text-white">All 41</span>
+      <span class="px-3 py-1 rounded-full bg-[#141724] border border-gray-600">Confident 33</span>
+      <span class="px-3 py-1 rounded-full bg-[#141724] border border-gray-600">Check these 8</span>
+    </div>
+    <ul class="mt-4 space-y-3 text-sm">
+      <li class="rounded-lg border border-gray-700 bg-[#141724] p-4">
+        <div class="flex items-center gap-3"><input type="checkbox" checked><span class="text-gray-400">Merge</span>
+          <span class="px-2 py-0.5 rounded bg-gray-700">js <span class="text-gray-400">4</span></span>
+          <span class="px-2 py-0.5 rounded bg-gray-700">java-script <span class="text-gray-400">1</span></span>
+          <span class="px-2 py-0.5 rounded bg-gray-700">javscript <span class="text-gray-400">1</span></span>
+          <span class="text-gray-400">into</span><span class="px-2 py-0.5 rounded bg-blue-600/30 border border-blue-500 text-white">javascript ✎</span>
+          <span class="ml-auto text-xs text-emerald-300">high</span></div>
+        <div class="mt-2 text-xs text-gray-500">6 bookmarks change · e.g. "Notes on javascript and typescript"</div>
+      </li>
+      <li class="rounded-lg border border-gray-700 bg-[#141724] p-4">
+        <div class="flex items-center gap-3"><input type="checkbox" checked><span class="text-gray-400">Merge</span>
+          <span class="px-2 py-0.5 rounded bg-gray-700">k8s <span class="text-gray-400">3</span></span>
+          <span class="px-2 py-0.5 rounded bg-gray-700">kubernets <span class="text-gray-400">1</span></span>
+          <span class="text-gray-400">into</span><span class="px-2 py-0.5 rounded bg-blue-600/30 border border-blue-500 text-white">kubernetes ✎</span>
+          <span class="ml-auto text-xs text-emerald-300">high</span></div>
+        <div class="mt-2 text-xs text-gray-500">4 bookmarks change</div>
+      </li>
+      <li class="rounded-lg border border-amber-500/50 bg-[#141724] p-4">
+        <div class="flex items-center gap-3"><input type="checkbox"><span class="text-gray-400">Merge</span>
+          <span class="px-2 py-0.5 rounded bg-gray-700">UI/UX <span class="text-gray-400">20</span></span>
+          <span class="text-gray-400">into</span><span class="px-2 py-0.5 rounded bg-blue-600/30 border border-blue-500 text-white">ux ✎</span>
+          <span class="ml-auto text-xs text-amber-300">check: broader/narrower?</span></div>
+        <div class="mt-2 text-xs text-gray-500">20 bookmarks change · unchecked by default</div>
+      </li>
+    </ul>
+    <div class="mt-5 flex items-center gap-3">
+      <button class="bg-blue-600 text-white rounded-lg px-4 py-2 text-sm">Apply 33 merges</button>
+      <span class="text-sm text-gray-400">252 → 219 tags · 148 bookmarks change</span>
+    </div>
+  </div>
+</section>
+</body>
+</html>
