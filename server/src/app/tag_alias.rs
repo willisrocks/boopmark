@@ -12,8 +12,8 @@ use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::ports::tag_resolver::{ResolveFuture, TagResolver};
 use crate::domain::ports::tag_vocabulary::TagVocabulary;
 use crate::domain::tag_alias::{
-    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMerge,
-    TagMergeProposal, TagWrite, canonical_tag_counts, normalization_proposals, preview_tags,
+    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMergeProposal,
+    TagWrite, canonical_tag_counts, normalization_proposals, preview_tags,
 };
 use crate::domain::tag_consolidation::{ReviewedRow, TagSample};
 use crate::domain::tag_library::{ManualMerge, ManualMergePlan};
@@ -190,7 +190,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tag_alias::{Confidence, NewTagMergeProposal, TagChangeSummary};
+    use crate::domain::tag_alias::{Confidence, NewTagMergeProposal, TagChangeSummary, TagMerge};
     use std::sync::Mutex;
 
     /// In-memory stand-in for the repository: aliases, tag counts and the

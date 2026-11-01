@@ -4,7 +4,7 @@ use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::tag_alias::{
     AliasSource, ChangeKind, Confidence, NewTagMergeProposal, ProposalSource, ProposalStatus,
     TagAlias, TagChangeBatch, TagChangeSummary, TagIndex, TagMerge, TagMergeProposal, TagWrite,
-    merge_mapping, resolve_writes, rewrite_tags, undo_tags,
+    UNDO_WINDOW_DAYS, merge_mapping, resolve_writes, rewrite_tags, undo_cutoff, undo_tags,
 };
 use crate::domain::tag_consolidation::{
     ReviewedRow, TagSample, plan_reviewed_apply, resolve_through_aliases,
@@ -685,6 +685,11 @@ impl TagAliasRepository for PostgresPool {
                 "this change was already undone".into(),
             ));
         }
+        if batch.created_at < undo_cutoff(Utc::now()) {
+            return Err(DomainError::InvalidInput(format!(
+                "This change is more than {UNDO_WINDOW_DAYS} days old and can no longer be undone."
+            )));
+        }
 
         let blocked = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
@@ -1243,6 +1248,72 @@ mod tag_alias_postgres_tests {
         .unwrap();
         assert_eq!(k8s, winner);
         assert_eq!(svc.list_batches(user, 10).await.unwrap().len(), 1);
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
+        pool.close().await;
+    }
+
+    /// The undo window is enforced on the server, not only hidden in the
+    /// page: a batch older than it is refused and nothing changes.
+    #[tokio::test]
+    #[ignore = "requires a Postgres database in DATABASE_URL"]
+    async fn tag_alias_undo_past_the_window_is_refused() {
+        let pool = connect().await;
+        let svc = TagAliasService::new(Arc::new(PostgresPool::new(pool.clone())));
+        let user = new_user(&pool).await;
+        let old = bookmark(&pool, user, &["k8s"]).await;
+        let recent = bookmark(&pool, user, &["js"]).await;
+
+        let apply = |sources: &[&str], target: &str| {
+            let request = manual(ChangeKind::Merge, sources, target);
+            let svc = &svc;
+            async move {
+                svc.merge_tags(user, &request)
+                    .await
+                    .expect("merge")
+                    .1
+                    .expect("the merge changes tags")
+            }
+        };
+        let expired = apply(&["k8s"], "kubernetes").await;
+        let inside = apply(&["js"], "javascript").await;
+        let age = |batch: Uuid, days: i64| {
+            sqlx::query(
+                "UPDATE tag_change_batches SET created_at = now() - make_interval(days => $2)
+                 WHERE id = $1",
+            )
+            .bind(batch)
+            .bind(days as i32)
+            .execute(&pool)
+        };
+        age(expired.id, UNDO_WINDOW_DAYS + 1).await.unwrap();
+        age(inside.id, UNDO_WINDOW_DAYS - 1).await.unwrap();
+        let tags_before = bookmarks(&pool, user).await;
+        let aliases_before = aliases(&pool, user).await;
+
+        let refused = svc.undo_batch(user, expired.id).await.unwrap_err();
+        assert!(
+            matches!(&refused, DomainError::InvalidInput(m) if m.contains("can no longer be undone")),
+            "{refused:?}"
+        );
+        assert_eq!(bookmarks(&pool, user).await, tags_before);
+        assert_eq!(aliases(&pool, user).await, aliases_before);
+        let still_applied: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT undone_at FROM tag_change_batches WHERE id = $1")
+                .bind(expired.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(still_applied.is_none());
+        assert_eq!(tags_of(&pool, old).await, s(&["kubernetes"]));
+
+        // Inside the window, undo still works.
+        svc.undo_batch(user, inside.id).await.expect("undo");
+        assert_eq!(tags_of(&pool, recent).await, s(&["js"]));
 
         sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(user)

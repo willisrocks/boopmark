@@ -89,8 +89,9 @@ pub trait TagAliasRepository: Send + Sync {
     ) -> Result<(ManualMergePlan, Option<TagChangeBatch>), DomainError>;
 
     /// Undo an applied batch. Fails with `InvalidInput` if it is already
-    /// undone or a later, still-applied batch touched the same bookmarks or
-    /// aliases.
+    /// undone, is older than the undo window
+    /// ([`crate::domain::tag_alias::UNDO_WINDOW_DAYS`]), or a later,
+    /// still-applied batch touched the same bookmarks or aliases.
     async fn undo_batch(
         &self,
         user_id: Uuid,

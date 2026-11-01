@@ -8,15 +8,17 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::tag_alias::{ChangeKind, ProposalStatus, TagAlias, TagChangeBatch, TagMerge};
+use crate::domain::tag_alias::{
+    ChangeKind, ProposalStatus, TagAlias, TagChangeBatch, TagMerge, undo_cutoff,
+};
 use crate::domain::tag_library::{
     ManualMerge, ManualMergePlan, TagRow, TagSort, alias_preview, filter_rows, library_rows,
-    plan_manual_merge, search, sort_rows, top_tags,
+    search, sort_rows, top_tags,
 };
 use crate::domain::tag_normalize::clean_tag;
 use crate::web::extractors::AuthUser;
@@ -31,8 +33,6 @@ const SEARCH_LIMIT: usize = 20;
 const ALIAS_PREVIEW: usize = 3;
 /// The first page of batches; [`recent_batches`] fetches more as needed.
 const HISTORY_PAGE: i64 = 50;
-/// Spec: the batch history keeps undo for 30 days.
-const UNDO_WINDOW_DAYS: i64 = 30;
 
 fn render(t: &impl Template) -> axum::response::Response {
     match t.render() {
@@ -341,7 +341,7 @@ async fn recent_batches(
     state: &AppState,
     user_id: Uuid,
 ) -> Result<Vec<TagChangeBatch>, DomainError> {
-    let cutoff = Utc::now() - Duration::days(UNDO_WINDOW_DAYS);
+    let cutoff = undo_cutoff(Utc::now());
     let mut limit = HISTORY_PAGE;
     loop {
         let batches = state.tag_aliases.list_batches(user_id, limit).await?;
@@ -491,7 +491,7 @@ impl MergeForm {
     }
 
     /// The change as typed, checked for shape only; the repository checks it
-    /// against the library under the lock ([`plan_manual_merge`]).
+    /// against the library under the lock ([`crate::domain::tag_library::plan_manual_merge`]).
     fn request(&self) -> Result<ManualMerge, String> {
         let kind = match self.kind.as_str() {
             "rename" => ChangeKind::Rename,
@@ -608,6 +608,7 @@ pub async fn undo(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::tag_library::plan_manual_merge;
 
     fn s(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_string()).collect()

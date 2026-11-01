@@ -171,6 +171,15 @@ pub struct NewTagMergeProposal {
     pub confidence: Confidence,
 }
 
+/// How long a batch can be undone (spec: the history keeps undo for 30
+/// days).
+pub const UNDO_WINDOW_DAYS: i64 = 30;
+
+/// Batches created before this can no longer be undone.
+pub fn undo_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - chrono::Duration::days(UNDO_WINDOW_DAYS)
+}
+
 /// One applied rename/merge, the unit of undo.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TagChangeBatch {
