@@ -128,7 +128,7 @@ and answered each question from code or measurements; there was no human gate.
 Everything here is on this branch under `scripts/tag-lab/` and is reproducible.
 
 - `concepts.py`: the ground truth. 212 concepts, each listing the raw spellings a messy library
-  accumulates (600 spellings), plus 52 concept pairs where merging is a judgment call (`UI/UX` vs
+  accumulates (627 spellings, of which the seed uses 600), plus 52 concept pairs where merging is a judgment call (`UI/UX` vs
   `ux`, `vim` vs `neovim`, `local ai` vs `local llm`). It deliberately includes traps:
   - plural lookalikes: `ios`, `news`, `physics`, `kubernetes`, `aws`, `analytics`
   - near misses: `java`/`javascript`, `go`/`google`, `react`/`react native`, `claude`/`claude code`,
@@ -136,7 +136,9 @@ Everything here is on this branch under `scripts/tag-lab/` and is reproducible.
   - slash tags: `UI/UX`, `CI/CD`, `GNU/Linux`
   - typos: `kubernets`, `javscript`, `pyhton`
 - `seed.py`: writes `seed.sql`, 600 bookmarks for one user in 13 topic groups, with Zipf-weighted
-  spellings and every spelling used at least once. It also writes `ground_truth.json`.
+  spellings. A coverage pass adds unused spellings, but it can replace the last copy of another,
+  so 600 of the 627 spellings end up on a bookmark. Those 600 are the lab's raw tags, and
+  `ground_truth.json` lists exactly them.
 - `server/src/domain/tag_normalize.rs` (with unit tests) and `server/examples/tag_lab.rs`: the
   deterministic normalizer.
 - `consolidate.py`: the proposed LLM step. Providers are local llama.cpp, OpenAI Responses with a

@@ -10,7 +10,10 @@ Usage:
   psql "$DATABASE_URL" -f scripts/tag-lab/seed.sql
 
 The output is deterministic (fixed RNG seed), so measurements are repeatable.
-Every raw spelling in concepts.py lands on at least one bookmark.
+The coverage pass adds each unused spelling, but by replacing the concept's spelling on a
+bookmark it can drop the last copy of another one: with the default seed, 600 of the 627
+spellings in concepts.py land on a bookmark. ground_truth.json lists exactly the ones used.
+The committed measurements are on this library, so the pass stays as it is.
 """
 import argparse
 import json
@@ -119,7 +122,8 @@ def generate(n_bookmarks, rng):
             "concepts": concepts,
         })
 
-    # Guarantee coverage: every raw spelling appears on at least one bookmark.
+    # Coverage pass: give each unused spelling a bookmark. Replacing a spelling can drop the
+    # last copy of another (600 of 627 used with the default seed); see the docstring.
     used = {t for b in bookmarks for t in b["tags"]}
     groups_of = {}
     for g, cs in GROUPS.items():
