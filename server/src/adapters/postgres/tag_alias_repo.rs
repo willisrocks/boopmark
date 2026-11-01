@@ -9,6 +9,7 @@ use crate::domain::tag_alias::{
 use crate::domain::tag_consolidation::{
     ReviewedRow, TagSample, plan_reviewed_apply, resolve_through_aliases,
 };
+use crate::domain::tag_library::{ManualMerge, ManualMergePlan, library_rows, plan_manual_merge};
 use crate::domain::tag_normalize::{clean_tag, compact_key};
 use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, Postgres, Transaction};
@@ -638,17 +639,26 @@ impl TagAliasRepository for PostgresPool {
         Ok(batch)
     }
 
-    async fn apply_merges(
+    async fn apply_manual_merge(
         &self,
         user_id: Uuid,
-        kind: ChangeKind,
-        merges: &[TagMerge],
-    ) -> Result<Option<TagChangeBatch>, DomainError> {
+        request: &ManualMerge,
+    ) -> Result<(ManualMergePlan, Option<TagChangeBatch>), DomainError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         lock_user_tags(&mut tx, user_id).await?;
-        let batch = apply_merges_tx(&mut tx, user_id, kind, merges, true).await?;
+        let aliases = load_aliases(&mut *tx, user_id).await?;
+        let counts = load_tag_counts(&mut *tx, user_id).await?;
+        let plan = plan_manual_merge(request, &library_rows(&counts, &aliases), &aliases)?;
+        let batch = apply_merges_tx(
+            &mut tx,
+            user_id,
+            plan.kind,
+            std::slice::from_ref(&plan.merge),
+            true,
+        )
+        .await?;
         tx.commit().await.map_err(db_err)?;
-        Ok(batch)
+        Ok((plan, batch))
     }
 
     async fn undo_batch(
@@ -829,6 +839,7 @@ impl TagAliasRepository for PostgresPool {
 mod tag_alias_postgres_tests {
     use super::*;
     use crate::app::tag_alias::TagAliasService;
+    use crate::domain::tag_library::STALE_LIBRARY;
     use sqlx::PgPool;
     use sqlx::postgres::PgPoolOptions;
     use std::sync::Arc;
@@ -877,6 +888,14 @@ mod tag_alias_postgres_tests {
 
     fn s(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    fn manual(kind: ChangeKind, sources: &[&str], target: &str) -> ManualMerge {
+        ManualMerge {
+            kind,
+            sources: s(sources),
+            target: target.into(),
+        }
     }
 
     async fn resolve(
@@ -1075,32 +1094,18 @@ mod tag_alias_postgres_tests {
 
         // A batch that a later, still-applied batch depends on cannot be undone.
         let first = svc.apply_merge(user, &ids).await.expect("re-apply");
+        let rename = manual(ChangeKind::Rename, &["GitHub"], "Git Hub");
         let second = svc
-            .merge_tags(
-                user,
-                ChangeKind::Rename,
-                &[TagMerge {
-                    canonical: "Git Hub".into(),
-                    members: s(&["GitHub"]),
-                }],
-            )
+            .merge_tags(user, &rename)
             .await
             .expect("rename")
+            .1
             .expect("the rename changes tags");
-        // A retried rename changes nothing and records no empty batch.
-        assert!(
-            svc.merge_tags(
-                user,
-                ChangeKind::Rename,
-                &[TagMerge {
-                    canonical: "Git Hub".into(),
-                    members: s(&["GitHub"]),
-                }],
-            )
-            .await
-            .expect("retried rename")
-            .is_none()
-        );
+        // A retried rename names a tag that is gone: refused, no empty batch.
+        assert!(matches!(
+            svc.merge_tags(user, &rename).await,
+            Err(DomainError::InvalidInput(m)) if m == STALE_LIBRARY
+        ));
         assert!(matches!(
             svc.undo_batch(user, first.id).await,
             Err(DomainError::InvalidInput(_))
@@ -1179,20 +1184,64 @@ mod tag_alias_postgres_tests {
         .unwrap();
         assert!(stored.iter().all(|c| *c == zig), "{stored:?} vs {zig}");
 
-        bookmark(&pool, user, &["zig-lang"]).await;
-        let merge = vec![TagMerge {
-            canonical: "zig".into(),
-            members: s(&["zig-lang"]),
-        }];
-        let (left, right) = tokio::join!(
-            svc.merge_tags(user, ChangeKind::Merge, &merge),
-            svc.merge_tags(user, ChangeKind::Merge, &merge),
-        );
-        let recorded = [left.unwrap(), right.unwrap()]
+        bookmark(&pool, user, &["Zig Lang"]).await;
+        let merge = manual(ChangeKind::Merge, &["Zig Lang"], &zig);
+        let (left, right) =
+            tokio::join!(svc.merge_tags(user, &merge), svc.merge_tags(user, &merge));
+        // The second sees the first's result under the lock and is refused.
+        let recorded = [left, right]
             .into_iter()
-            .flatten()
+            .filter_map(|r| r.ok().and_then(|(_, batch)| batch))
             .count();
         assert_eq!(recorded, 1);
+        assert_eq!(svc.list_batches(user, 10).await.unwrap().len(), 1);
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
+        pool.close().await;
+    }
+
+    /// Two tabs act on the same page at once: one merges `k8s` into
+    /// `kubernetes`, the other renames `k8s` to `kube`. The library is
+    /// checked under the lock, so whichever runs second sees that `k8s` is
+    /// gone and is refused, instead of repointing the alias the first one
+    /// just wrote.
+    #[tokio::test]
+    #[ignore = "requires a Postgres database in DATABASE_URL"]
+    async fn tag_alias_concurrent_stale_merge_is_refused_under_the_lock() {
+        let pool = connect().await;
+        let svc = Arc::new(TagAliasService::new(Arc::new(PostgresPool::new(
+            pool.clone(),
+        ))));
+        let user = new_user(&pool).await;
+        let pods = bookmark(&pool, user, &["k8s"]).await;
+        bookmark(&pool, user, &["kubernetes"]).await;
+
+        let merge = manual(ChangeKind::Merge, &["k8s"], "kubernetes");
+        let rename = manual(ChangeKind::Rename, &["k8s"], "kube");
+        let (merged, renamed) =
+            tokio::join!(svc.merge_tags(user, &merge), svc.merge_tags(user, &rename));
+        let (winner, refused) = match (merged, renamed) {
+            (Ok((_, Some(_))), Err(e)) => ("kubernetes", e),
+            (Err(e), Ok((_, Some(_)))) => ("kube", e),
+            other => panic!("exactly one change should apply: {other:?}"),
+        };
+        assert!(
+            matches!(&refused, DomainError::InvalidInput(m) if m == STALE_LIBRARY),
+            "{refused:?}"
+        );
+        assert_eq!(tags_of(&pool, pods).await, s(&[winner]));
+        let k8s: String = sqlx::query_scalar(
+            "SELECT canonical FROM tag_aliases WHERE user_id = $1 AND alias_key = 'k8s'",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(k8s, winner);
         assert_eq!(svc.list_batches(user, 10).await.unwrap().len(), 1);
 
         sqlx::query("DELETE FROM users WHERE id = $1")

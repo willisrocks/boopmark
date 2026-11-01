@@ -7,7 +7,8 @@
 //! one, and a canonical that only lives in the alias table (its bookmarks
 //! were deleted) is listed with a count of zero.
 
-use crate::domain::tag_alias::{TagAlias, TagIndex};
+use crate::domain::error::DomainError;
+use crate::domain::tag_alias::{ChangeKind, TagAlias, TagIndex, TagMerge};
 use crate::domain::tag_normalize::compact_key;
 use std::collections::BTreeMap;
 
@@ -298,6 +299,76 @@ pub fn resolve_merge_target(
     }
     Ok(target)
 }
+
+/// A manual rename or merge as the user asked for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualMerge {
+    pub kind: ChangeKind,
+    pub sources: Vec<String>,
+    pub target: String,
+}
+
+/// A manual merge checked against the library: the merge to apply and, when
+/// the typed target was another tag's spelling, the name as typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualMergePlan {
+    pub kind: ChangeKind,
+    pub merge: TagMerge,
+    pub redirected_from: Option<String>,
+}
+
+/// Check `request` against the current tags and aliases (see
+/// [`resolve_merge_target`]); a target that is another tag's spelling
+/// becomes a merge into that tag. A refusal is `InvalidInput` with the
+/// message to show. The repository calls this under the per-user lock, so
+/// the check and the apply see the same library.
+pub fn plan_manual_merge(
+    request: &ManualMerge,
+    rows: &[TagRow],
+    aliases: &[TagAlias],
+) -> Result<ManualMergePlan, DomainError> {
+    let target = resolve_merge_target(rows, aliases, &request.sources, &request.target).map_err(
+        |refusal| {
+            DomainError::InvalidInput(match refusal {
+                MergeRefusal::Stale => STALE_LIBRARY.to_string(),
+                MergeRefusal::SpellingOf { source, canonical } => format!(
+                    "“{source}” is also a spelling of “{canonical}”. Merge it into “{canonical}” first."
+                ),
+                MergeRefusal::SharedSpelling { source, other } => format!(
+                    "“{other}” is another spelling of “{source}”. Select it too, or merge it first."
+                ),
+            })
+        },
+    )?;
+    let members: Vec<String> = request
+        .sources
+        .iter()
+        .filter(|s| **s != target.canonical)
+        .cloned()
+        .collect();
+    if members.is_empty() {
+        return Err(DomainError::InvalidInput(match request.kind {
+            ChangeKind::Rename if !target.redirected => "That is already the tag's name.".into(),
+            _ => "Choose tags to merge into a different tag.".into(),
+        }));
+    }
+    let (kind, redirected_from) = if target.redirected {
+        (ChangeKind::Merge, Some(request.target.clone()))
+    } else {
+        (request.kind, None)
+    };
+    Ok(ManualMergePlan {
+        kind,
+        merge: TagMerge {
+            canonical: target.canonical,
+            members,
+        },
+        redirected_from,
+    })
+}
+
+/// Shown when a manual merge names a tag that is no longer in the library.
+pub const STALE_LIBRARY: &str = "The tag list changed. Reload the page and try again.";
 
 #[cfg(test)]
 mod tests {

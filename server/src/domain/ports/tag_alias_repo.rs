@@ -1,9 +1,10 @@
 use crate::domain::error::DomainError;
 use crate::domain::tag_alias::{
-    ChangeKind, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch,
-    TagMerge, TagMergeProposal, TagWrite,
+    NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch,
+    TagMergeProposal, TagWrite,
 };
 use crate::domain::tag_consolidation::{ReviewedRow, TagSample};
+use crate::domain::tag_library::{ManualMerge, ManualMergePlan};
 use uuid::Uuid;
 
 /// Storage for aliases, merge proposals and undoable change batches.
@@ -74,15 +75,18 @@ pub trait TagAliasRepository: Send + Sync {
         rows: &[ReviewedRow],
     ) -> Result<TagChangeBatch, DomainError>;
 
-    /// Apply merges that did not come from proposals (manual merge, rename).
-    /// Returns `None`, recording no batch, when nothing would change, so a
-    /// retried or double-submitted merge does not add an empty batch.
-    async fn apply_merges(
+    /// Apply a manual merge or rename, which did not come from a proposal,
+    /// in one transaction under the per-user lock: the request is checked
+    /// against the tags and aliases as they are under the lock
+    /// ([`crate::domain::tag_library::plan_manual_merge`]), so a request
+    /// from a stale page is refused. Returns the plan, and `None` instead of
+    /// a batch when nothing would change, so a retried or double-submitted
+    /// merge does not add an empty batch.
+    async fn apply_manual_merge(
         &self,
         user_id: Uuid,
-        kind: ChangeKind,
-        merges: &[TagMerge],
-    ) -> Result<Option<TagChangeBatch>, DomainError>;
+        request: &ManualMerge,
+    ) -> Result<(ManualMergePlan, Option<TagChangeBatch>), DomainError>;
 
     /// Undo an applied batch. Fails with `InvalidInput` if it is already
     /// undone or a later, still-applied batch touched the same bookmarks or
