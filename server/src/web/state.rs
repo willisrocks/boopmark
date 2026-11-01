@@ -95,6 +95,13 @@ impl ObjectStorage for ImageStorage {
             Self::S3(s) => s.public_url(key),
         }
     }
+
+    async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+        match self {
+            Self::Local(s) => s.exists(key).await,
+            Self::S3(s) => s.exists(key).await,
+        }
+    }
 }
 
 impl AppState {

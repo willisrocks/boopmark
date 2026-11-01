@@ -93,8 +93,8 @@ with `pg_trgm` (contrib, ships in `postgres:16`), `dom_smoothie` 0.19 (MIT).
     results. At most 50 results; the footer says so when the cap is hit.
 11. **Worker connections.** The worker gets its own pool (`max_connections(1)`)
     plus the listener's dedicated connection, so it cannot starve the request
-    pool. `ARTICLE_INGEST_ENABLED=0` does not spawn it (metadata-only search,
-    still ranked). `ARTICLE_INGEST_CONCURRENCY` defaults to 4.
+    pool. `ARTICLE_INGEST_ENABLED=0` does not spawn it: new bookmarks are
+    searched by metadata, and text already stored stays searchable. `ARTICLE_INGEST_CONCURRENCY` defaults to 4.
 12. **Backfill** is the migration's `INSERT … SELECT` (every bookmark pending,
     already searchable by metadata); the worker drains it at the configured
     concurrency with at most one request per host per second.

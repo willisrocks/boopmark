@@ -210,11 +210,15 @@ impl SearchRepository for PostgresPool {
     ) -> Result<Vec<IngestJob>, DomainError> {
         // `swept` gives up on rows claimed MAX_INGEST_ATTEMPTS times without a
         // result (leases that ran out, results that could never be stored).
-        // `waiting` lists the users with due rows, and `due` locks up to
-        // `limit` next rows of each, so however big one user's import is,
-        // every other waiting user is a candidate. `picked` then takes them
-        // round-robin, each user's next row first and then each host's. Every claim gets a fresh
-        // token, so a worker whose lease ran out can no longer write.
+        // `waiting` ranks the users with due rows, the one whose turn came
+        // longest ago first (`bookmark_ingest_turns`), so fairness holds
+        // across claims, even when each claim takes a single job. `due` locks
+        // each waiting user's share of the batch, so however big one import
+        // is, every other waiting user is a candidate. `picked` takes one row
+        // per user in rank order, then a second, and so on; within a user,
+        // rows rotate through hosts. `turns` records the users served. Every
+        // claim gets a fresh token, so a worker whose lease ran out can no
+        // longer write.
         let sql = format!(
             "WITH swept AS (
                  UPDATE bookmark_contents
@@ -224,45 +228,65 @@ impl SearchRepository for PostgresPool {
                  RETURNING bookmark_id
              ),
              waiting AS (
-                 SELECT user_id FROM bookmark_contents
-                 WHERE status = 'pending' AND next_attempt_at <= now() AND attempts < $3
-                 GROUP BY user_id
-                 ORDER BY min(next_attempt_at), user_id
+                 SELECT q.user_id,
+                        row_number() OVER (ORDER BY t.last_claimed_at NULLS FIRST,
+                                                    q.oldest, q.user_id) AS user_rank
+                 FROM (
+                     SELECT user_id, min(next_attempt_at) AS oldest FROM bookmark_contents
+                     WHERE status = 'pending' AND next_attempt_at <= now() AND attempts < $3
+                     GROUP BY user_id
+                 ) q
+                 LEFT JOIN bookmark_ingest_turns t ON t.user_id = q.user_id
+                 ORDER BY user_rank
                  LIMIT {MAX_CLAIM_USERS}
              ),
              due AS (
-                 SELECT d.* FROM waiting w CROSS JOIN LATERAL (
+                 SELECT w.user_rank, d.* FROM waiting w CROSS JOIN LATERAL (
                      SELECT c.bookmark_id, c.user_id, c.next_attempt_at,
                             lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)')) AS host
                      FROM bookmark_contents c JOIN bookmarks b ON b.id = c.bookmark_id
                      WHERE c.user_id = w.user_id AND c.status = 'pending'
                        AND c.next_attempt_at <= now() AND c.attempts < $3
                      ORDER BY c.next_attempt_at, c.bookmark_id
-                     -- Each user's share of the batch; `picked` takes users in turn.
+                     -- Each user's share of the batch.
                      LIMIT ceil($1::numeric / (SELECT count(*) FROM waiting))::bigint
                      FOR UPDATE OF c SKIP LOCKED
                  ) d
              ),
              picked AS (
                  SELECT bookmark_id FROM (
-                     SELECT bookmark_id, next_attempt_at,
+                     SELECT bookmark_id, user_rank,
                             row_number() OVER (PARTITION BY user_id
-                                               ORDER BY next_attempt_at, bookmark_id) AS user_turn,
-                            row_number() OVER (PARTITION BY host
-                                               ORDER BY next_attempt_at, bookmark_id) AS host_turn
-                     FROM due
-                 ) d
-                 ORDER BY user_turn, host_turn, next_attempt_at, bookmark_id
+                                               ORDER BY host_turn, next_attempt_at, bookmark_id)
+                                AS user_turn
+                     FROM (
+                         SELECT due.*,
+                                row_number() OVER (PARTITION BY user_id, host
+                                                   ORDER BY next_attempt_at, bookmark_id)
+                                    AS host_turn
+                         FROM due
+                     ) h
+                 ) u
+                 ORDER BY user_turn, user_rank
                  LIMIT $1
+             ),
+             claimed AS (
+                 UPDATE bookmark_contents c
+                 SET attempts = c.attempts + 1,
+                     next_attempt_at = now() + make_interval(secs => $2),
+                     claim_token = gen_random_uuid(),
+                     updated_at = now()
+                 FROM bookmarks b
+                 WHERE b.id = c.bookmark_id AND c.bookmark_id IN (SELECT bookmark_id FROM picked)
+                 RETURNING c.bookmark_id, c.user_id, b.url, c.attempts, c.claim_token
+             ),
+             turns AS (
+                 INSERT INTO bookmark_ingest_turns (user_id, last_claimed_at)
+                 SELECT user_id, clock_timestamp() FROM (SELECT DISTINCT user_id FROM claimed) u
+                 ORDER BY user_id
+                 ON CONFLICT (user_id) DO UPDATE SET last_claimed_at = EXCLUDED.last_claimed_at
              )
-             UPDATE bookmark_contents c
-             SET attempts = c.attempts + 1,
-                 next_attempt_at = now() + make_interval(secs => $2),
-                 claim_token = gen_random_uuid(),
-                 updated_at = now()
-             FROM bookmarks b
-             WHERE b.id = c.bookmark_id AND c.bookmark_id IN (SELECT bookmark_id FROM picked)
-             RETURNING c.bookmark_id, b.url, c.attempts, c.claim_token"
+             SELECT bookmark_id, url, attempts, claim_token FROM claimed"
         );
         sqlx::query_as::<_, IngestJob>(&sql)
             .bind(limit)
@@ -817,6 +841,61 @@ mod search_tests {
             .execute(&pool)
             .await
             .unwrap();
+
+        // Fairness holds across claims: single-job claims alternate between the
+        // two users even though every importer row is older.
+        to_head(big_import.clone(), "1970-01-01").await;
+        to_head(vec![single.id], "1970-01-02").await;
+        let second = bookmark(
+            &repo,
+            other,
+            "https://elsewhere.example.org/two",
+            "claim",
+            None,
+            &[],
+        )
+        .await;
+        to_head(vec![second.id], "1970-01-02").await;
+        let mut served = Vec::new();
+        for _ in 0..50 {
+            if served.len() == 4 {
+                break;
+            }
+            let one = repo.claim_ingest_batch(1, LEASE).await.unwrap();
+            for job in &one {
+                if big_import.contains(&job.bookmark_id) {
+                    served.push(importer);
+                } else if [single.id, second.id].contains(&job.bookmark_id) {
+                    served.push(other);
+                }
+            }
+            // Rows of other tests are put back; this test's stay leased.
+            let mine_now: Vec<Uuid> = big_import
+                .iter()
+                .copied()
+                .chain([single.id, second.id])
+                .collect();
+            release_others(&pool, &one, &mine_now).await;
+        }
+        assert_eq!(served.len(), 4);
+        assert!(
+            served.windows(2).all(|w| w[0] != w[1]),
+            "claims alternate between users: {served:?}"
+        );
+        sqlx::query("DELETE FROM bookmarks WHERE id = $1")
+            .bind(second.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Put this step's claims back for the steps below.
+        sqlx::query(
+            "UPDATE bookmark_contents SET next_attempt_at = now(), attempts = 0, claim_token = NULL
+             WHERE user_id = ANY($1)",
+        )
+        .bind([importer, other])
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Two concurrent claimers never share a row.
         to_head(mine.clone(), "1970-01-01").await;

@@ -31,7 +31,8 @@ pub struct Config {
     pub metadata_fallback_backend: MetadataFallbackBackend,
     pub iframely_api_key: Option<String>,
     pub opengraph_io_api_key: Option<String>,
-    /// `ARTICLE_INGEST_ENABLED=0` keeps search on bookmark metadata only.
+    /// `ARTICLE_INGEST_ENABLED=0` stops fetching articles; text that was
+    /// already stored stays searchable.
     pub article_ingest_enabled: bool,
     pub article_ingest_concurrency: usize,
 }

@@ -42,6 +42,13 @@ CREATE INDEX idx_bookmark_contents_search ON bookmark_contents USING GIN(search)
 CREATE INDEX idx_bookmark_contents_meta_trgm ON bookmark_contents USING GIN(meta_text gin_trgm_ops);
 CREATE INDEX idx_bookmark_contents_queue ON bookmark_contents(next_attempt_at)
     WHERE status = 'pending';
+-- When each user was last served by a claim, so that claims take turns
+-- between users with waiting bookmarks.
+CREATE TABLE bookmark_ingest_turns (
+    user_id         UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    last_claimed_at TIMESTAMPTZ NOT NULL
+);
+
 -- A claim looks at each waiting user's next rows.
 CREATE INDEX idx_bookmark_contents_user_queue ON bookmark_contents(user_id, next_attempt_at, bookmark_id)
     WHERE status = 'pending';

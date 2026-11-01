@@ -7,7 +7,7 @@ use crate::domain::ports::image_fetcher::ImageFetcher;
 use crate::domain::ports::image_generator::{ImageGenerationContext, ImageGenerator};
 use crate::domain::ports::metadata::MetadataExtractor;
 use crate::domain::ports::screenshot::ScreenshotProvider;
-use crate::domain::ports::storage::ObjectStorage;
+use crate::domain::ports::storage::{ObjectStorage, is_plain_object_key};
 use crate::domain::ports::tag_resolver::TagResolver;
 use crate::domain::tag_alias::TagWrite;
 use std::sync::Arc;
@@ -643,12 +643,21 @@ where
     }
 }
 
-/// The storage key of a URL served by our own storage, if it is one.
+/// The key of a card image in our own storage, if `url` is one. The URL is
+/// parsed (which resolves `..` and `%2e%2e` segments), must have the
+/// storage's origin and path prefix and no query, and the rest must be a
+/// plain `images/...` key.
 fn stored_object_key<S: ObjectStorage>(storage: &S, url: &str) -> Option<String> {
-    let prefix = storage.public_url("");
-    url.strip_prefix(prefix.trim_end_matches('/'))
-        .map(|rest| rest.trim_start_matches('/').to_string())
-        .filter(|key| !key.is_empty())
+    let url = url::Url::parse(url).ok()?;
+    let prefix = url::Url::parse(&storage.public_url("")).ok()?;
+    if url.origin() != prefix.origin() || url.query().is_some() {
+        return None;
+    }
+    let key = url
+        .path()
+        .strip_prefix(prefix.path().trim_end_matches('/'))?
+        .strip_prefix('/')?;
+    (key.starts_with("images/") && is_plain_object_key(key)).then(|| key.to_string())
 }
 
 fn owned_override_storage_key<S: ObjectStorage>(
@@ -883,7 +892,7 @@ where
     /// through the guarded image fetcher.
     async fn image_url_is_valid(&self, image_url: &str) -> bool {
         match stored_object_key(self.storage.as_ref(), image_url) {
-            Some(key) => self.storage.get(&key).await.is_ok(),
+            Some(key) => self.storage.exists(&key).await.unwrap_or(false),
             None => self.image_fetcher.is_reachable(image_url).await,
         }
     }
@@ -1106,6 +1115,10 @@ mod tests {
 
         async fn delete(&self, _key: &str) -> Result<(), DomainError> {
             unreachable!()
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+            Ok(self.get(key).await.is_ok())
         }
 
         fn public_url(&self, key: &str) -> String {
@@ -1468,6 +1481,10 @@ mod tests {
             async fn delete(&self, _key: &str) -> Result<(), DomainError> {
                 Ok(())
             }
+            async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+                Ok(self.get(key).await.is_ok())
+            }
+
             fn public_url(&self, key: &str) -> String {
                 key.to_string()
             }
@@ -2472,6 +2489,10 @@ mod tests {
             async fn delete(&self, _key: &str) -> Result<(), DomainError> {
                 Ok(())
             }
+            async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+                Ok(self.get(key).await.is_ok())
+            }
+
             fn public_url(&self, key: &str) -> String {
                 format!("https://stored/{}", key)
             }
@@ -2515,6 +2536,10 @@ mod tests {
             async fn delete(&self, key: &str) -> Result<(), DomainError> {
                 self.files.lock().unwrap().remove(key);
                 Ok(())
+            }
+
+            async fn exists(&self, key: &str) -> Result<bool, DomainError> {
+                Ok(self.get(key).await.is_ok())
             }
 
             fn public_url(&self, key: &str) -> String {
@@ -2592,6 +2617,33 @@ mod tests {
                 tags: vec![],
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+            }
+        }
+
+        #[test]
+        fn stored_object_keys_refuse_traversal() {
+            let storage = crate::adapters::storage::local::LocalStorage::new(
+                std::env::temp_dir().join(format!("boopmark-keys-{}", Uuid::new_v4())),
+                "http://localhost:4000/uploads".into(),
+            );
+            let key = |url: &str| stored_object_key(&storage, url);
+            assert_eq!(
+                key("http://localhost:4000/uploads/images/base/u/a.jpg").as_deref(),
+                Some("images/base/u/a.jpg")
+            );
+            for url in [
+                "http://localhost:4000/uploads/../../../../dev/zero",
+                "http://localhost:4000/uploads/images/../../../etc/passwd",
+                "http://localhost:4000/uploads/images/%2e%2e/%2e%2e/%2e%2e/etc/passwd",
+                "http://localhost:4000/uploads/images/%252e%252e/x.jpg",
+                "http://localhost:4000/uploads/images/..%2f..%2fetc%2fpasswd",
+                "http://localhost:4000/uploads//etc/passwd",
+                "http://localhost:4000/uploads/avatars/a.jpg",
+                "http://localhost:4000/uploads/images/a.jpg?x=../../etc",
+                "http://evil.example/uploads/images/a.jpg",
+                "file:///etc/passwd",
+            ] {
+                assert_eq!(key(url), None, "{url}");
             }
         }
 
