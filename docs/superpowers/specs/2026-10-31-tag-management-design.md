@@ -114,7 +114,7 @@ and answered each question from code or measurements; there was no human gate.
 | Question | Answer | Evidence |
 |----------|--------|----------|
 | Is the problem storage or display? | Both. Verbatim storage creates the duplicates; the flat chip list amplifies them. | `all_tags` → `filters_inner.html`; the current suggestion pipeline created a new tag for 16% of suggested tags |
-| Normalize on read or on write? | On write, through an alias table, plus a one-time migration. | Read-time folding would leave the API, export and CLI with dirty data |
+| Normalize on read or on write? | On write, through an alias table, plus a one-time normalization job that writes proposals for review. | Read-time folding would leave the API, export and CLI with dirty data |
 | Aliases or a tag table? | Aliases next to `TEXT[]` (M1). | Every query and client stays unchanged; libraries are small |
 | Is plural folding safe? | Only when the singular already exists. | 0 wrong among 297 deterministic merges, including the `ios`/`news`/`kubernetes` traps |
 | Can an LLM apply merges unreviewed? | No. | 165 wrong merges when the local model's proposals were applied directly |
@@ -522,6 +522,18 @@ CREATE TABLE tag_change_snapshots (
     tags_after  TEXT[] NOT NULL,
     PRIMARY KEY (batch_id, bookmark_id)
 );
+
+-- Before-images of the aliases a batch repointed or dropped.
+CREATE TABLE tag_alias_snapshots (
+    batch_id       UUID NOT NULL REFERENCES tag_change_batches(id) ON DELETE CASCADE,
+    user_id        UUID NOT NULL,
+    alias_key      TEXT NOT NULL,
+    alias          TEXT NOT NULL,
+    canonical      TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    alias_batch_id UUID,                -- the row's batch_id before this batch
+    PRIMARY KEY (batch_id, alias_key)
+);
 ```
 
 **Write path.** One function, `TagResolver::resolve(user_id, raw) -> String`, runs on every tag
@@ -544,14 +556,19 @@ unchanged. Clients never need to know aliases exist.
 - records the batch and snapshots
 
 Rename is a merge into a new name. Delete removes the tag from bookmarks and drops its aliases. All
-three run in one transaction.
+three run in one transaction. Every alias row a batch inserts or repoints gets that batch's
+`batch_id`. Before a batch repoints or drops an existing alias, it writes the row's before-image to
+`tag_alias_snapshots`.
 
 **Undo.** Undo is per batch, from the library page's history list (kept 30 days).
 
 - For each snapshot whose bookmark still has `tags_after`, restore `tags_before`.
 - If a bookmark changed since, apply the inverse as a diff instead: re-add the removed tags and
   remove the added canonical, only if it was not on the bookmark before.
-- Delete the batch's aliases, then mark the batch `undone_at`.
+- Delete the aliases whose `batch_id` is this batch (the ones it inserted or repointed), then
+  reinsert every before-image from `tag_alias_snapshots`. Old spellings resolve as they did before
+  the batch: back to A after an undone merge, and again at all after an undone delete.
+- Mark the batch `undone_at`.
 
 Undo is not offered for a batch that a later, still-applied batch depends on. The UI greys it out
 with "undo the newer change first".
