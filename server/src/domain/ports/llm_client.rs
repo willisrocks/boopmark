@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 //! One provider-neutral LLM port shared by every text feature: tag suggestions
-//! on save, tag consolidation, and (per the hybrid search spec) query
-//! rewriting. Vendor adapters live in `adapters::llm_client`; the feature
+//! on save, tag consolidation, and future callers. Vendor adapters live in
+//! `adapters::llm_client`; the feature
 //! ports (`LlmEnricher`, `TagConsolidator`, `LlmPromptAssistant`) are meant to
 //! become thin use-case adapters on top of this one instead of each vendor
 //! adapter re-implementing HTTP, auth, and response parsing.

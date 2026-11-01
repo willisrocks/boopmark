@@ -56,8 +56,8 @@ Measured on 20 seeded bookmarks with the local model:
   paper. On save it can only pick existing canonical tags (an enum) plus at most one new tag, and
   the resolver maps that tag to an existing one where it can.
 - **One shared LLM port** (`LlmClient`, [section 6](#6-shared-llm-port)) with Anthropic, OpenAI
-  and local llama.cpp adapters, chosen by config. Both features use it, and the hybrid search spec
-  uses the same port. A prototype is on this branch.
+  and local llama.cpp adapters, chosen by config. Both features use it; the hybrid search spec
+  references its names (its v1 makes no LLM call). A prototype is on this branch.
 
 Decision APIs (OpenAI Decisions, TypeSafe Jev) are real and very cheap. They do exactly one part of
 this well, the pairwise check, and they cannot propose canonical names or new tags. They are the
@@ -744,7 +744,7 @@ half the size of the raw list (measured 1,980 vs 3,050 input tokens per save).
    banner. Biggest win, no LLM.
 2. Filter bar (top N + More + multi-select) and the `/tags` library page with manual merge and undo.
 3. The `LlmClient` port and adapters wired in `main.rs`, `LlmEnricher` moved onto it, the suggestion
-   prompt and enum schema, and the Haiku 5.5 default. The hybrid search work can start using the
+   prompt and enum schema, and the Haiku 5.5 default. Later LLM callers (search included) build on the
    port from here.
 4. LLM consolidation as a background job with the review screen, on the port. Remove the old
    one-click button, `TagConsolidator` and its adapters.
