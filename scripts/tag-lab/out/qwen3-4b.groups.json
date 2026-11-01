@@ -1,0 +1,1821 @@
+[
+ {
+  "canonical": "ios",
+  "members": [
+   "Android",
+   "Mobile",
+   "React Native",
+   "Swift",
+   "android",
+   "iOS",
+   "ios",
+   "mac os",
+   "macOS",
+   "macos",
+   "mobile",
+   "mobile-dev",
+   "react native",
+   "react-native",
+   "swift"
+  ],
+  "confidence": "medium",
+  "proposed": [
+   "ios",
+   "mobile",
+   "mobile-dev",
+   "swift",
+   "react native",
+   "android",
+   "macos"
+  ]
+ },
+ {
+  "canonical": "react",
+  "members": [
+   "Design",
+   "Design System",
+   "Figma",
+   "Front End",
+   "React",
+   "UI",
+   "UX",
+   "UX-design",
+   "design",
+   "design systems",
+   "design-system",
+   "figma",
+   "front end",
+   "front-end",
+   "frontend",
+   "react",
+   "ui",
+   "user experience",
+   "ux",
+   "ux design",
+   "web development",
+   "web-development"
+  ],
+  "confidence": "high",
+  "proposed": [
+   "react",
+   "frontend",
+   "web development",
+   "ui",
+   "ux",
+   "user experience",
+   "design",
+   "design-system",
+   "figma",
+   "ux design"
+  ]
+ },
+ {
+  "canonical": "python",
+  "members": [
+   "A.I.",
+   "AI",
+   "AI Coding Agent",
+   "AI Safety",
+   "AI-safety",
+   "Claude",
+   "Claude Code",
+   "Data Science",
+   "Deep Learning",
+   "Local AI",
+   "Local LLMs",
+   "Machine Learning",
+   "Python",
+   "Transformers",
+   "agents",
+   "ai",
+   "ai coding agents",
+   "ai safety",
+   "ai-coding-agents",
+   "claude",
+   "claude code",
+   "claude-code",
+   "computer vision",
+   "computer-vision",
+   "data science",
+   "data-science",
+   "deep learning",
+   "deep-learning",
+   "large language models",
+   "large-language-model",
+   "llama-cpp",
+   "llama.cpp",
+   "local ai",
+   "local llm",
+   "local-AI",
+   "local-ai",
+   "local-llms",
+   "machine learning",
+   "machine-learning",
+   "pyhton",
+   "python",
+   "python3",
+   "retrieval-augmented-generation",
+   "transformer",
+   "transformers",
+   "vector database",
+   "vector db",
+   "vector embeddings",
+   "vector-databases",
+   "vectordb"
+  ],
+  "confidence": "high",
+  "proposed": [
+   "python",
+   "python3",
+   "pyhton",
+   "data science",
+   "machine learning",
+   "deep learning",
+   "ai coding agents",
+   "ai",
+   "large language models",
+   "llama.cpp",
+   "claude code",
+   "claude",
+   "transformers",
+   "computer vision",
+   "ai safety",
+   "local ai",
+   "local llm",
+   "agents",
+   "retrieval-augmented-generation",
+   "vector db",
+   "vector database",
+   "vector embeddings"
+  ]
+ },
+ {
+  "canonical": "hardware",
+  "members": [
+   "Arduino",
+   "Embedded-Systems",
+   "Hardware",
+   "HomeLab",
+   "Linux",
+   "Raspberry Pi",
+   "Robotics",
+   "Self Hosting",
+   "arduino",
+   "embedded",
+   "embedded systems",
+   "hardware",
+   "home lab",
+   "homelab",
+   "linux",
+   "operating systems",
+   "operating-system",
+   "raspberry pi",
+   "raspberry-pi",
+   "robotics",
+   "rpi",
+   "self hosted",
+   "self-hosted",
+   "self-hosting",
+   "selfhosted"
+  ],
+  "confidence": "medium",
+  "proposed": [
+   "hardware",
+   "embedded systems",
+   "embedded",
+   "arduino",
+   "raspberry pi",
+   "rpi",
+   "robotics",
+   "self-hosting",
+   "selfhosted",
+   "homelab",
+   "operating systems",
+   "linux"
+  ]
+ },
+ {
+  "canonical": "cloud",
+  "members": [
+   "AWS",
+   "Cloud",
+   "Cloudflare",
+   "Docker",
+   "amazon web services",
+   "aws",
+   "cloud",
+   "cloud computing",
+   "cloud-computing",
+   "cloudflare",
+   "continuous integration",
+   "docker"
+  ],
+  "confidence": "high",
+  "proposed": [
+   "cloud",
+   "cloud computing",
+   "aws",
+   "amazon web services",
+   "cloudflare",
+   "docker",
+   "continuous integration"
+  ]
+ },
+ {
+  "canonical": "tools",
+  "members": [
+   "CLI",
+   "Git",
+   "GitHub",
+   "Github",
+   "Tools",
+   "cli",
+   "command line",
+   "command-line",
+   "dev tools",
+   "devtools",
+   "git",
+   "git hub",
+   "github",
+   "terminal",
+   "terminal emulator",
+   "terminals",
+   "tool",
+   "tooling",
+   "tools",
+   "visual studio code",
+   "vscode"
+  ],
+  "confidence": "high",
+  "proposed": [
+   "dev tools",
+   "tooling",
+   "tools",
+   "cli",
+   "command line",
+   "terminal",
+   "terminal emulator",
+   "vscode",
+   "visual studio code",
+   "git",
+   "github"
+  ]
+ },
+ {
+  "canonical": "backend",
+  "members": [
+   "API-design",
+   "Backend",
+   "Distributed Systems",
+   "Micro-services",
+   "System Design",
+   "api design",
+   "back-end",
+   "backend",
+   "distributed systems",
+   "distributed-systems",
+   "microservice",
+   "microservices",
+   "system design",
+   "system-design"
+  ],
+  "confidence": "medium",
+  "proposed": [
+   "backend",
+   "api design",
+   "microservices",
+   "distributed systems",
+   "system design"
+  ]
+ },
+ {
+  "canonical": "security",
+  "members": [
+   "DNS",
+   "Networking",
+   "cyber-security",
+   "cybersecurity",
+   "dns",
+   "networking",
+   "security"
+  ],
+  "confidence": "medium",
+  "proposed": [
+   "security",
+   "cyber-security",
+   "dns",
+   "networking"
+  ]
+ },
+ {
+  "canonical": "productivity",
+  "members": [
+   "Business",
+   "Finance",
+   "Leadership",
+   "Management",
+   "Marketing",
+   "Product",
+   "Productivity",
+   "business",
+   "finance",
+   "leadership",
+   "management",
+   "marketing",
+   "personal finance",
+   "personal-finance",
+   "product",
+   "productivity",
+   "remote work",
+   "remote-work",
+   "wfh"
+  ],
+  "confidence": "medium",
+  "proposed": [
+   "productivity",
+   "personal finance",
+   "finance",
+   "business",
+   "marketing",
+   "management",
+   "leadership",
+   "remote work",
+   "wfh",
+   "product"
+  ]
+ },
+ {
+  "canonical": "books",
+  "members": [
+   "Blog",
+   "Books",
+   "Writing",
+   "blog",
+   "blogging",
+   "blogs",
+   "book",
+   "books",
+   "cheat sheet",
+   "cheat-sheets",
+   "cheatsheet",
+   "how-to",
+   "howto",
+   "writing"
+  ],
+  "confidence": "medium",
+  "proposed": [
+   "books",
+   "blog",
+   "blogging",
+   "writing",
+   "how-to",
+   "cheat-sheets"
+  ]
+ },
+ {
+  "canonical": "keyboards",
+  "members": [
+   "Keyboards",
+   "keyboard",
+   "keyboards"
+  ]
+ },
+ {
+  "canonical": "kotlin",
+  "members": [
+   "Kotlin",
+   "kotlin"
+  ]
+ },
+ {
+  "canonical": "compilers",
+  "members": [
+   "Compilers",
+   "compiler",
+   "compilers"
+  ]
+ },
+ {
+  "canonical": "UI/UX",
+  "members": [
+   "UI UX",
+   "UI/UX",
+   "ui/ux"
+  ]
+ },
+ {
+  "canonical": "google",
+  "members": [
+   "Google",
+   "google"
+  ]
+ },
+ {
+  "canonical": "math",
+  "members": [
+   "Math",
+   "math",
+   "maths"
+  ]
+ },
+ {
+  "canonical": "apple",
+  "members": [
+   "Apple",
+   "apple"
+  ]
+ },
+ {
+  "canonical": "postgres",
+  "members": [
+   "Postgres",
+   "postgres"
+  ]
+ },
+ {
+  "canonical": "databases",
+  "members": [
+   "Databases",
+   "database",
+   "databases"
+  ]
+ },
+ {
+  "canonical": "podcast",
+  "members": [
+   "Podcasts",
+   "podcast",
+   "podcasts"
+  ]
+ },
+ {
+  "canonical": "css",
+  "members": [
+   "CSS",
+   "css"
+  ]
+ },
+ {
+  "canonical": "fonts",
+  "members": [
+   "Fonts",
+   "font",
+   "fonts"
+  ]
+ },
+ {
+  "canonical": "history",
+  "members": [
+   "History",
+   "history"
+  ]
+ },
+ {
+  "canonical": "sql",
+  "members": [
+   "SQL",
+   "sql"
+  ]
+ },
+ {
+  "canonical": "tokio",
+  "members": [
+   "Tokio",
+   "tokio"
+  ]
+ },
+ {
+  "canonical": "Philosophy",
+  "members": [
+   "Philosophy",
+   "philosophy"
+  ]
+ },
+ {
+  "canonical": "Typography",
+  "members": [
+   "Typography",
+   "typography"
+  ]
+ },
+ {
+  "canonical": "accessibility",
+  "members": [
+   "Accessibility",
+   "accessibility"
+  ]
+ },
+ {
+  "canonical": "statistics",
+  "members": [
+   "Statistics",
+   "statistics"
+  ]
+ },
+ {
+  "canonical": "blockchain",
+  "members": [
+   "Blockchain",
+   "blockchain"
+  ]
+ },
+ {
+  "canonical": "Startup",
+  "members": [
+   "Startup",
+   "start-ups",
+   "startup",
+   "startups"
+  ]
+ },
+ {
+  "canonical": "analytics",
+  "members": [
+   "Analytics",
+   "analytics"
+  ]
+ },
+ {
+  "canonical": "news",
+  "members": [
+   "News",
+   "news"
+  ]
+ },
+ {
+  "canonical": "rss",
+  "members": [
+   "RSS",
+   "rss"
+  ]
+ },
+ {
+  "canonical": "saas",
+  "members": [
+   "SaaS",
+   "saas"
+  ]
+ },
+ {
+  "canonical": "seo",
+  "members": [
+   "SEO",
+   "seo"
+  ]
+ },
+ {
+  "canonical": "travel",
+  "members": [
+   "Travel",
+   "travel"
+  ]
+ },
+ {
+  "canonical": "type systems",
+  "members": [
+   "type systems",
+   "type-system"
+  ]
+ },
+ {
+  "canonical": "3d printing",
+  "members": [
+   "3D-printing",
+   "3d printing",
+   "3d-printing"
+  ]
+ },
+ {
+  "canonical": "axum",
+  "members": [
+   "Axum",
+   "axum"
+  ]
+ },
+ {
+  "canonical": "data engineering",
+  "members": [
+   "data engineering",
+   "data-engineering"
+  ]
+ },
+ {
+  "canonical": "space",
+  "members": [
+   "Space",
+   "space"
+  ]
+ },
+ {
+  "canonical": "youtube",
+  "members": [
+   "YouTube",
+   "youtube"
+  ]
+ },
+ {
+  "canonical": "Electronics",
+  "members": [
+   "Electronics",
+   "electronics"
+  ]
+ },
+ {
+  "canonical": "email",
+  "members": [
+   "Email",
+   "e-mail",
+   "email"
+  ]
+ },
+ {
+  "canonical": "color",
+  "members": [
+   "color",
+   "colors"
+  ]
+ },
+ {
+  "canonical": "humor",
+  "members": [
+   "humor"
+  ]
+ },
+ {
+  "canonical": "javascript",
+  "members": [
+   "JavaScript",
+   "java-script",
+   "javascript"
+  ]
+ },
+ {
+  "canonical": "video",
+  "members": [
+   "Video",
+   "video",
+   "videos"
+  ]
+ },
+ {
+  "canonical": "Open Source",
+  "members": [
+   "Open Source",
+   "open source",
+   "open-source",
+   "opensource"
+  ]
+ },
+ {
+  "canonical": "async rust",
+  "members": [
+   "async rust",
+   "async-rust"
+  ]
+ },
+ {
+  "canonical": "automation",
+  "members": [
+   "Automation",
+   "automation",
+   "automations"
+  ]
+ },
+ {
+  "canonical": "no-code",
+  "members": [
+   "no code",
+   "no-code",
+   "nocode"
+  ]
+ },
+ {
+  "canonical": "rails",
+  "members": [
+   "rails"
+  ]
+ },
+ {
+  "canonical": "recipes",
+  "members": [
+   "Recipes",
+   "recipe",
+   "recipes"
+  ]
+ },
+ {
+  "canonical": "reference",
+  "members": [
+   "Reference",
+   "reference",
+   "references"
+  ]
+ },
+ {
+  "canonical": "rust",
+  "members": [
+   "Rust",
+   "rust"
+  ]
+ },
+ {
+  "canonical": "unicode",
+  "members": [
+   "Unicode",
+   "unicode"
+  ]
+ },
+ {
+  "canonical": "WebAssembly",
+  "members": [
+   "WebAssembly",
+   "web-assembly"
+  ]
+ },
+ {
+  "canonical": "concurrency",
+  "members": [
+   "Concurrency",
+   "concurrency"
+  ]
+ },
+ {
+  "canonical": "cooking",
+  "members": [
+   "Cooking",
+   "cooking"
+  ]
+ },
+ {
+  "canonical": "energy",
+  "members": [
+   "Energy",
+   "energy"
+  ]
+ },
+ {
+  "canonical": "game dev",
+  "members": [
+   "game dev",
+   "gamedev"
+  ]
+ },
+ {
+  "canonical": "music",
+  "members": [
+   "Music",
+   "music"
+  ]
+ },
+ {
+  "canonical": "physics",
+  "members": [
+   "Physics",
+   "physics"
+  ]
+ },
+ {
+  "canonical": "tauri",
+  "members": [
+   "Tauri",
+   "tauri"
+  ]
+ },
+ {
+  "canonical": "typescript",
+  "members": [
+   "TypeScript",
+   "typescript"
+  ]
+ },
+ {
+  "canonical": "Web3",
+  "members": [
+   "Web3",
+   "web3"
+  ]
+ },
+ {
+  "canonical": "c#",
+  "members": [
+   "C#",
+   "c#"
+  ]
+ },
+ {
+  "canonical": "cuda",
+  "members": [
+   "CUDA",
+   "cuda"
+  ]
+ },
+ {
+  "canonical": "vercel",
+  "members": [
+   "Vercel",
+   "vercel"
+  ]
+ },
+ {
+  "canonical": "wasm",
+  "members": [
+   "WASM",
+   "wasm"
+  ]
+ },
+ {
+  "canonical": "Electron",
+  "members": [
+   "Electron",
+   "electron"
+  ]
+ },
+ {
+  "canonical": "Vue",
+  "members": [
+   "Vue",
+   "vue"
+  ]
+ },
+ {
+  "canonical": "cryptography",
+  "members": [
+   "Cryptography",
+   "cryptography"
+  ]
+ },
+ {
+  "canonical": "emacs",
+  "members": [
+   "Emacs",
+   "emacs"
+  ]
+ },
+ {
+  "canonical": "fine-tuning",
+  "members": [
+   "fine tuning",
+   "fine-tuning",
+   "finetuning"
+  ]
+ },
+ {
+  "canonical": "fitness",
+  "members": [
+   "Fitness",
+   "fitness"
+  ]
+ },
+ {
+  "canonical": "java",
+  "members": [
+   "Java",
+   "java"
+  ]
+ },
+ {
+  "canonical": "neovim",
+  "members": [
+   "Neovim",
+   "neovim"
+  ]
+ },
+ {
+  "canonical": "ollama",
+  "members": [
+   "Ollama",
+   "ollama"
+  ]
+ },
+ {
+  "canonical": "php",
+  "members": [
+   "PHP",
+   "php"
+  ]
+ },
+ {
+  "canonical": "postgresql",
+  "members": [
+   "PostgreSQL",
+   "postgresql"
+  ]
+ },
+ {
+  "canonical": "programming",
+  "members": [
+   "Programming",
+   "programming"
+  ]
+ },
+ {
+  "canonical": "regex",
+  "members": [
+   "RegEx",
+   "regex"
+  ]
+ },
+ {
+  "canonical": "sqlite",
+  "members": [
+   "SQLite",
+   "sqlite"
+  ]
+ },
+ {
+  "canonical": "Science",
+  "members": [
+   "Science",
+   "science"
+  ]
+ },
+ {
+  "canonical": "browsers",
+  "members": [
+   "Browsers",
+   "browser",
+   "browsers"
+  ]
+ },
+ {
+  "canonical": "c++",
+  "members": [
+   "C++",
+   "c++"
+  ]
+ },
+ {
+  "canonical": "chatgpt",
+  "members": [
+   "ChatGPT",
+   "chat-gpt",
+   "chatgpt"
+  ]
+ },
+ {
+  "canonical": "colour",
+  "members": [
+   "Colours",
+   "colour"
+  ]
+ },
+ {
+  "canonical": "evals",
+  "members": [
+   "eval",
+   "evals"
+  ]
+ },
+ {
+  "canonical": "fly.io",
+  "members": [
+   "Fly.io",
+   "fly.io",
+   "flyio"
+  ]
+ },
+ {
+  "canonical": "health",
+  "members": [
+   "Health",
+   "health"
+  ]
+ },
+ {
+  "canonical": "hiring",
+  "members": [
+   "Hiring",
+   "hiring"
+  ]
+ },
+ {
+  "canonical": "htmx",
+  "members": [
+   "HTMX",
+   "htmx"
+  ]
+ },
+ {
+  "canonical": "image generation",
+  "members": [
+   "image generation",
+   "image-generation"
+  ]
+ },
+ {
+  "canonical": "indieweb",
+  "members": [
+   "IndieWeb",
+   "indie web",
+   "indieweb"
+  ]
+ },
+ {
+  "canonical": "openai",
+  "members": [
+   "OpenAI",
+   "open-ai",
+   "openai"
+  ]
+ },
+ {
+  "canonical": "rust-lang",
+  "members": [
+   "Rust Lang",
+   "rust-lang",
+   "rustlang"
+  ]
+ },
+ {
+  "canonical": "sveltekit",
+  "members": [
+   "SvelteKit",
+   "sveltekit"
+  ]
+ },
+ {
+  "canonical": "web components",
+  "members": [
+   "web components",
+   "web-components"
+  ]
+ },
+ {
+  "canonical": "CI/CD",
+  "members": [
+   "CI/CD",
+   "CICD",
+   "ci-cd",
+   "ci/cd"
+  ]
+ },
+ {
+  "canonical": "Go",
+  "members": [
+   "Go",
+   "go"
+  ]
+ },
+ {
+  "canonical": "Hugging Face",
+  "members": [
+   "Hugging Face",
+   "hugging face",
+   "huggingface"
+  ]
+ },
+ {
+  "canonical": "Ruby",
+  "members": [
+   "Ruby",
+   "ruby"
+  ]
+ },
+ {
+  "canonical": "Zig",
+  "members": [
+   "Zig",
+   "zig"
+  ]
+ },
+ {
+  "canonical": "a11y",
+  "members": [
+   "a11y"
+  ]
+ },
+ {
+  "canonical": "apis",
+  "members": [
+   "API",
+   "APIs",
+   "apis"
+  ]
+ },
+ {
+  "canonical": "architecture",
+  "members": [
+   "architecture"
+  ]
+ },
+ {
+  "canonical": "data structures",
+  "members": [
+   "data structures",
+   "data-structures"
+  ]
+ },
+ {
+  "canonical": "economics",
+  "members": [
+   "Economics",
+   "economics"
+  ]
+ },
+ {
+  "canonical": "elixir",
+  "members": [
+   "Elixir",
+   "elixir"
+  ]
+ },
+ {
+  "canonical": "functional programming",
+  "members": [
+   "functional programming",
+   "functional-programming"
+  ]
+ },
+ {
+  "canonical": "html",
+  "members": [
+   "HTML",
+   "html"
+  ]
+ },
+ {
+  "canonical": "rag",
+  "members": [
+   "RAG",
+   "rag"
+  ]
+ },
+ {
+  "canonical": "refactoring",
+  "members": [
+   "Refactoring",
+   "refactoring"
+  ]
+ },
+ {
+  "canonical": "tailwind-css",
+  "members": [
+   "Tailwind CSS",
+   "tailwind-css",
+   "tailwindcss"
+  ]
+ },
+ {
+  "canonical": "testing",
+  "members": [
+   "Testing",
+   "testing"
+  ]
+ },
+ {
+  "canonical": "Coding Agents",
+  "members": [
+   "Coding Agents",
+   "coding agent",
+   "coding agents",
+   "coding-agent"
+  ]
+ },
+ {
+  "canonical": "LLM",
+  "members": [
+   "LLM",
+   "llm",
+   "llms"
+  ]
+ },
+ {
+  "canonical": "careers",
+  "members": [
+   "Career",
+   "career",
+   "careers"
+  ]
+ },
+ {
+  "canonical": "climate",
+  "members": [
+   "Climate",
+   "climate"
+  ]
+ },
+ {
+  "canonical": "game-development",
+  "members": [
+   "Game Development",
+   "game-development"
+  ]
+ },
+ {
+  "canonical": "haskell",
+  "members": [
+   "Haskell",
+   "haskell"
+  ]
+ },
+ {
+  "canonical": "humour",
+  "members": [
+   "humour"
+  ]
+ },
+ {
+  "canonical": "llama",
+  "members": [
+   "Llama",
+   "llama"
+  ]
+ },
+ {
+  "canonical": "performance",
+  "members": [
+   "Performance",
+   "performance"
+  ]
+ },
+ {
+  "canonical": "prompt engineering",
+  "members": [
+   "prompt engineering",
+   "prompt-engineering"
+  ]
+ },
+ {
+  "canonical": "redis",
+  "members": [
+   "Redis",
+   "redis"
+  ]
+ },
+ {
+  "canonical": "svelte",
+  "members": [
+   "Svelte",
+   "svelte"
+  ]
+ },
+ {
+  "canonical": "ts",
+  "members": [
+   "ts"
+  ]
+ },
+ {
+  "canonical": "web performance",
+  "members": [
+   "web performance"
+  ]
+ },
+ {
+  "canonical": "Containers",
+  "members": [
+   "Containers",
+   "container",
+   "containers"
+  ]
+ },
+ {
+  "canonical": "GitLab",
+  "members": [
+   "GitLab",
+   "gitlab"
+  ]
+ },
+ {
+  "canonical": "Interviews",
+  "members": [
+   "Interviews",
+   "interview",
+   "interviews"
+  ]
+ },
+ {
+  "canonical": "Kubernetes",
+  "members": [
+   "Kubernetes",
+   "kubernetes"
+  ]
+ },
+ {
+  "canonical": "MCP",
+  "members": [
+   "MCP",
+   "mcp"
+  ]
+ },
+ {
+  "canonical": "ML",
+  "members": [
+   "ML"
+  ]
+ },
+ {
+  "canonical": "Nix",
+  "members": [
+   "Nix",
+   "nix"
+  ]
+ },
+ {
+  "canonical": "Stable Diffusion",
+  "members": [
+   "Stable Diffusion",
+   "stable diffusion",
+   "stable-diffusion"
+  ]
+ },
+ {
+  "canonical": "Tutorial",
+  "members": [
+   "Tutorial",
+   "tutorial",
+   "tutorials"
+  ]
+ },
+ {
+  "canonical": "docs",
+  "members": [
+   "Docs",
+   "docs"
+  ]
+ },
+ {
+  "canonical": "funny",
+  "members": [
+   "funny"
+  ]
+ },
+ {
+  "canonical": "js",
+  "members": [
+   "JS",
+   "js"
+  ]
+ },
+ {
+  "canonical": "mathematics",
+  "members": [
+   "mathematics"
+  ]
+ },
+ {
+  "canonical": "monitoring",
+  "members": [
+   "Monitoring",
+   "monitoring"
+  ]
+ },
+ {
+  "canonical": "nixos",
+  "members": [
+   "NixOS",
+   "nixos"
+  ]
+ },
+ {
+  "canonical": "regular expressions",
+  "members": [
+   "regular expressions"
+  ]
+ },
+ {
+  "canonical": "ruby on rails",
+  "members": [
+   "Ruby-on-Rails",
+   "ruby on rails"
+  ]
+ },
+ {
+  "canonical": "stats",
+  "members": [
+   "stats"
+  ]
+ },
+ {
+  "canonical": "tailwind",
+  "members": [
+   "tailwind"
+  ]
+ },
+ {
+  "canonical": "user interface",
+  "members": [
+   "user interface"
+  ]
+ },
+ {
+  "canonical": "AI agents",
+  "members": [
+   "AI agents",
+   "ai agents"
+  ]
+ },
+ {
+  "canonical": "AI-art",
+  "members": [
+   "AI-art",
+   "ai art"
+  ]
+ },
+ {
+  "canonical": "Agentic-AI",
+  "members": [
+   "Agentic-AI",
+   "agentic ai"
+  ]
+ },
+ {
+  "canonical": "Algorithms",
+  "members": [
+   "Algorithms",
+   "algorithm"
+  ]
+ },
+ {
+  "canonical": "Anthropic",
+  "members": [
+   "Anthropic",
+   "anthropic"
+  ]
+ },
+ {
+  "canonical": "Artificial-Intelligence",
+  "members": [
+   "Artificial-Intelligence",
+   "artificial intelligence"
+  ]
+ },
+ {
+  "canonical": "Debugging",
+  "members": [
+   "Debugging",
+   "debugging"
+  ]
+ },
+ {
+  "canonical": "DevOps",
+  "members": [
+   "DevOps",
+   "dev-ops"
+  ]
+ },
+ {
+  "canonical": "Developer-Tools",
+  "members": [
+   "Developer-Tools",
+   "developer tools"
+  ]
+ },
+ {
+  "canonical": "Embeddings",
+  "members": [
+   "Embeddings",
+   "embedding"
+  ]
+ },
+ {
+  "canonical": "FP",
+  "members": [
+   "FP",
+   "fp"
+  ]
+ },
+ {
+  "canonical": "GPUs",
+  "members": [
+   "GPUs",
+   "gpus"
+  ]
+ },
+ {
+  "canonical": "Golang",
+  "members": [
+   "Golang",
+   "golang"
+  ]
+ },
+ {
+  "canonical": "LLM-evals",
+  "members": [
+   "LLM-evals",
+   "llm evals"
+  ]
+ },
+ {
+  "canonical": "OSS",
+  "members": [
+   "OSS",
+   "oss"
+  ]
+ },
+ {
+  "canonical": "Observability",
+  "members": [
+   "Observability",
+   "observability"
+  ]
+ },
+ {
+  "canonical": "Privacy",
+  "members": [
+   "Privacy",
+   "privacy"
+  ]
+ },
+ {
+  "canonical": "React.js",
+  "members": [
+   "React.js",
+   "reactjs"
+  ]
+ },
+ {
+  "canonical": "Serverless",
+  "members": [
+   "Serverless",
+   "serverless"
+  ]
+ },
+ {
+  "canonical": "Software-Architecture",
+  "members": [
+   "Software-Architecture",
+   "software architecture"
+  ]
+ },
+ {
+  "canonical": "Web Dev",
+  "members": [
+   "Web Dev",
+   "web-dev"
+  ]
+ },
+ {
+  "canonical": "cpp",
+  "members": [
+   "cpp"
+  ]
+ },
+ {
+  "canonical": "csharp",
+  "members": [
+   "csharp"
+  ]
+ },
+ {
+  "canonical": "documentation",
+  "members": [
+   "documentation"
+  ]
+ },
+ {
+  "canonical": "exercise",
+  "members": [
+   "exercise"
+  ]
+ },
+ {
+  "canonical": "next-js",
+  "members": [
+   "next-js",
+   "nextjs"
+  ]
+ },
+ {
+  "canonical": "nvim",
+  "members": [
+   "nvim"
+  ]
+ },
+ {
+  "canonical": "o11y",
+  "members": [
+   "o11y"
+  ]
+ },
+ {
+  "canonical": "video games",
+  "members": [
+   "video games",
+   "video-games"
+  ]
+ },
+ {
+  "canonical": "vue.js",
+  "members": [
+   "vue.js",
+   "vuejs"
+  ]
+ },
+ {
+  "canonical": "Engineering-Management",
+  "members": [
+   "Engineering-Management"
+  ]
+ },
+ {
+  "canonical": "GNU/Linux",
+  "members": [
+   "GNU/Linux"
+  ]
+ },
+ {
+  "canonical": "InfoSec",
+  "members": [
+   "InfoSec"
+  ]
+ },
+ {
+  "canonical": "K8s",
+  "members": [
+   "K8s"
+  ]
+ },
+ {
+  "canonical": "Remote Working",
+  "members": [
+   "Remote Working"
+  ]
+ },
+ {
+  "canonical": "Vim",
+  "members": [
+   "Vim"
+  ]
+ },
+ {
+  "canonical": "algos",
+  "members": [
+   "algos"
+  ]
+ },
+ {
+  "canonical": "climate change",
+  "members": [
+   "climate change"
+  ]
+ },
+ {
+  "canonical": "coding",
+  "members": [
+   "coding"
+  ]
+ },
+ {
+  "canonical": "css3",
+  "members": [
+   "css3"
+  ]
+ },
+ {
+  "canonical": "db",
+  "members": [
+   "db"
+  ]
+ },
+ {
+  "canonical": "debug",
+  "members": [
+   "debug"
+  ]
+ },
+ {
+  "canonical": "econ",
+  "members": [
+   "econ"
+  ]
+ },
+ {
+  "canonical": "eng-management",
+  "members": [
+   "eng-management"
+  ]
+ },
+ {
+  "canonical": "games",
+  "members": [
+   "games"
+  ]
+ },
+ {
+  "canonical": "gaming",
+  "members": [
+   "gaming"
+  ]
+ },
+ {
+  "canonical": "html5",
+  "members": [
+   "html5"
+  ]
+ },
+ {
+  "canonical": "interviewing",
+  "members": [
+   "interviewing"
+  ]
+ },
+ {
+  "canonical": "javscript",
+  "members": [
+   "javscript"
+  ]
+ },
+ {
+  "canonical": "kubernets",
+  "members": [
+   "kubernets"
+  ]
+ },
+ {
+  "canonical": "mobile development",
+  "members": [
+   "mobile development"
+  ]
+ },
+ {
+  "canonical": "model context protocol",
+  "members": [
+   "model context protocol"
+  ]
+ },
+ {
+  "canonical": "perf",
+  "members": [
+   "perf"
+  ]
+ },
+ {
+  "canonical": "prompting",
+  "members": [
+   "prompting"
+  ]
+ },
+ {
+  "canonical": "refactor",
+  "members": [
+   "refactor"
+  ]
+ },
+ {
+  "canonical": "robots",
+  "members": [
+   "robots"
+  ]
+ },
+ {
+  "canonical": "software-engineering",
+  "members": [
+   "software-engineering"
+  ]
+ },
+ {
+  "canonical": "sqlite3",
+  "members": [
+   "sqlite3"
+  ]
+ },
+ {
+  "canonical": "swe",
+  "members": [
+   "swe"
+  ]
+ },
+ {
+  "canonical": "test driven development",
+  "members": [
+   "test driven development"
+  ]
+ },
+ {
+  "canonical": "tests",
+  "members": [
+   "tests"
+  ]
+ },
+ {
+  "canonical": "traveling",
+  "members": [
+   "traveling"
+  ]
+ },
+ {
+  "canonical": "travelling",
+  "members": [
+   "travelling"
+  ]
+ },
+ {
+  "canonical": "unit testing",
+  "members": [
+   "unit testing"
+  ]
+ },
+ {
+  "canonical": "unit-tests",
+  "members": [
+   "unit-tests"
+  ]
+ },
+ {
+  "canonical": "web-perf",
+  "members": [
+   "web-perf"
+  ]
+ }
+]

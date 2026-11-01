@@ -53,6 +53,25 @@ def score(groups, truth):
     }
 
 
+def score_proposals(groups, truth):
+    """Score only the LLM's own proposals: each deterministic tag it folded
+    into another (groups carry a "proposed" list of deterministic canonicals).
+    The residual ideal is concepts that still have more than one tag."""
+    concept_of = truth["concept_of"]
+    ambiguous = {frozenset(p) for p in truth["ambiguous"]}
+    out = {"correct": [], "ambiguous": [], "wrong": []}
+    for g in groups:
+        if "proposed" not in g:
+            continue
+        for m in g["proposed"]:
+            if m == g["canonical"]:
+                continue
+            a, b = concept_of[m], concept_of[g["canonical"]]
+            key = "correct" if a == b else "ambiguous" if frozenset((a, b)) in ambiguous else "wrong"
+            out[key].append((m, g["canonical"], g.get("confidence")))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("groups")
@@ -66,6 +85,17 @@ def main():
         s = score(groups, truth)
         print(f"{name:>10}: tags={s['tags']} merges={s['merges']} correct={s['correct']} "
               f"ambiguous={s['ambiguous']} wrong={s['wrong']} precision={s['precision']} recall={s['recall']}")
+        p = score_proposals(groups, truth)
+        n = len(p["correct"]) + len(p["wrong"])
+        if n or p["ambiguous"]:
+            print(f"{'llm-only':>10}: proposals={n + len(p['ambiguous'])} correct={len(p['correct'])} "
+                  f"ambiguous={len(p['ambiguous'])} wrong={len(p['wrong'])} "
+                  f"precision={round(len(p['correct']) / n, 4) if n else None}")
+            for conf in ("high", "medium", "low"):
+                c = sum(1 for x in p["correct"] if x[2] == conf)
+                w = sum(1 for x in p["wrong"] if x[2] == conf)
+                if c + w:
+                    print(f"{'':>12}{conf}: correct={c} wrong={w} precision={c / (c + w):.2f}")
         if args.show_wrong:
             for m, c in s["wrong_merges"]:
                 print(f"             WRONG {m!r} -> {c!r}")
