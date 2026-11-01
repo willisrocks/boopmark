@@ -4,7 +4,7 @@ use crate::adapters::net::{
 };
 use crate::domain::error::CF_CHALLENGE_MSG;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher, FetchedArticle};
-use crate::domain::search::ARTICLE_TEXT_CAP_CHARS;
+use crate::domain::search::{ARTICLE_TEXT_CAP_CHARS, SNIPPET_START, SNIPPET_STOP};
 use reqwest::StatusCode;
 use std::future::Future;
 use std::pin::Pin;
@@ -186,7 +186,14 @@ pub(crate) fn extract_text(html: &str, url: &str) -> Result<String, ArticleFetch
     let article = dom_smoothie::Readability::new(html, Some(url), Some(config))
         .and_then(|mut readability| readability.parse())
         .map_err(|e| ArticleFetchError::Permanent(format!("no readable article: {e}")))?;
-    let text = article.text_content.trim();
+    // NUL cannot be stored in a TEXT column, and the snippet markers must stay
+    // unambiguous.
+    let text: String = article
+        .text_content
+        .chars()
+        .filter(|c| !matches!(*c, '\0' | SNIPPET_START | SNIPPET_STOP))
+        .collect();
+    let text = text.trim();
     if text.is_empty() {
         return Err(ArticleFetchError::Permanent(
             "no readable article: empty text".to_string(),

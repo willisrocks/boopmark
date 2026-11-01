@@ -69,6 +69,44 @@ pub struct IngestFailure {
     pub retry_at: Option<DateTime<Utc>>,
 }
 
+/// The parts of a `websearch_to_tsquery` query that must hold for every
+/// result, whichever leg found it: quoted phrases and `-exclusions`, as a
+/// websearch string of their own (`coffee "cold brew" -tea` gives
+/// `"cold brew" -tea`). `None` when the query has neither.
+pub fn websearch_constraints(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let at_word_start = i == 0 || chars[i - 1].is_whitespace();
+        let negated = chars[i] == '-' && at_word_start;
+        let body = if negated { i + 1 } else { i };
+        if chars.get(body) == Some(&'"') && (negated || at_word_start) {
+            let close = chars[body + 1..].iter().position(|c| *c == '"');
+            let end = close.map_or(chars.len(), |p| body + 1 + p);
+            let phrase: String = chars[body + 1..end].iter().collect();
+            if !phrase.trim().is_empty() {
+                parts.push(format!(
+                    "{}\"{}\"",
+                    if negated { "-" } else { "" },
+                    phrase.trim()
+                ));
+            }
+            i = end + 1;
+        } else if negated && chars.get(body).is_some_and(|c| !c.is_whitespace()) {
+            let end = chars[body..]
+                .iter()
+                .position(|c| c.is_whitespace())
+                .map_or(chars.len(), |p| body + p);
+            parts.push(chars[i..end].iter().collect());
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
     pub text: String,
@@ -133,6 +171,25 @@ mod tests {
         assert_eq!(retry_delay(3), Some(Duration::hours(24)));
         assert_eq!(retry_delay(4), None);
         assert_eq!(retry_delay(9), None);
+    }
+
+    #[test]
+    fn websearch_constraints_keep_phrases_and_exclusions_only() {
+        assert_eq!(
+            websearch_constraints("coffee -tea").as_deref(),
+            Some("-tea")
+        );
+        assert_eq!(
+            websearch_constraints("coffee \"cold brew\" -tea -\"green tea\"").as_deref(),
+            Some("\"cold brew\" -tea -\"green tea\"")
+        );
+        assert_eq!(
+            websearch_constraints("\"unterminated phrase").as_deref(),
+            Some("\"unterminated phrase\"")
+        );
+        assert_eq!(websearch_constraints("well-known rust"), None);
+        assert_eq!(websearch_constraints("plain words"), None);
+        assert_eq!(websearch_constraints("dangling - \"\""), None);
     }
 
     #[test]
