@@ -19,7 +19,7 @@ articles) with 24 hand-labelled queries, the recommended hybrid scores
 **nDCG@10 0.106** and returns nothing for 83% of the queries.
 
 **Recommendation: Option A.** Postgres-native hybrid search: pgvector (HNSW) +
-weighted `tsvector` with `ts_rank_cd`, fused with RRF. Embeddings come through a
+weighted `tsvector` (`websearch_to_tsquery`, ranked by `ts_rank`), fused with RRF. Embeddings come through a
 new `Embedder` port. An operator-configured hosted model is the production
 default (`text-embedding-3-small`, about **$0.05 per 1,000 bookmarks** to
 ingest). A local fastembed adapter covers self-hosters, and a `disabled`
@@ -120,8 +120,10 @@ There are 24 queries in three types:
 
 Relevance labels were written first. They were then completed by judging the
 **pool**, the union of every method's top 10 (TREC-style), so no method was
-scored against labels that only another method could find. Each query has
-1–8 relevant bookmarks.
+scored against labels that only another method could find. The pool was judged twice: once after the main methods ran, and again after
+the embedding variants (metadata-only, MiniLM, bge-base) added new hits. The
+second pass added no relevant documents, so the variant rows are not biased by
+labels frozen before they ran. Each query has 1–8 relevant bookmarks.
 
 ### Results (exact KNN; `eval.py --bm25`)
 
@@ -162,7 +164,7 @@ The variants show three things:
 
 
 Latency is the SQL time only (warm, local, 490 bookmarks / 5k chunks). Query
-embedding is extra: **4.1 ms p50 / 7.0 ms p95** locally with bge-small (warm; the process RSS with ONNX Runtime and the model loaded was 274 MB in Python), or one HTTPS
+embedding is extra: **6.5 ms p50 / 10.3 ms p95** locally with bge-small (warm, one query at a time, printed by `eval.py`; a standalone run measured 4.1 / 7.0 ms; the process RSS with ONNX Runtime and the model loaded was 274 MB in Python), or one HTTPS
 round trip (~100–300 ms) for a hosted model. With
 `hnsw.iterative_scan = relaxed_order` and `ef_search = 100`, the HNSW index
 gave identical rankings and latency at this size. Per-user corpora are small
@@ -226,7 +228,8 @@ These facts were checked on 2026-11-01:
 - **Lexical leg:** a weighted `tsvector` over title (A), description (B),
   URL (C) and article body (D), stored in a new `bookmark_contents` table with
   a GIN index. The query is `websearch_to_tsquery('english', $q)`, ranked by
-  `ts_rank_cd(search, q, 1)`. Users also get quotes and `-exclusion` for
+  `ts_rank(search, q, 1)` (this is what the measured hybrid used; the
+  standalone "full-text AND" row used `ts_rank_cd`). Users also get quotes and `-exclusion` for
   free.
 - **Vector leg:** `bookmark_chunks(embedding vector(N))` with an HNSW cosine
   index. Each bookmark scores its best chunk (`min(distance)`).
@@ -284,14 +287,16 @@ These facts were checked on 2026-11-01:
 |---|---|---|---|---|---|
 | **E1. Operator-paid hosted, `text-embedding-3-small`** | not measured (no key, see Open questions) | 2.7M tok × $0.02/M = **$0.054** | ~12 tok/query: $0.24 per 1M queries | API key in Fly secrets; network call per query | ⭐ **production default** |
 | E1'. Hosted, Voyage `voyage-4-lite` | not measured | $0.054 (200M free tokens) | same | same | Equivalent alternative; 32k context |
-| **E2. Local fastembed (`bge-small-en-v1.5`, ONNX)** | vector 0.918 / hybrid 0.936 | $0 API cost; measured **9.6 chunks/s** (≈1 bookmark/s) on 4 shared vCPUs | 4 ms CPU (measured) | about 130 MB model + ONNX runtime; does **not** fit next to the app in the current 512 MB `shared-cpu-1x` VM; needs ≥1 GB | ⭐ **self-host option** |
+| **E2. Local fastembed (`bge-small-en-v1.5`, ONNX)** | vector 0.918 / hybrid 0.936 | $0 API cost; measured **9.6 chunks/s** (≈1 bookmark/s) on 4 shared vCPUs | ≈5 ms CPU (measured) | about 130 MB model + ONNX runtime; does **not** fit next to the app in the current 512 MB `shared-cpu-1x` VM; needs ≥1 GB | ⭐ **self-host option** |
 | E3. Per-user BYO key (like `user_llm_settings`) | — | user pays | user pays; needs the user's key on every search | Anthropic, the default text provider, has no embeddings API, so most users get nothing. Index coverage differs per user. A key rotation or removal breaks query embedding, and a model switch means a full re-embed per user. | reject for v1 |
 | E4. `disabled` (full-text only) | full-text AND 0.635 | $0 | $0 | none | ⭐ fallback / default when unconfigured |
 
 Why **operator-paid** over BYO, given that BYO matches today's LLM settings:
 
-- **Embeddings are about 1,000× cheaper than the LLM enrichment calls.**
-  Ingesting 1k bookmarks costs about $0.05, and a heavy user's searches cost
+- **Embeddings cost very little.** Embedding tokens are priced at $0.02/M,
+  against about $1/M input for the cheapest enrichment chat models, and an
+  embedding call has no output tokens (not measured end to end). Ingesting 1k
+  bookmarks costs about $0.05, and a heavy user's searches cost
   fractions of a cent per month.
 - **The index must be one consistent vector space.** A per-user key breaks
   that: users without an OpenAI key (the default provider is Anthropic, which
@@ -388,7 +393,7 @@ FROM bookmarks;
 - **Self-hosting / dev / CI** need a Postgres with pgvector:
   - `docker-compose.yml`: `postgres:16-alpine` → `pgvector/pgvector:pg16`;
   - the CI `postgres:16` service → `pgvector/pgvector:pg16`;
-  - `scripts/e2e/start-server.sh`;
+  - (`scripts/e2e/start-server.sh` reuses the compose `db`, so the compose change covers E2E);
   - the self-hosting docs.
   (A CI change is an implementation step for the owner, not part of this
   spec PR.)
@@ -441,19 +446,22 @@ does; prefer the new port to keep the trait from growing):
 
 The existing pieces are:
 
-- `EnrichmentService::suggest`, called by `/api/v1/bookmarks/suggest` from
-  the extension and the add modal;
-- `BookmarksService::prepare_create`, called on save.
+- `EnrichmentService::suggest`, called by `/api/v1/bookmarks/suggest` (the
+  extension) and by the page route `/bookmarks/suggest` (the add modal);
+- `BookmarksService::prepare_create`, called on save when `needs_metadata()`
+  is true.
 
 Both call `MetadataExtractor::extract`, which fetches the page and keeps only
-the `og:*` tags. Neither should get slower. So:
+the metadata: the `og:*` tags, falling back to `<title>` and
+`meta name=description`, plus a resolved image URL. Neither should get slower. So:
 
 1. **Enqueue on save.** `create` / `create_claimed` / `import_batch` insert the
    `bookmark_contents` row (`status='pending'`, metadata-only `search`) in the
    same transaction as the bookmark. A URL change on `update` resets it to
    `pending`; a title or description edit only rebuilds `search`.
-2. **Worker.** `IngestWorker` is a tokio task spawned in `main.rs` (like the
-   image-fix and tag-consolidation jobs), with its own one-connection budget
+2. **Worker.** `IngestWorker` is a long-lived tokio task spawned in
+   `main.rs`. It would be the first one there; the image-fix and
+   tag-consolidation jobs are spawned from request handlers. It runs with its own one-connection budget
    so it can't starve the request pool (`max_connections(5)` today). Each
    loop:
    - claims up to `ARTICLE_INGEST_CONCURRENCY` rows;
@@ -464,7 +472,8 @@ the `og:*` tags. Neither should get slower. So:
      `NOTIFY bookmark_ingest`, so a freshly saved bookmark is searchable by
      its body within seconds.
 3. **Fetch.**
-   - Reuse the URL safety check from `adapters/metadata/mod.rs::validate_public_url`.
+   - Reuse the URL safety check `adapters/metadata/mod.rs::validate_public_url`.
+     It is `pub(super)` today, so move it to a shared `adapters/net.rs`.
    - **Fix two SSRF gaps that full-body fetching makes more important:**
      re-validate every redirect hop (a custom `reqwest::redirect::Policy`;
      today reqwest follows up to 10 redirects without checking), and reject
@@ -505,14 +514,14 @@ the `og:*` tags. Neither should get slower. So:
      about 1k for hosted models. One sampled chunk in code-heavy text
      reached 962 tokens, which BGE silently truncates.
 
-### Search query (as measured; `SQL_HYBRID_AND` in `eval.py`)
+### Search query (`SQL_HYBRID_AND` in `eval.py`, minus its eval-only `model` filter)
 
 ```sql
 WITH lex AS (
-    SELECT bookmark_id, row_number() OVER (ORDER BY ts_rank_cd(search, q, 1) DESC) AS r
+    SELECT bookmark_id, row_number() OVER (ORDER BY ts_rank(search, q, 1) DESC) AS r
     FROM bookmark_contents, websearch_to_tsquery('english', $2) q
     WHERE user_id = $1 AND search @@ q
-    ORDER BY ts_rank_cd(search, q, 1) DESC LIMIT 50
+    ORDER BY ts_rank(search, q, 1) DESC LIMIT 50
 ),
 nn AS (
     SELECT bookmark_id, embedding <=> $3 AS dist
@@ -568,9 +577,10 @@ The search input in `templates/components/header.html` keeps its
   articles · 86 couldn't be fetched (Retry all)", with the failing domains
   listed. The bookmark card menu gains **"Refetch article"**.
 - **Same contract for API and CLI.** `GET /api/v1/bookmarks?search=` returns
-  relevance order plus an optional `snippet` field. `boop list --search` and
-  `boop search` (in `cli/src/main.rs`) get relevance ordering with no client
-  change; showing the snippet is optional.
+  relevance order plus an optional `snippet` field. `boop search` gets
+  relevance order with no client change. `boop list --search` always sends
+  `sort=newest` (its clap default, `cli/src/main.rs:33`), so it needs a small
+  client change: make `--sort` optional, and omit it while searching.
 - **Privacy.** `templates/legal/privacy.html` must say that the article text
   of saved pages is fetched and stored. With a hosted embedder, chunks of
   that text (public pages the user bookmarked) are sent to the embedding
@@ -585,7 +595,7 @@ The search input in `templates/components/header.html` keeps its
   per-host throttling.
 - Throughput, measured:
   - fetch + extract: median 0.77 s per page, so about 5 pages/s at
-    concurrency 4, or **about 4 minutes per 1,000 bookmarks**;
+    concurrency 4, or **about 3–4 minutes per 1,000 bookmarks**;
   - hosted embedding (96 inputs per request) is not the bottleneck;
   - local bge-small at about 1 bookmark/s (9.6 chunks/s) is: **about 17
     minutes per 1,000 bookmarks** on 4 vCPUs, and slower on
@@ -610,11 +620,11 @@ bookmarks.
 | storage: article text + tsvector + GIN | ≈27 MB | ≈27 MB | ≈27 MB |
 | storage: chunks + HNSW | ≈35 MB¹ | ≈30 MB¹ | 0 |
 | storage $ on MPG ($0.28/GB-mo) | ≈$0.017/mo | ≈$0.016/mo | ≈$0.008/mo |
-| query | ≈12 tok → **$0.00000024**/query ($0.24 per 1M) + ~100–300 ms RTT | 4.1 ms CPU per query (measured p50) | $0 |
+| query | ≈12 tok → **$0.00000024**/query ($0.24 per 1M) + ~100–300 ms RTT | ≈5 ms CPU per query (measured p50 4.1–6.5 ms) | $0 |
 | fixed | none | VM 512 MB → ≥1 GB (about +$5/mo on Fly) | none |
 
 ¹ Measured: the 490-bookmark prototype at 384-d float32 used 24 MB for
-chunks (6 MB heap + 10 MB HNSW + text and TOAST). `halfvec` halves the
+chunks in total, of which 10 MB was the HNSW index; the rest is the vectors, the chunk text and TOAST. `halfvec` halves the
 vector part.
 
 At 50k bookmarks across all users, the chunk index is about 1.5–1.8 GB.

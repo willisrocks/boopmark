@@ -206,10 +206,17 @@ def main() -> None:
 
     queries = [json.loads(line) for line in open(args.queries)]
     texts = [q["query"] for q in queries]
-    t0 = time.perf_counter()
-    qvecs = {"": Embedder(f"fastembed:{LOCAL_MODEL}").queries(texts)}
-    print(f"local query embedding: {(time.perf_counter() - t0) * 1000 / len(texts):.1f} ms/query "
-          "(includes model load)")
+    local = Embedder(f"fastembed:{LOCAL_MODEL}")
+    qvecs = {"": local.queries(texts)}
+    # Warm, one query at a time, as the server would embed a search.
+    timings = []
+    for t in texts:
+        t0 = time.perf_counter()
+        local.queries([t])
+        timings.append((time.perf_counter() - t0) * 1000)
+    timings.sort()
+    print(f"local query embedding (warm): p50 {statistics.median(timings):.1f} ms, "
+          f"p95 {timings[int(0.95 * len(timings))]:.1f} ms")
     variants = dict(v.split("=", 1) for v in args.variants.split(",") if v)
     for name, spec in variants.items():
         qvecs[name] = Embedder(spec).queries(texts)
