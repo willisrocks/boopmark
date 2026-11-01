@@ -79,9 +79,9 @@ pub trait TagAliasRepository: Send + Sync {
     /// in one transaction under the per-user lock: the request is checked
     /// against the tags and aliases as they are under the lock
     /// ([`crate::domain::tag_library::plan_manual_merge`]), so a request
-    /// from a stale page is refused. Returns the plan, and `None` instead of
-    /// a batch when nothing would change, so a retried or double-submitted
-    /// merge does not add an empty batch.
+    /// from a stale page, or a retried or double-submitted one, is refused.
+    /// Returns the plan, and `None` instead of a batch when nothing would
+    /// change, so no empty batch is recorded.
     async fn apply_manual_merge(
         &self,
         user_id: Uuid,

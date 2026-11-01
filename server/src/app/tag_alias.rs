@@ -91,7 +91,7 @@ where
     /// (`ChangeKind::Merge`) or a rename, which is a merge into a new name
     /// (`ChangeKind::Rename`). Checked against the library under the lock;
     /// returns the plan and one undoable batch, or `None` when nothing would
-    /// change (a retried or double-submitted request).
+    /// change.
     pub async fn merge_tags(
         &self,
         user_id: Uuid,
