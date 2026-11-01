@@ -9,6 +9,7 @@ pub mod search;
 // it. The same applies to the tag_alias modules in ports, adapters and app.
 #[allow(dead_code)]
 pub mod tag_alias;
+pub mod tag_library;
 #[allow(dead_code)]
 pub mod tag_normalize;
 pub mod transfer;
