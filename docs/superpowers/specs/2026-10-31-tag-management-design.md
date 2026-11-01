@@ -776,7 +776,7 @@ After migration, `anthropic.rs`, `anthropic_tag_consolidator.rs` and the text ha
 shrink to nothing, and the three feature routers collapse into `LlmClientRouter`. The prototype is
 additive: nothing in `main.rs` is rewired yet, so current behaviour is unchanged.
 
-**Tests in the prototype** (focused, `cargo test -p boopmark-server llm_client tag_llm`, 11 tests;
+**Tests in the prototype** (focused: `cargo test -p boopmark-server llm_client` and `... tag_llm`, 11 tests;
 none call a network):
 
 - request bodies per vendor
