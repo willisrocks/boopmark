@@ -136,8 +136,10 @@ def main():
 
     stats = {p: {"dup": 0, "new": 0, "reuse": 0, "on_topic": 0, "judged": 0, "tags": 0, "in": 0, "out": 0, "sec": 0.0}
              for p in ("current", "proposed")}
-    rows = []
-    for bm in sample:
+    rows = [{"url": bm["url"], "title": bm["title"], "labels": bm["tags"]} for bm in sample]
+    # Pipelines run one after the other so each keeps its shared tag-list
+    # prompt prefix in the model's KV cache.
+    for row, bm in zip(rows, sample):
         concepts = {truth[t] for t in bm["tags"]}
         # current: verbatim storage
         t0 = time.time()
@@ -155,6 +157,10 @@ def main():
             concept = truth.get(t) or canon_concept.get(resolve(t) or "")
             if concept:
                 s["judged"] += 1; s["on_topic"] += concept in concepts
+        row["current"] = cur
+        print(f"current  {bm['title'][:50]:50} | {cur}", flush=True)
+    for row, bm in zip(rows, sample):
+        concepts = {truth[t] for t in bm["tags"]}
         # proposed: enum + alias resolution
         t0 = time.time()
         text, tin, tout = chat(args.base_url, args.model, proposed_prompt(bm, canon_counts), proposed_schema(canon))
@@ -174,8 +180,8 @@ def main():
             concept = canon_concept.get(t)
             if concept:
                 s["judged"] += 1; s["on_topic"] += concept in concepts
-        rows.append({"url": bm["url"], "title": bm["title"], "labels": bm["tags"], "current": cur, "proposed": stored})
-        print(f"{bm['title'][:50]:50} | cur={cur} | new={stored}", flush=True)
+        row["proposed"] = stored
+        print(f"proposed {bm['title'][:50]:50} | {stored}", flush=True)
 
     (OUT / f"suggest-{args.run}.json").write_text(json.dumps({"stats": stats, "rows": rows}, indent=1))
     for p, s in stats.items():

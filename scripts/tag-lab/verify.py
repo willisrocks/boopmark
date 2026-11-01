@@ -151,3 +151,32 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def apply_pairs(det_groups, rows, threshold):
+    """Union deterministic groups along accepted pairs (p_yes >= threshold).
+    The merged group's canonical is its most-used deterministic canonical."""
+    counts = dict(map(tuple, json.loads((OUT / "counts.json").read_text())))
+    weight = {g["canonical"]: sum(counts[m] for m in g["members"]) for g in det_groups}
+    parent = {g["canonical"]: g["canonical"] for g in det_groups}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for r in rows:
+        if r["p_yes"] >= threshold:
+            a, b = find(r["a"]), find(r["b"])
+            if a != b:
+                parent[a] = b
+    merged = {}
+    for g in det_groups:
+        merged.setdefault(find(g["canonical"]), []).append(g)
+    out = []
+    for gs in merged.values():
+        top = max(gs, key=lambda g: weight[g["canonical"]])
+        out.append({"canonical": top["canonical"], "members": sorted(m for g in gs for m in g["members"]),
+                    **({"proposed": [g["canonical"] for g in gs], "confidence": "high"} if len(gs) > 1 else {})})
+    return out
