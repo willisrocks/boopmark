@@ -1,0 +1,391 @@
+{
+ "run": "anthropic-claude-haiku-5-5-20261101T185243Z",
+ "provider": "anthropic",
+ "model": "claude-haiku-5-5",
+ "effort": "low",
+ "dry_run": false,
+ "budget_usd": 3.0,
+ "started_utc": "2026-11-01T18:52:43+00:00",
+ "seed": {
+  "raw_tags": 600,
+  "deterministic_tags": 303,
+  "concepts": 212
+ },
+ "consolidate": {
+  "proposed_groups": 215,
+  "dropped_invalid": 122,
+  "applied_unreviewed": {
+   "tags": 187,
+   "merges": 413,
+   "correct": 329,
+   "ambiguous": 48,
+   "wrong": 36,
+   "precision": 0.9014,
+   "recall": 0.8479
+  },
+  "llm_only": {
+   "proposals": 116,
+   "correct": 75,
+   "wrong": 18,
+   "ambiguous": 23,
+   "precision": 0.8065,
+   "by_confidence": {
+    "high": {
+     "correct": 47,
+     "wrong": 0,
+     "ambiguous": 0,
+     "precision": 1.0
+    },
+    "medium": {
+     "correct": 24,
+     "wrong": 6,
+     "ambiguous": 8,
+     "precision": 0.8
+    },
+    "low": {
+     "correct": 4,
+     "wrong": 12,
+     "ambiguous": 15,
+     "precision": 0.25
+    }
+   }
+  },
+  "wrong_merges": [
+   [
+    "Electronics",
+    "keyboards"
+   ],
+   [
+    "electronics",
+    "keyboards"
+   ],
+   [
+    "perf",
+    "tokio"
+   ],
+   [
+    "Design",
+    "design-system"
+   ],
+   [
+    "design",
+    "design-system"
+   ],
+   [
+    "ML",
+    "fine-tuning"
+   ],
+   [
+    "Llama",
+    "large language models"
+   ],
+   [
+    "llama",
+    "large language models"
+   ],
+   [
+    "AWS",
+    "Serverless"
+   ],
+   [
+    "aws",
+    "Serverless"
+   ],
+   [
+    "Self Hosting",
+    "homelab"
+   ],
+   [
+    "self hosted",
+    "homelab"
+   ],
+   [
+    "self-hosted",
+    "homelab"
+   ],
+   [
+    "self-hosting",
+    "homelab"
+   ],
+   [
+    "selfhosted",
+    "homelab"
+   ],
+   [
+    "Career",
+    "hiring"
+   ],
+   [
+    "career",
+    "hiring"
+   ],
+   [
+    "careers",
+    "hiring"
+   ],
+   [
+    "GPUs",
+    "cuda"
+   ],
+   [
+    "gpus",
+    "cuda"
+   ],
+   [
+    "RSS",
+    "podcast"
+   ],
+   [
+    "rss",
+    "podcast"
+   ],
+   [
+    "SEO",
+    "marketing"
+   ],
+   [
+    "seo",
+    "marketing"
+   ],
+   [
+    "Climate",
+    "health"
+   ],
+   [
+    "climate",
+    "health"
+   ],
+   [
+    "Algorithms",
+    "data structures"
+   ],
+   [
+    "algorithm",
+    "data structures"
+   ],
+   [
+    "algos",
+    "data structures"
+   ],
+   [
+    "GitLab",
+    "github"
+   ],
+   [
+    "gitlab",
+    "github"
+   ],
+   [
+    "ChatGPT",
+    "openai"
+   ],
+   [
+    "chat-gpt",
+    "openai"
+   ],
+   [
+    "chatgpt",
+    "openai"
+   ],
+   [
+    "llama-cpp",
+    "local llm"
+   ],
+   [
+    "llama.cpp",
+    "local llm"
+   ]
+  ]
+ },
+ "pairs": {
+  "pairs": 336,
+  "answered": 336,
+  "by_source": {
+   "candidate": 220,
+   "whole-list": 49,
+   "both": 67
+  },
+  "same_concept_pairs_offered": 89,
+  "residual_same_pairs": 102,
+  "accepted": {
+   "high": {
+    "accepted": 76,
+    "correct": 64,
+    "wrong": 11,
+    "ambiguous": 1,
+    "precision": 0.8533,
+    "recall_of_residual": 0.6275
+   },
+   "high_or_medium": {
+    "accepted": 83,
+    "correct": 67,
+    "wrong": 13,
+    "ambiguous": 3,
+    "precision": 0.8375,
+    "recall_of_residual": 0.6569
+   }
+  },
+  "accepted_candidates_only": {
+   "high": {
+    "accepted": 61,
+    "correct": 53,
+    "wrong": 7,
+    "ambiguous": 1,
+    "precision": 0.8833,
+    "recall_of_residual": 0.5196
+   },
+   "high_or_medium": {
+    "accepted": 67,
+    "correct": 56,
+    "wrong": 9,
+    "ambiguous": 2,
+    "precision": 0.8615,
+    "recall_of_residual": 0.549
+   }
+  },
+  "wrong_accepted": [
+   [
+    "sql",
+    "postgresql",
+    "high"
+   ],
+   [
+    "design",
+    "design-system",
+    "high"
+   ],
+   [
+    "ui",
+    "user experience",
+    "high"
+   ],
+   [
+    "seo",
+    "self-hosting",
+    "high"
+   ],
+   [
+    "seo",
+    "selfhosted",
+    "high"
+   ],
+   [
+    "c#",
+    "cpp",
+    "medium"
+   ],
+   [
+    "c#",
+    "continuous integration",
+    "high"
+   ],
+   [
+    "Ruby",
+    "ruby on rails",
+    "high"
+   ],
+   [
+    "js",
+    "React.js",
+    "medium"
+   ],
+   [
+    "selfhosted",
+    "homelab",
+    "high"
+   ],
+   [
+    "self-hosting",
+    "homelab",
+    "high"
+   ],
+   [
+    "Algorithms",
+    "data structures",
+    "high"
+   ],
+   [
+    "algos",
+    "data structures",
+    "high"
+   ]
+  ],
+  "pipeline": {
+   "high": {
+    "tags": 231,
+    "merges": 369,
+    "correct": 345,
+    "ambiguous": 1,
+    "wrong": 23,
+    "precision": 0.9375,
+    "recall": 0.8892
+   },
+   "high_or_medium": {
+    "tags": 224,
+    "merges": 376,
+    "correct": 340,
+    "ambiguous": 8,
+    "wrong": 28,
+    "precision": 0.9239,
+    "recall": 0.8763
+   }
+  }
+ },
+ "suggest": {
+  "bookmarks": 30,
+  "current": {
+   "tags": 125,
+   "reuse": 121,
+   "dup": 1,
+   "new": 3,
+   "on_topic": 50,
+   "judged": 122,
+   "reuse_rate": 0.968,
+   "duplicate_rate": 0.008,
+   "new_tag_rate": 0.024,
+   "on_topic_rate": 0.4098
+  },
+  "proposed": {
+   "tags": 98,
+   "reuse": 98,
+   "dup": 0,
+   "new": 0,
+   "on_topic": 47,
+   "judged": 98,
+   "reuse_rate": 1.0,
+   "duplicate_rate": 0.0,
+   "new_tag_rate": 0.0,
+   "on_topic_rate": 0.4796
+  }
+ },
+ "seconds": 119.7,
+ "usd_total": 0.041,
+ "worst_case_usd_of_requests_built": 0.0785,
+ "tokens_by_step": {
+  "consolidate": {
+   "calls": 1,
+   "input_tokens": 8866,
+   "output_tokens": 6755,
+   "usd": 0.004264
+  },
+  "pairs": {
+   "calls": 9,
+   "input_tokens": 21904,
+   "output_tokens": 6883,
+   "usd": 0.005631
+  },
+  "suggest_current": {
+   "calls": 30,
+   "input_tokens": 130787,
+   "output_tokens": 3617,
+   "usd": 0.014885
+  },
+  "suggest_proposed": {
+   "calls": 30,
+   "input_tokens": 155747,
+   "output_tokens": 1284,
+   "usd": 0.016216
+  }
+ },
+ "stopped": null
+}
