@@ -6,6 +6,7 @@ mod invite;
 mod legal;
 mod settings;
 pub(crate) mod shared;
+pub(crate) mod tags;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -43,6 +44,10 @@ pub fn routes() -> Router<AppState> {
             post(bookmarks::edit_image).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/bookmarks/{id}/suggest", post(bookmarks::edit_suggest))
+        .route("/tags", get(tags::library))
+        .route("/tags/search", get(tags::search_tags))
+        .route("/tags/merge", post(tags::merge))
+        .route("/tags/batches/{id}/undo", post(tags::undo))
         .route("/invite/{token}", get(invite::invite_landing))
         .route("/admin", get(admin::admin_page))
         .route("/admin/invites", post(admin::create_invite))

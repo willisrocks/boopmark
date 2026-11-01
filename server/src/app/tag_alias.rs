@@ -39,6 +39,11 @@ where
         self.repo.resolve_writes(user_id, writes).await
     }
 
+    /// Each canonical tag on the user's bookmarks with its bookmark count.
+    pub async fn tag_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
+        self.repo.tag_counts(user_id).await
+    }
+
     /// The on-demand normalization job: group the user's existing tags by
     /// L1-L3 and store each group with duplicates as a pending proposal.
     /// It never changes bookmarks. Re-running replaces earlier pending

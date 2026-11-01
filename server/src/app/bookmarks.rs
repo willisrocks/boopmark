@@ -439,10 +439,6 @@ where
         }
     }
 
-    pub async fn all_tags(&self, user_id: Uuid) -> Result<Vec<String>, DomainError> {
-        self.repo.all_tags(user_id).await
-    }
-
     pub async fn tags_with_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
         self.repo.tags_with_counts(user_id).await
     }
@@ -1306,9 +1302,6 @@ mod tests {
                 let old = bookmarks[index].override_image_url.clone();
                 bookmarks.remove(index);
                 Ok(old)
-            }
-            async fn all_tags(&self, _user_id: Uuid) -> Result<Vec<String>, DomainError> {
-                Ok(vec![])
             }
             async fn tags_with_counts(
                 &self,
@@ -2296,9 +2289,6 @@ mod tests {
                 let old = b[index].override_image_url.clone();
                 b.remove(index);
                 Ok(old)
-            }
-            async fn all_tags(&self, _user_id: Uuid) -> Result<Vec<String>, DomainError> {
-                Ok(vec![])
             }
             async fn tags_with_counts(
                 &self,

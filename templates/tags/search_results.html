@@ -1,0 +1,22 @@
+{% for option in options %}
+<button type="button"
+        role="option"
+        id="tag-option-{{ loop.index0 }}"
+        aria-selected="false"
+        data-testid="tag-option"
+        data-tag-name="{{ option.name }}"
+        class="flex w-full items-center justify-between gap-3 rounded-lg px-2 py-2 text-left text-sm text-gray-200 hover:bg-blue-600/15 aria-selected:bg-blue-600/25"
+        hx-get="{{ option.url }}"
+        hx-target="#bookmark-grid"
+        hx-push-url="true"
+        hx-include="[name='search'],[name='sort']">
+    <span class="min-w-0 truncate">
+        {% if option.active %}<span class="text-blue-400" title="In the filter">&check;</span> {% endif %}<span>{{ option.name }}</span>
+        {% if !option.aliases.is_empty() %}<span class="text-xs text-gray-500">also: {{ option.aliases }}{% if option.more_aliases > 0 %}, +{{ option.more_aliases }}{% endif %}</span>{% endif %}
+    </span>
+    <span class="shrink-0 text-xs tabular-nums text-gray-400">{{ option.count }}</span>
+</button>
+{% endfor %}
+{% if options.is_empty() %}
+<p class="px-2 py-3 text-sm text-gray-500" data-testid="tag-search-empty">{% if query.is_empty() %}No tags yet.{% else %}No tags match &ldquo;{{ query }}&rdquo;.{% endif %}</p>
+{% endif %}

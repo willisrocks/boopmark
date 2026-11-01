@@ -16,6 +16,7 @@ use crate::domain::search::{MAX_SEARCH_RESULTS, SearchHit, SnippetSegment};
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
 use crate::web::pages::shared::UserView;
+use crate::web::pages::tags::{FilterBar, parse_tag_list};
 use crate::web::state::{AppState, Bookmarks};
 
 /// Uploaded overrides are deliberately bounded before decoding. The body
@@ -81,12 +82,6 @@ impl From<SearchHit> for BookmarkView {
     }
 }
 
-/// Tag with pre-computed active state for the filter bar.
-struct TagView {
-    name: String,
-    active: bool,
-}
-
 fn render(t: &impl Template) -> axum::response::Response {
     match t.render() {
         Ok(body) => Html(body).into_response(),
@@ -110,7 +105,7 @@ struct GridPage {
     user: Option<UserView>,
     header_shows_bookmark_actions: bool,
     bookmarks: Vec<BookmarkView>,
-    filter_tags: Vec<TagView>,
+    filter: FilterBar,
     sort: String,
     searching: bool,
     capped: bool,
@@ -126,7 +121,7 @@ struct GridPage {
 #[template(path = "bookmarks/list_with_filters.html")]
 struct BookmarkListWithFilters {
     bookmarks: Vec<BookmarkView>,
-    filter_tags: Vec<TagView>,
+    filter: FilterBar,
     sort: String,
     searching: bool,
     capped: bool,
@@ -182,12 +177,7 @@ pub async fn list(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> axum::response::Response {
-    let active_tags: Vec<String> = query
-        .tags
-        .as_deref()
-        .filter(|t| !t.is_empty())
-        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
+    let active_tags = parse_tag_list(query.tags.as_deref());
 
     let filter = BookmarkFilter {
         search: query.search,
@@ -205,11 +195,12 @@ pub async fn list(
     let searching = filter.search.is_some();
     let sort_str = filter.sort.unwrap_or_default().as_str().to_string();
 
-    // Query all distinct tags for the filter bar (used by both HTMX and
-    // full-page paths) while the list is fetched.
-    let (hits, all_tag_names) = tokio::join!(state.find_bookmarks(user.id, filter), async {
-        with_bookmarks!(&state.bookmarks, svc => svc.all_tags(user.id).await)
-    },);
+    // Tag counts for the filter bar (used by both HTMX and full-page paths)
+    // while the list is fetched.
+    let (hits, tag_counts) = tokio::join!(
+        state.find_bookmarks(user.id, filter),
+        state.tag_aliases.tag_counts(user.id)
+    );
     let bookmark_views: Vec<BookmarkView> = hits
         .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "listing bookmarks failed");
@@ -220,19 +211,12 @@ pub async fn list(
         .collect();
     let capped = searching && bookmark_views.len() as i64 >= MAX_SEARCH_RESULTS;
 
-    let filter_tags: Vec<TagView> = all_tag_names
-        .unwrap_or_default()
-        .into_iter()
-        .map(|name| {
-            let active = active_tags.contains(&name);
-            TagView { name, active }
-        })
-        .collect();
+    let filter = FilterBar::new(&tag_counts.unwrap_or_default(), &active_tags);
 
     if is_htmx(&headers) {
         render(&BookmarkListWithFilters {
             bookmarks: bookmark_views,
-            filter_tags,
+            filter,
             sort: sort_str,
             searching,
             capped,
@@ -245,7 +229,7 @@ pub async fn list(
             user: Some(user.into()),
             header_shows_bookmark_actions: true,
             bookmarks: bookmark_views,
-            filter_tags,
+            filter,
             sort: sort_str,
             searching,
             capped,

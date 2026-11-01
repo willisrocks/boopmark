@@ -563,9 +563,6 @@ mod service_tests {
         ) -> Result<Option<String>, DomainError> {
             unimplemented!()
         }
-        async fn all_tags(&self, _: Uuid) -> Result<Vec<String>, DomainError> {
-            unimplemented!()
-        }
         async fn tags_with_counts(&self, _: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
             unimplemented!()
         }
