@@ -2,6 +2,7 @@ use crate::app::settings::SettingsService;
 use crate::domain::ports::llm_enricher::{EnrichmentInput, LlmEnricher};
 use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
 use crate::domain::ports::metadata::MetadataExtractor;
+use crate::domain::ports::tag_vocabulary::TagVocabulary;
 use serde::Serialize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -22,11 +23,14 @@ mod tests {
     use crate::app::secrets::SecretBox;
     use crate::domain::bookmark::UrlMetadata;
     use crate::domain::error::DomainError;
+    use crate::domain::llm_settings::TextProvider;
     use crate::domain::llm_settings::{DEFAULT_ANTHROPIC_MODEL, LlmSettings};
+    use crate::domain::ports::llm_client::BoxFuture;
     use crate::domain::ports::llm_enricher::EnrichmentOutput;
     use chrono::Utc;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeSettings(Option<LlmSettings>);
@@ -70,6 +74,7 @@ mod tests {
 
     struct CountingEnricher {
         calls: AtomicUsize,
+        canonical_seen: Mutex<Vec<(String, i64)>>,
         fail: bool,
         partial: bool,
     }
@@ -77,12 +82,14 @@ mod tests {
     impl LlmEnricher for CountingEnricher {
         fn enrich(
             &self,
+            provider: TextProvider,
             api_key: &str,
             model: &str,
             input: EnrichmentInput,
-        ) -> Pin<Box<dyn Future<Output = Result<EnrichmentOutput, DomainError>> + Send + '_>>
-        {
+        ) -> BoxFuture<'_, Result<EnrichmentOutput, DomainError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(provider, TextProvider::Anthropic);
+            *self.canonical_seen.lock().unwrap() = input.canonical_tags.clone();
             assert_eq!(api_key, "fake-provider-key");
             assert_eq!(model, DEFAULT_ANTHROPIC_MODEL);
             assert_eq!(input.url, "https://example.com/article?capture=1#section");
@@ -109,6 +116,24 @@ mod tests {
         provider_partial: bool,
         scrape_fail: bool,
     ) -> (SuggestionResult, usize) {
+        let (result, enricher) = suggest_with(
+            configuration,
+            provider_fail,
+            provider_partial,
+            scrape_fail,
+            None,
+        )
+        .await;
+        (result, enricher.calls.load(Ordering::SeqCst))
+    }
+
+    async fn suggest_with(
+        configuration: Option<(bool, bool)>,
+        provider_fail: bool,
+        provider_partial: bool,
+        scrape_fail: bool,
+        vocabulary: Option<Arc<dyn TagVocabulary>>,
+    ) -> (SuggestionResult, Arc<CountingEnricher>) {
         let secret_box = Arc::new(SecretBox::new(
             "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
         ));
@@ -137,22 +162,88 @@ mod tests {
         ));
         let enricher = Arc::new(CountingEnricher {
             calls: AtomicUsize::new(0),
+            canonical_seen: Mutex::new(vec![]),
             fail: provider_fail,
             partial: provider_partial,
         });
-        let service = EnrichmentService::new(
+        let mut service = EnrichmentService::new(
             Arc::new(FakeMetadata { fail: scrape_fail }),
             enricher.clone(),
             settings,
         );
+        if let Some(vocabulary) = vocabulary {
+            service = service.with_tag_vocabulary(vocabulary);
+        }
         let result = service
-            .suggest(
-                user_id,
-                "https://example.com/article?capture=1#section",
-                None,
-            )
+            .suggest(user_id, "https://example.com/article?capture=1#section")
             .await;
-        (result, enricher.calls.load(Ordering::SeqCst))
+        (result, enricher)
+    }
+
+    /// Canonical tags `rust` and `GitHub`; previews map `ai-tag` to `AI`.
+    struct FakeVocabulary;
+
+    impl TagVocabulary for FakeVocabulary {
+        fn canonical_tags(
+            &self,
+            _user_id: Uuid,
+        ) -> BoxFuture<'_, Result<Vec<(String, i64)>, DomainError>> {
+            Box::pin(async { Ok(vec![("rust".into(), 9), ("GitHub".into(), 2)]) })
+        }
+
+        fn preview_tags(
+            &self,
+            _user_id: Uuid,
+            tags: Vec<String>,
+        ) -> BoxFuture<'_, Result<Vec<String>, DomainError>> {
+            Box::pin(async move {
+                Ok(tags
+                    .into_iter()
+                    .map(|t| if t == "ai-tag" { "AI".into() } else { t })
+                    .collect())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_tags_go_to_the_llm_and_its_tags_are_resolved_before_showing() {
+        let (result, enricher) = suggest_with(
+            Some((true, true)),
+            false,
+            false,
+            false,
+            Some(Arc::new(FakeVocabulary)),
+        )
+        .await;
+        assert_eq!(
+            *enricher.canonical_seen.lock().unwrap(),
+            vec![("rust".to_string(), 9), ("GitHub".to_string(), 2)]
+        );
+        assert_eq!(result.tags, ["AI"]);
+    }
+
+    #[tokio::test]
+    async fn without_ai_the_vocabulary_is_not_loaded() {
+        struct Unreachable;
+        impl TagVocabulary for Unreachable {
+            fn canonical_tags(
+                &self,
+                _user_id: Uuid,
+            ) -> BoxFuture<'_, Result<Vec<(String, i64)>, DomainError>> {
+                panic!("no LLM call, so no tag list is needed")
+            }
+
+            fn preview_tags(
+                &self,
+                _user_id: Uuid,
+                _tags: Vec<String>,
+            ) -> BoxFuture<'_, Result<Vec<String>, DomainError>> {
+                panic!("no LLM call, so nothing to resolve")
+            }
+        }
+        let (result, _) =
+            suggest_with(None, false, false, false, Some(Arc::new(Unreachable))).await;
+        assert_scrape_fallback(&result);
     }
 
     fn assert_scrape_fallback(result: &SuggestionResult) {
@@ -232,6 +323,7 @@ pub struct EnrichmentService<M, R> {
     metadata: Arc<M>,
     enricher: Arc<dyn LlmEnricher>,
     settings: Arc<SettingsService<R>>,
+    vocabulary: Option<Arc<dyn TagVocabulary>>,
 }
 
 impl<M, R> EnrichmentService<M, R>
@@ -248,15 +340,18 @@ where
             metadata,
             enricher,
             settings,
+            vocabulary: None,
         }
     }
 
-    pub async fn suggest(
-        &self,
-        user_id: Uuid,
-        url: &str,
-        existing_tags: Option<Vec<(String, i64)>>,
-    ) -> SuggestionResult {
+    /// Offer the user's canonical tags to the LLM and resolve its answer
+    /// against them before it is shown (tag spec §5).
+    pub fn with_tag_vocabulary(mut self, vocabulary: Arc<dyn TagVocabulary>) -> Self {
+        self.vocabulary = Some(vocabulary);
+        self
+    }
+
+    pub async fn suggest(&self, user_id: Uuid, url: &str) -> SuggestionResult {
         if url.trim().is_empty() {
             return SuggestionResult {
                 title: None,
@@ -277,9 +372,7 @@ where
         };
 
         // Attempt LLM enrichment
-        let enrichment = self
-            .try_llm_enrich(user_id, url, &metadata, existing_tags)
-            .await;
+        let enrichment = self.try_llm_enrich(user_id, url, &metadata).await;
 
         // Merge: LLM takes priority over scrape for title/description/tags
         SuggestionResult {
@@ -291,11 +384,7 @@ where
                 .as_ref()
                 .and_then(|e| e.description.clone())
                 .or_else(|| metadata.as_ref().and_then(|m| m.description.clone())),
-            tags: enrichment
-                .as_ref()
-                .map(|e| e.tags.clone())
-                .filter(|t| !t.is_empty())
-                .unwrap_or_default(),
+            tags: enrichment.map(|e| e.tags).unwrap_or_default(),
             image_url: metadata.as_ref().and_then(|m| m.image_url.clone()),
             domain: metadata.as_ref().and_then(|m| m.domain.clone()),
         }
@@ -306,7 +395,6 @@ where
         user_id: Uuid,
         url: &str,
         metadata: &Option<crate::domain::bookmark::UrlMetadata>,
-        existing_tags: Option<Vec<(String, i64)>>,
     ) -> Option<crate::domain::ports::llm_enricher::EnrichmentOutput> {
         let credentials = match self.settings.get_text_provider_credentials(user_id).await {
             Ok(Some(credentials)) => credentials,
@@ -317,16 +405,26 @@ where
             }
         };
 
+        let canonical_tags = match &self.vocabulary {
+            Some(vocabulary) => vocabulary
+                .canonical_tags(user_id)
+                .await
+                .inspect_err(|e| {
+                    tracing::warn!(user_id = %user_id, error = %e, "failed to load canonical tags for enrichment");
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         let input = EnrichmentInput {
             url: url.to_string(),
             scraped_title: metadata.as_ref().and_then(|m| m.title.clone()),
             scraped_description: metadata.as_ref().and_then(|m| m.description.clone()),
-            existing_tags,
+            canonical_tags,
         };
 
-        match self
+        let mut output = match self
             .enricher
-            .enrich_with_provider(
+            .enrich(
                 credentials.provider,
                 &credentials.api_key,
                 &credentials.model,
@@ -334,11 +432,22 @@ where
             )
             .await
         {
-            Ok(output) => Some(output),
+            Ok(output) => output,
             Err(e) => {
                 tracing::warn!(user_id = %user_id, url = %url, error = %e, "LLM enrichment failed, falling back to scrape-only");
-                None
+                return None;
+            }
+        };
+        if let Some(vocabulary) = &self.vocabulary
+            && !output.tags.is_empty()
+        {
+            match vocabulary.preview_tags(user_id, output.tags.clone()).await {
+                Ok(tags) => output.tags = tags,
+                Err(e) => {
+                    tracing::warn!(user_id = %user_id, error = %e, "failed to resolve suggested tags");
+                }
             }
         }
+        Some(output)
     }
 }

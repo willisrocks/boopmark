@@ -283,33 +283,20 @@
             <section id="tag-library" data-testid="settings-section-tag-library" class="scroll-mt-6 rounded-xl border border-gray-700 bg-[#1e2235] p-5 sm:p-6">
                 <div>
                     <h2 class="text-lg font-semibold text-white">Tag Library</h2>
-                    <p class="mt-1 text-sm text-gray-400">Use the selected metadata provider to merge variants and add useful parent tags across your bookmarks.</p>
+                    <p class="mt-1 text-sm text-gray-400">Rename, merge and clean up your tags. Merges are suggested for review and never applied until you choose them, and every change can be undone.</p>
                 </div>
 
-                <div class="mt-5 space-y-3">
-                    <button
-                        id="consolidate-tags-btn"
-                        type="button"
-                        data-testid="consolidate-tags-button"
-                        hx-post="/settings/consolidate-tags"
-                        hx-target="#consolidate-tags-result"
-                        hx-swap="innerHTML"
-                        hx-disabled-elt="this"
-                        hx-indicator="#consolidate-tags-spinner"
-                        class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
-                        {% if metadata_provider == "openai" %}
-                            {% if !has_openai_api_key %}disabled title="Configure an OpenAI API key first."{% else if !llm_enabled %}disabled title="Enable AI assistance first."{% endif %}
-                        {% else %}
-                            {% if !has_anthropic_api_key %}disabled title="Configure an Anthropic API key first."{% else if !llm_enabled %}disabled title="Enable AI assistance first."{% endif %}
-                        {% endif %}
-                    >
-                        <span class="inline-flex items-center gap-2">
-                            <span>Consolidate Tags</span>
-                            <span id="consolidate-tags-spinner" class="htmx-indicator">…</span>
-                        </span>
-                    </button>
-                    <p class="text-xs text-gray-500">Boopmark keeps each operation explicit so a large tag library is never changed unexpectedly.</p>
-                    <div id="consolidate-tags-result"></div>
+                <div class="mt-5 flex flex-col gap-3 sm:flex-row">
+                    <a
+                        href="/tags"
+                        data-testid="settings-open-tag-library"
+                        class="w-full rounded-lg bg-blue-600 px-4 py-2 text-center text-sm font-medium text-white hover:bg-blue-700 sm:w-auto"
+                    >Open tag library</a>
+                    <a
+                        href="/tags/review"
+                        data-testid="settings-open-tag-review"
+                        class="w-full rounded-lg border border-gray-600 px-4 py-2 text-center text-sm font-medium text-gray-200 hover:bg-gray-700 sm:w-auto"
+                    >Review merge suggestions</a>
                 </div>
             </section>
 

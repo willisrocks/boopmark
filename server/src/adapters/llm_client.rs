@@ -1,7 +1,3 @@
-// Nothing calls the port yet: tag management and article search move onto it
-// in their own changes. Remove this once they land.
-#![allow(dead_code)]
-
 //! Vendor adapters for the shared `LlmClient` port, plus the router that picks
 //! one per request. Each adapter only knows how to send one structured request
 //! to its vendor and read back JSON and token usage; prompts and schemas belong

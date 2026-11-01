@@ -24,7 +24,7 @@ impl PostgresPool {
 }
 
 /// Serialize every tag change of one user (write-path resolution, merge,
-/// undo, the legacy consolidation) for the rest of the transaction.
+/// undo, proposal replacement) for the rest of the transaction.
 pub(super) async fn lock_user_tags(
     conn: &mut sqlx::PgConnection,
     user_id: uuid::Uuid,

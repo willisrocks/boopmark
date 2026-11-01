@@ -431,7 +431,11 @@ pub fn merge_mapping(merges: &[TagMerge]) -> Result<BTreeMap<String, String>, Do
     let ends = resolved
         .iter()
         .map(|(source, target)| (source.as_str(), target.as_str()))
-        .chain(resolved.values().map(|target| (target.as_str(), target.as_str())));
+        .chain(
+            resolved
+                .values()
+                .map(|target| (target.as_str(), target.as_str())),
+        );
     for (spelling, target) in ends {
         if let Some((other, other_target)) =
             key_targets.insert(compact_key(spelling), (spelling, target))
@@ -479,6 +483,28 @@ pub fn undo_tags(current: &[String], before: &[String], after: &[String]) -> Vec
         }
     }
     out
+}
+
+/// The user's canonical tags with bookmark counts, most used first. Each
+/// L1-L3 group counts as one tag under its display form, so spellings that
+/// still await review are offered once.
+pub fn canonical_tag_counts(tag_counts: &[(String, i64)]) -> Vec<(String, i64)> {
+    let mut out: Vec<(String, i64)> = group_tags(tag_counts, Level::Plural)
+        .into_iter()
+        .filter_map(|group| Some((clean_tag(&group.canonical)?.to_string(), group.count)))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
+/// What `raw` would be stored as on a new bookmark, without remembering
+/// any alias: the read-only form of [`resolve_tags`].
+pub fn preview_tags(
+    raw: &[String],
+    aliases: &[TagAlias],
+    tag_counts: &[(String, i64)],
+) -> Vec<String> {
+    resolve_tags(raw, &[], &mut TagIndex::new(aliases, tag_counts)).0
 }
 
 /// The L1-L3 groups with more than one spelling, as proposals. This is what
@@ -698,6 +724,20 @@ mod tests {
         assert!(merge_mapping(&[merge("b", &["a"]), merge("a", &["b"])]).is_err());
         assert!(merge_mapping(&[merge("a", &["a"])]).is_err());
         assert!(merge_mapping(&[merge(" ", &["a"])]).is_err());
+    }
+
+    #[test]
+    fn canonical_tags_count_each_group_once_and_previews_write_nothing() {
+        let counts = counts(&[("GitHub", 5), ("github", 2), ("rust", 4), ("Rust", 1)]);
+        assert_eq!(
+            canonical_tag_counts(&counts),
+            vec![("GitHub".to_string(), 7), ("rust".to_string(), 5)]
+        );
+        let aliases = [alias("gh", "GitHub")];
+        assert_eq!(
+            preview_tags(&s(&["gh", "RUST", " new tag ", "\u{7}"]), &aliases, &counts),
+            ["GitHub", "rust", "new tag"]
+        );
     }
 
     #[test]

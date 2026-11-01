@@ -1,8 +1,7 @@
 use crate::domain::error::DomainError;
 use crate::domain::llm_settings::TextProvider;
 use crate::domain::ports::image_generator::ImageGenerationContext;
-use std::future::Future;
-use std::pin::Pin;
+use crate::domain::ports::llm_client::BoxFuture;
 
 /// Maximum size accepted for a provider-written image prompt. Keeping this
 /// limit at the port boundary prevents an unexpectedly verbose model response
@@ -13,27 +12,15 @@ pub const MAX_ASSISTED_IMAGE_PROMPT_CHARS: usize = 3_000;
 /// concise image-generation direction. The image renderer remains a separate
 /// capability: this port only writes the prompt.
 pub trait LlmPromptAssistant: Send + Sync {
+    /// `provider`, `api_key` and `model` come from the user's LLM settings.
     fn assist_image_prompt(
         &self,
+        provider: TextProvider,
         api_key: &str,
         model: &str,
         context: ImageGenerationContext,
         instruction: Option<String>,
-    ) -> Pin<Box<dyn Future<Output = Result<String, DomainError>> + Send + '_>>;
-
-    /// Provider-aware entry point used by the configured image settings
-    /// bridge. Concrete adapters can use the compatibility default; routers
-    /// override it to dispatch explicitly instead of guessing from model IDs.
-    fn assist_image_prompt_with_provider(
-        &self,
-        _provider: TextProvider,
-        api_key: &str,
-        model: &str,
-        context: ImageGenerationContext,
-        instruction: Option<String>,
-    ) -> Pin<Box<dyn Future<Output = Result<String, DomainError>> + Send + '_>> {
-        self.assist_image_prompt(api_key, model, context, instruction)
-    }
+    ) -> BoxFuture<'_, Result<String, DomainError>>;
 }
 
 /// Normalize and bound a provider-written prompt before handing it to an

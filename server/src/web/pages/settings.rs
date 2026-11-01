@@ -50,13 +50,6 @@ struct ApiKeysCreatedFragment {
     api_keys: Vec<ApiKeyView>,
 }
 
-#[derive(Template)]
-#[template(path = "settings/tag_consolidation_result.html")]
-struct TagConsolidationResultFragment {
-    success_message: Option<String>,
-    error_message: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct CreateApiKeyForm {
     name: String,
@@ -81,7 +74,6 @@ struct SettingsPage {
     header_shows_bookmark_actions: bool,
     email: String,
     llm_enabled: bool,
-    metadata_provider: String,
     has_anthropic_api_key: bool,
     anthropic_model_options: Vec<ModelOptionView>,
     has_openai_api_key: bool,
@@ -225,7 +217,7 @@ async fn settings_page(
             let anthropic_model = settings.anthropic_model;
             let openai_model = settings.openai_model.clone();
             let image_model = settings.image_generation_model.clone();
-            let metadata_provider = settings.metadata_provider.clone();
+            let metadata_provider = settings.metadata_provider;
             let api_keys: Vec<ApiKeyView> = keys.into_iter().map(Into::into).collect();
 
             render(&SettingsPage {
@@ -233,7 +225,6 @@ async fn settings_page(
                 header_shows_bookmark_actions: false,
                 email,
                 llm_enabled: settings.enabled,
-                metadata_provider: metadata_provider.clone(),
                 has_anthropic_api_key: settings.has_anthropic_api_key,
                 anthropic_model_options: build_model_option_views(&anthropic_model),
                 has_openai_api_key: settings.has_openai_api_key,
@@ -378,55 +369,6 @@ async fn fix_images_stream(
     Sse::new(stream).into_response()
 }
 
-async fn consolidate_tags_htmx(
-    State(state): State<AppState>,
-    AuthUser(user): AuthUser,
-) -> axum::response::Response {
-    let user_id = user.id;
-
-    {
-        let mut jobs = state.active_tag_consolidation_jobs.lock().unwrap();
-        if jobs.contains(&user_id) {
-            return StatusCode::CONFLICT.into_response();
-        }
-        jobs.insert(user_id);
-    }
-
-    let result = state.tag_consolidation.consolidate(user_id).await;
-
-    state
-        .active_tag_consolidation_jobs
-        .lock()
-        .unwrap()
-        .remove(&user_id);
-
-    match result {
-        Ok(stats) => render(&TagConsolidationResultFragment {
-            success_message: Some(format!(
-                "Consolidated {} tag{tplural} into {} across {} bookmark{bplural}.",
-                stats.tags_before,
-                stats.tags_after,
-                stats.bookmarks_changed,
-                tplural = if stats.tags_before == 1 { "" } else { "s" },
-                bplural = if stats.bookmarks_changed == 1 {
-                    ""
-                } else {
-                    "s"
-                },
-            )),
-            error_message: None,
-        }),
-        Err(DomainError::InvalidInput(msg)) => render(&TagConsolidationResultFragment {
-            success_message: None,
-            error_message: Some(msg),
-        }),
-        Err(_) => render(&TagConsolidationResultFragment {
-            success_message: None,
-            error_message: Some("Consolidation failed. Try again.".to_string()),
-        }),
-    }
-}
-
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -444,10 +386,6 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/settings/fix-images/stream",
             axum::routing::get(fix_images_stream),
-        )
-        .route(
-            "/settings/consolidate-tags",
-            axum::routing::post(consolidate_tags_htmx),
         )
 }
 

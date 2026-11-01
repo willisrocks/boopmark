@@ -8,7 +8,7 @@ use crate::domain::tag_alias::{
 };
 use crate::domain::tag_normalize::{clean_tag, compact_key};
 use chrono::{DateTime, Utc};
-use sqlx::{PgConnection, PgExecutor, Postgres, Transaction};
+use sqlx::{PgExecutor, Postgres, Transaction};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
@@ -147,35 +147,6 @@ async fn load_tag_counts<'e>(
     .bind(user_id)
     .fetch_all(executor)
     .await
-    .map_err(db_err)
-}
-
-/// Repoint every alias whose canonical is a key of `targets` to its value,
-/// without recording a batch. Used by the legacy one-click consolidation,
-/// which rewrites tags without undo; the caller holds the per-user lock.
-pub(super) async fn repoint_aliases(
-    conn: &mut PgConnection,
-    user_id: Uuid,
-    targets: &[(String, String)],
-) -> Result<(), DomainError> {
-    if targets.is_empty() {
-        return Ok(());
-    }
-    let (from, to): (Vec<&str>, Vec<&str>) = targets
-        .iter()
-        .map(|(f, t)| (f.as_str(), t.as_str()))
-        .unzip();
-    sqlx::query(
-        "UPDATE tag_aliases a SET canonical = t.target, batch_id = NULL
-         FROM UNNEST($2::text[], $3::text[]) AS t(source, target)
-         WHERE a.user_id = $1 AND a.canonical = t.source",
-    )
-    .bind(user_id)
-    .bind(&from)
-    .bind(&to)
-    .execute(conn)
-    .await
-    .map(|_| ())
     .map_err(db_err)
 }
 
@@ -1122,37 +1093,6 @@ mod tag_alias_postgres_tests {
             .count();
         assert_eq!(recorded, 1);
         assert_eq!(svc.list_batches(user, 10).await.unwrap().len(), 1);
-
-        sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(user)
-            .execute(&pool)
-            .await
-            .expect("cleanup user");
-        pool.close().await;
-    }
-
-    /// The legacy one-click consolidation repoints aliases with its tag
-    /// rewrite, so the next save does not bring the old spelling back.
-    #[tokio::test]
-    #[ignore = "requires a Postgres database in DATABASE_URL"]
-    async fn tag_alias_legacy_bulk_update_repoints_aliases() {
-        use crate::domain::ports::bookmark_repo::BookmarkRepository;
-
-        let pool = connect().await;
-        let repo = Arc::new(PostgresPool::new(pool.clone()));
-        let svc = TagAliasService::new(repo.clone());
-        let user = new_user(&pool).await;
-        let id = bookmark(&pool, user, &["GitHub"]).await;
-        assert_eq!(resolve(&svc, user, &["git-hub"], &[]).await, s(&["GitHub"]));
-
-        repo.update_tags_bulk(
-            user,
-            &[(id, s(&["github"]))],
-            &[("GitHub".into(), "github".into())],
-        )
-        .await
-        .expect("bulk update");
-        assert_eq!(resolve(&svc, user, &["git-hub"], &[]).await, s(&["github"]));
 
         sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(user)

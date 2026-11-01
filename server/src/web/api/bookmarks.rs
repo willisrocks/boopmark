@@ -228,7 +228,7 @@ async fn suggest(
             "invalid URL format".to_string(),
         )));
     }
-    let result = state.enrichment.suggest(user.id, &input.url, None).await;
+    let result = state.enrichment.suggest(user.id, &input.url).await;
     Ok(Json(result))
 }
 
@@ -270,14 +270,7 @@ async fn create_bookmark(
     }
 
     if params.suggest {
-        let existing_tags = with_bookmarks!(&state.bookmarks, svc =>
-            svc.tags_with_counts(user.id).await
-        )
-        .ok();
-        let suggestions = state
-            .enrichment
-            .suggest(user.id, &input.url, existing_tags)
-            .await;
+        let suggestions = state.enrichment.suggest(user.id, &input.url).await;
         apply_create_suggestions(&mut input, suggestions);
         // Ensure domain is set from URL so BookmarkService doesn't re-scrape just for domain
         if input.domain.is_none()
@@ -322,14 +315,7 @@ async fn update_bookmark(
         let bookmark = with_bookmarks!(&state.bookmarks, svc => svc.get(id, user.id).await);
         match bookmark {
             Ok(bm) => {
-                let existing_tags = with_bookmarks!(&state.bookmarks, svc =>
-                    svc.tags_with_counts(user.id).await
-                )
-                .ok();
-                let suggestions = state
-                    .enrichment
-                    .suggest(user.id, &bm.url, existing_tags)
-                    .await;
+                let suggestions = state.enrichment.suggest(user.id, &bm.url).await;
                 apply_update_suggestions(&mut input, suggestions);
             }
             Err(e) => return Err(error_response(e)),

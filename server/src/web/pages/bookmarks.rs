@@ -299,7 +299,7 @@ pub async fn suggest(
     AuthUser(user): AuthUser,
     Form(form): Form<SuggestForm>,
 ) -> axum::response::Response {
-    let result = state.enrichment.suggest(user.id, &form.url, None).await;
+    let result = state.enrichment.suggest(user.id, &form.url).await;
 
     // Preserve user-typed tags; only use enrichment tags if user hasn't typed any
     let user_tags = form.tags_input.and_then(non_empty);
@@ -703,16 +703,7 @@ pub async fn edit_suggest(
         Err(e) => return error_response(e),
     };
 
-    // Get existing tags with counts for LLM context
-    let existing_tags = with_bookmarks!(&state.bookmarks, svc =>
-        svc.tags_with_counts(user.id).await
-    )
-    .ok();
-
-    let result = state
-        .enrichment
-        .suggest(user.id, &bookmark.url, existing_tags)
-        .await;
+    let result = state.enrichment.suggest(user.id, &bookmark.url).await;
 
     // For edit suggest, always prefer enrichment suggestions over current
     // form values. The user explicitly asked for suggestions, so we replace

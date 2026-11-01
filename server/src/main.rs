@@ -4,19 +4,15 @@ mod config;
 mod domain;
 mod web;
 
-use adapters::anthropic::AnthropicEnricher;
-use adapters::anthropic_tag_consolidator::AnthropicTagConsolidator;
 use adapters::article::readability::HtmlArticleFetcher;
 use adapters::embedder::EmbedderRouter;
 use adapters::llm_client::{LlmClientConfig, LlmClientRouter};
-use adapters::llm_router::{LlmEnricherRouter, LlmPromptAssistantRouter, TagConsolidatorRouter};
 use adapters::login::google::GoogleLoginProvider;
 use adapters::login::local_password::LocalPasswordLoginProvider;
 use adapters::metadata::fallback::FallbackMetadataExtractor;
 use adapters::metadata::html::HtmlMetadataExtractor;
 use adapters::metadata::iframely::IframelyExtractor;
 use adapters::metadata::opengraph_io::OpengraphIoExtractor;
-use adapters::openai::OpenAiProvider;
 use adapters::openai_image::OpenAiImageGenerator;
 use adapters::postgres::PostgresPool;
 use adapters::screenshot::noop::NoopScreenshot;
@@ -26,11 +22,13 @@ use adapters::storage::s3::S3Storage;
 use app::auth::AuthService;
 use app::bookmarks::BookmarkService;
 use app::enrichment::EnrichmentService;
+use app::image_prompt::LlmClientPromptAssistant;
 use app::invite::InviteService;
 use app::search::SearchService;
 use app::secrets::SecretBox;
 use app::settings::{ConfiguredImageAiSettingsProvider, SettingsService};
 use app::tag_alias::TagAliasService;
+use app::tag_llm::LlmClientEnricher;
 use config::{Config, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, StorageBackend};
 use domain::ports::embedder::Embedder;
 use domain::ports::image_generator::{ImageAiSettingsProvider, ImageGenerator};
@@ -40,6 +38,7 @@ use domain::ports::llm_prompt_assistant::LlmPromptAssistant;
 use domain::ports::login_provider::LoginProvider;
 use domain::ports::screenshot::ScreenshotProvider;
 use domain::ports::tag_resolver::TagResolver;
+use domain::ports::tag_vocabulary::TagVocabulary;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use web::state::{AppState, Bookmarks, ImageStorage};
@@ -106,14 +105,10 @@ async fn main() {
         ScreenshotBackend::Disabled => Arc::new(NoopScreenshot),
     };
 
-    let anthropic_adapter = Arc::new(AnthropicEnricher::new());
-    let openai_adapter = Arc::new(OpenAiProvider::new());
-    let anthropic_prompt_assistant: Arc<dyn LlmPromptAssistant> = anthropic_adapter.clone();
-    let openai_prompt_assistant: Arc<dyn LlmPromptAssistant> = openai_adapter.clone();
-    let prompt_assistant: Arc<dyn LlmPromptAssistant> = Arc::new(LlmPromptAssistantRouter::new(
-        anthropic_prompt_assistant,
-        openai_prompt_assistant,
-    ));
+    let llm_client: Arc<dyn LlmClient> =
+        Arc::new(LlmClientRouter::from_config(&LlmClientConfig::from_env()));
+    let prompt_assistant: Arc<dyn LlmPromptAssistant> =
+        Arc::new(LlmClientPromptAssistant::new(llm_client.clone()));
     let image_settings: Arc<dyn ImageAiSettingsProvider> = Arc::new(
         ConfiguredImageAiSettingsProvider::new(settings_service.clone(), prompt_assistant),
     );
@@ -195,31 +190,13 @@ async fn main() {
     };
 
     let auth_service = Arc::new(AuthService::new(db.clone(), db.clone(), db.clone()));
-    let anthropic_enricher: Arc<dyn LlmEnricher> = anthropic_adapter;
-    let enricher: Arc<dyn LlmEnricher> = Arc::new(LlmEnricherRouter::new(
-        anthropic_enricher,
-        openai_adapter.clone(),
-    ));
-    let enrichment_service = Arc::new(EnrichmentService::new(
-        metadata_for_enrichment,
-        enricher,
-        settings_service.clone(),
-    ));
-    let anthropic_tag_consolidator: Arc<dyn domain::ports::tag_consolidator::TagConsolidator> =
-        Arc::new(AnthropicTagConsolidator::new());
-    let openai_tag_consolidator: Arc<dyn domain::ports::tag_consolidator::TagConsolidator> =
-        openai_adapter;
-    let tag_consolidator: Arc<dyn domain::ports::tag_consolidator::TagConsolidator> = Arc::new(
-        TagConsolidatorRouter::new(anthropic_tag_consolidator, openai_tag_consolidator),
+    let enricher: Arc<dyn LlmEnricher> = Arc::new(LlmClientEnricher::new(llm_client.clone()));
+    let tag_vocabulary: Arc<dyn TagVocabulary> = tag_alias_service.clone();
+    let enrichment_service = Arc::new(
+        EnrichmentService::new(metadata_for_enrichment, enricher, settings_service.clone())
+            .with_tag_vocabulary(tag_vocabulary),
     );
-    let tag_consolidation_service = Arc::new(app::tag_consolidation::TagConsolidationService::new(
-        db.clone(),
-        tag_consolidator,
-        settings_service.clone(),
-    ));
     let invite_service = Arc::new(InviteService::new(db.clone()));
-    let llm_client: Arc<dyn LlmClient> =
-        Arc::new(LlmClientRouter::from_config(&LlmClientConfig::from_env()));
     let embedder: Arc<dyn Embedder> = Arc::new(
         EmbedderRouter::from_env().unwrap_or_else(|e| panic!("invalid embedding config: {e}")),
     );
@@ -272,14 +249,10 @@ async fn main() {
         settings: settings_service,
         config: Arc::new(config.clone()),
         enrichment: enrichment_service,
-        tag_consolidation: tag_consolidation_service,
         tag_aliases: tag_alias_service,
         images_storage,
         image_processing_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         active_image_fix_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        active_tag_consolidation_jobs: Arc::new(std::sync::Mutex::new(
-            std::collections::HashSet::new(),
-        )),
         login_provider,
         invites: invite_service,
         llm_client,
