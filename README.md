@@ -149,6 +149,8 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model; `BAAI/bge-small-en-v1.5` by default for `local` |
 | `EMBEDDING_DIMENSIONS` | `1024` | Vector size for `openai` (default model only; otherwise the model's native size) |
 | `OPENAI_EMBEDDING_API_KEY` | — | Operator key, required when `EMBEDDING_BACKEND=openai` |
+| `ORT_DYLIB_PATH` | — | `local` only: path of the ONNX Runtime library (`libonnxruntime.so`), loaded at startup |
+| `FASTEMBED_CACHE_DIR` | fastembed's default | `local` only: where the model is downloaded on first start |
 | `ANTHROPIC_EFFORT` | `low` | Anthropic `effort` for models that accept it: `low`, `medium`, `high`, `xhigh`, `max` or `none` |
 | `LLM_BACKEND` | — | `llamacpp` sends every LLM request to `LLAMACPP_BASE_URL` (local development) |
 | `ARTICLE_INGEST_ENABLED` | `1` | Fetch the article text of saved pages in the background for search. `0` stops fetching: new bookmarks are searched by their metadata, and article text that was already stored stays searchable |
@@ -156,6 +158,12 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `ENABLE_E2E_AUTH` | `0` | Set to `1` for E2E test auth bypass |
 
 ## Deployment Guides
+
+### Search
+
+Search ranks bookmarks by their title, description, tags and the text of the saved page, which a background worker fetches. With `EMBEDDING_BACKEND=openai` (or `local`) it also searches by meaning: each article is split into passages that are embedded, and the worker embeds a failed page's title, description, URL and tags instead. Turning embeddings on, or changing the model, embeds the existing library in the background (rate-limited, resumable); until a bookmark is embedded it is found by its words. Settings → Search index shows the progress and retries failed fetches.
+
+The Postgres server needs pgvector ≥ 0.8 (`docker-compose.yml` uses `pgvector/pgvector:pg16`). The release image is built without `local-embeddings`; a self-hoster who wants free local embeddings builds with `cargo build --release --features local-embeddings`, installs ONNX Runtime, sets `ORT_DYLIB_PATH`, and gives the VM at least 1 GB. (A published local-embeddings image is a follow-up.)
 
 ### Docker Compose (default)
 
@@ -169,7 +177,7 @@ The server runs on port 4000. Add a reverse proxy (nginx, Caddy) for HTTPS.
 
 The committed `fly.toml` is a working starting point: app `boopmark`, internal port 4000, an HTTP check on `/health`, and one always-on 512 MB machine. Rename `app` to your own Fly app name, or generate the config yourself with `fly launch --no-deploy` and keep the port (`4000`) and `/health` check.
 
-1. **Postgres.** Create a Fly Managed Postgres cluster with `fly mpg create`, then attach it with `fly mpg attach <cluster-id> -a <your-app>` — that sets the `DATABASE_URL` secret for you. Any other Postgres URL works too: `fly secrets set DATABASE_URL='postgres://...'`.
+1. **Postgres.** Create a Fly Managed Postgres cluster with `fly mpg create`, then attach it with `fly mpg attach <cluster-id> -a <your-app>` — that sets the `DATABASE_URL` secret for you. Any other Postgres URL works too: `fly secrets set DATABASE_URL='postgres://...'`. Search needs the `pg_trgm` and `vector` (pgvector ≥ 0.8) extensions: on Fly MPG, enable both in the cluster's dashboard before the first deploy (migrations 016 and 018 create them elsewhere). Settings → Search index shows the owner the installed versions.
 
 2. **Required configuration.** Variable names only; the values are yours to generate and none belong in git:
 
