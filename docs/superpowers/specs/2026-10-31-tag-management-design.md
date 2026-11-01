@@ -564,15 +564,18 @@ one-row update and counts cheap, but it touches every bookmark query, import/exp
 filter SQL. Libraries here have hundreds of tags and thousands of bookmarks, so array rewrites in one
 transaction are milliseconds. M1 gets the same behaviour with additive migrations.
 
-**Migration.** Migration `015_tag_aliases.sql` creates the tables. A one-time job runs L1–L3 per user
-as a `normalize` batch: it rewrites tags, seeds `tag_aliases`, and can be undone like any other batch.
-It runs at deploy for every user, or lazily on first visit to the library page. Before it touches
-data, the library page shows a banner: "We merged 600 spellings into 303 tags · Review · Undo".
+**Migration.** Migration `015_tag_aliases.sql` creates the tables. Existing tags are never merged
+automatically. The one-time normalization job writes proposals that the user applies through the
+review screen; only new writes resolve through aliases. The job runs L1–L3 per user, at deploy for
+every user or lazily on first visit to the library page. Applying its proposals is a `normalize`
+batch: it rewrites tags, seeds `tag_aliases`, and can be undone like any other batch. Until the user
+has reviewed, the library page shows a banner: "600 spellings can merge into 303 tags · Review".
 
 ### 3. Reviewed LLM consolidation
 
 Triggered from the library page ("Find duplicates with AI"). It runs as a background job, not inside
-the HTMX request. The page polls the job, so the 60 s client timeout no longer matters.
+the HTMX request. The page polls the job, so the 60 s client timeout no longer matters. If the job
+and its stored proposals need their own tables, they go in migration `018_tag_consolidation.sql`.
 
 **Input.** The canonical tags after normalization (not raw spellings), each with its bookmark count
 and one sample title, delimited as untrusted data, as today. With 303 tags this measured 6,440

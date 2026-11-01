@@ -165,10 +165,11 @@ worker's and the owner's file too).
   a superuser.
 - **Neon.** Run `CREATE EXTENSION`; the default role, `neon_superuser`, may
   do this.
-- **In the migration.** It starts with `CREATE EXTENSION IF NOT EXISTS
-  vector; CREATE EXTENSION IF NOT EXISTS pg_trgm;`. These do nothing once
-  an extension is enabled, so the same migration runs on both providers. On
-  MPG, flip the toggles first.
+- **In the migrations.** `016_bookmark_content_search.sql` starts with
+  `CREATE EXTENSION IF NOT EXISTS pg_trgm;` and
+  `017_bookmark_chunks_vector.sql` with `CREATE EXTENSION IF NOT EXISTS
+  vector;`. These do nothing once an extension is enabled, so the same
+  migrations run on both providers. On MPG, flip the toggles first.
 - **Trust.** `pg_trgm`, `unaccent` and `fuzzystrmatch` are "trusted"
   extensions (their control files say so), so a database owner could create
   them. `vector` is not trusted (`vector.control` has no `trusted` line);
@@ -623,14 +624,17 @@ build and binary don't carry ONNX Runtime. The prototype enables fastembed
 `hf-hub-rustls-tls` (the model download uses rustls, like the rest of the
 app).
 
-### Schema (migration `015_bookmark_content_search.sql`)
+### Schema (migrations `016_bookmark_content_search.sql` and `017_bookmark_chunks_vector.sql`)
 
 The prototype version is in `scripts/search-eval/sql/prototype_schema.sql`,
-plus `eval.py`'s setup for the trigram column.
+plus `eval.py`'s setup for the trigram column. The schema is split in two:
+`016` holds the lexical side (`pg_trgm`, `bookmark_contents`, the fetch
+queue and its backfill), `017` the vector side (`vector`, `bookmark_chunks`).
+
+`016_bookmark_content_search.sql`:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS vector;   -- Fly MPG: enable in the dashboard first
-CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- (Neon: these statements enable them)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- Fly MPG: enable in the dashboard first (Neon: this enables it)
 
 CREATE TABLE bookmark_contents (
     bookmark_id UUID PRIMARY KEY REFERENCES bookmarks(id) ON DELETE CASCADE,
@@ -654,6 +658,22 @@ CREATE INDEX idx_bookmark_contents_meta_trgm ON bookmark_contents USING GIN(meta
 CREATE INDEX idx_bookmark_contents_queue ON bookmark_contents(next_attempt_at)
     WHERE status = 'pending';
 
+-- Backfill queue: every existing bookmark starts pending, already searchable
+-- by its metadata in the lexical legs.
+INSERT INTO bookmark_contents (bookmark_id, user_id, search, meta_text)
+SELECT id, user_id,
+       setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+       setweight(to_tsvector('english', coalesce(description, '')), 'B') ||
+       setweight(to_tsvector('english', url || ' ' || array_to_string(tags, ' ')), 'C'),
+       coalesce(title, '') || ' ' || coalesce(description, '')
+FROM bookmarks;
+```
+
+`017_bookmark_chunks_vector.sql`:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;   -- Fly MPG: enable in the dashboard first (Neon: this enables it)
+
 CREATE TABLE bookmark_chunks (
     bookmark_id UUID NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
     user_id     UUID NOT NULL,
@@ -671,16 +691,6 @@ CREATE INDEX idx_bookmark_chunks_hnsw_1024 ON bookmark_chunks
 CREATE INDEX idx_bookmark_chunks_hnsw_384 ON bookmark_chunks
     USING hnsw ((embedding::halfvec(384)) halfvec_cosine_ops)
     WHERE vector_dims(embedding) = 384;
-
--- Backfill queue: every existing bookmark starts pending, already searchable
--- by its metadata in the lexical legs.
-INSERT INTO bookmark_contents (bookmark_id, user_id, search, meta_text)
-SELECT id, user_id,
-       setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
-       setweight(to_tsvector('english', coalesce(description, '')), 'B') ||
-       setweight(to_tsvector('english', url || ' ' || array_to_string(tags, ' ')), 'C'),
-       coalesce(title, '') || ' ' || coalesce(description, '')
-FROM bookmarks;
 ```
 
 - **Why a separate table.** The `bookmarks` row stays narrow; the list page
@@ -1019,7 +1029,7 @@ The search input in `templates/components/header.html` keeps its
 
 ### Backfill
 
-- Migration 015 enqueues every existing bookmark (the `INSERT … SELECT`
+- Migration 016 enqueues every existing bookmark (the `INSERT … SELECT`
   above). Metadata search keeps working throughout, now ranked and
   typo-tolerant.
 - The worker drains the queue at `ARTICLE_INGEST_CONCURRENCY` with
@@ -1228,7 +1238,7 @@ What it shows:
    - Run the pg_available_extensions check above.
    - Switch the compose, CI and E2E Postgres images to pgvector (owner
      approval needed for the CI change).
-   - Migration 015.
+   - Migrations 016 (lexical) and 017 (vector).
 2. **Full-text body search** with no embeddings: the `ArticleFetcher`
    adapter, worker and queue, weighted `search`, the trigram leg, relevance
    sort and snippets. This is the measured lexical-only step (0.053 →
