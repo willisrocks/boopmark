@@ -93,6 +93,22 @@ submitted tags, values are bounded, and control characters are rejected.
 - Replacing `bookmarks.tags TEXT[]` with a join table (see [Data model](#canonical-tag-model)).
 - Automatic, unreviewed LLM rewrites.
 
+## Brainstorming decisions (auto-pilot)
+
+The superpowers brainstorming skill is not installed on this host. I ran its question loop myself
+and answered each question from code or measurements; there was no human gate.
+
+| Question | Answer | Evidence |
+|----------|--------|----------|
+| Is the problem storage or display? | Both. Verbatim storage creates the duplicates; the flat chip list amplifies them. | `all_tags` → `filters_inner.html`; the current suggestion pipeline created a new tag for 16% of suggested tags |
+| Normalize on read or on write? | On write, through an alias table, plus a one-time migration. | Read-time folding would leave the API, export and CLI with dirty data |
+| Aliases or a tag table? | Aliases next to `TEXT[]` (M1). | Every query and client stays unchanged; libraries are small |
+| Is plural folding safe? | Only when the singular already exists. | 0 wrong among 297 deterministic merges, including the `ios`/`news`/`kubernetes` traps |
+| Can an LLM apply merges unreviewed? | No. | 165 wrong merges when the local model's proposals were applied directly |
+| Self-reported confidence for review defaults? | No; use a pairwise check. | 41 of 45 `high`-confidence proposals were wrong; the pairwise check had 0 wrong |
+| Decision API at the core? | No; it is an optional pair-check backend. | Neither can propose names or new tags (primary docs); it is the one step it does well |
+| Which model? | Mid tier for consolidation, the default for suggestions. | Cents per run (paper costs); small models fail at the whole-list task |
+
 ## Lab: seed data, prototype, measurements
 
 Everything here is on this branch under `scripts/tag-lab/` and is reproducible.
