@@ -6,7 +6,9 @@ use crate::domain::tag_alias::{
     TagAlias, TagChangeBatch, TagChangeSummary, TagIndex, TagMerge, TagMergeProposal, TagWrite,
     merge_mapping, resolve_writes, rewrite_tags, undo_tags,
 };
-use crate::domain::tag_consolidation::TagSample;
+use crate::domain::tag_consolidation::{
+    ReviewedRow, TagSample, plan_reviewed_apply, resolve_through_aliases,
+};
 use crate::domain::tag_normalize::{clean_tag, compact_key};
 use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, Postgres, Transaction};
@@ -311,6 +313,84 @@ async fn apply_merges_tx(
     Ok(Some(batch))
 }
 
+/// Replace the user's pending proposals from `source`, skipping member sets
+/// the user dismissed. The caller holds the per-user lock.
+pub(super) async fn replace_pending_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    source: ProposalSource,
+    proposals: &[NewTagMergeProposal],
+) -> Result<Vec<TagMergeProposal>, DomainError> {
+    sqlx::query(
+        "DELETE FROM tag_merge_proposals
+         WHERE user_id = $1 AND source = $2 AND status = 'pending'",
+    )
+    .bind(user_id)
+    .bind(source.as_str())
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let dismissed: HashSet<Vec<String>> = sqlx::query_scalar::<_, Vec<String>>(
+        "SELECT members FROM tag_merge_proposals
+         WHERE user_id = $1 AND status = 'dismissed'",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?
+    .iter()
+    .map(|members| sorted(members))
+    .collect();
+
+    let mut out = Vec::with_capacity(proposals.len());
+    for proposal in proposals {
+        let members = sorted(&proposal.members);
+        if dismissed.contains(&members) {
+            continue;
+        }
+        let row = sqlx::query_as::<_, ProposalRow>(&format!(
+            "INSERT INTO tag_merge_proposals (user_id, canonical, members, source, confidence)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING {PROPOSAL_COLUMNS}"
+        ))
+        .bind(user_id)
+        .bind(&proposal.canonical)
+        .bind(&members)
+        .bind(source.as_str())
+        .bind(proposal.confidence.as_str())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(db_err)?;
+        out.push(proposal_from_row(row)?);
+    }
+    Ok(out)
+}
+
+/// Apply the merges of proposals `ids` as one batch and mark them applied.
+async fn apply_proposal_merges_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    kind: ChangeKind,
+    merges: &[TagMerge],
+    ids: &[Uuid],
+) -> Result<TagChangeBatch, DomainError> {
+    let batch = apply_merges_tx(tx, user_id, kind, merges, false)
+        .await?
+        .ok_or_else(|| DomainError::Internal("no batch recorded for proposals".into()))?;
+    sqlx::query(
+        "UPDATE tag_merge_proposals
+         SET status = 'applied', batch_id = $3, decided_at = now()
+         WHERE user_id = $1 AND id = ANY($2)",
+    )
+    .bind(user_id)
+    .bind(ids)
+    .bind(batch.id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(batch)
+}
+
 impl TagAliasRepository for PostgresPool {
     async fn list_aliases(&self, user_id: Uuid) -> Result<Vec<TagAlias>, DomainError> {
         load_aliases(&self.pool, user_id).await
@@ -417,48 +497,7 @@ impl TagAliasRepository for PostgresPool {
         // Serialized with other runs and with apply/undo, so two concurrent
         // runs cannot both delete and then both insert their groups.
         lock_user_tags(&mut tx, user_id).await?;
-        sqlx::query(
-            "DELETE FROM tag_merge_proposals
-             WHERE user_id = $1 AND source = $2 AND status = 'pending'",
-        )
-        .bind(user_id)
-        .bind(source.as_str())
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
-        let dismissed: HashSet<Vec<String>> = sqlx::query_scalar::<_, Vec<String>>(
-            "SELECT members FROM tag_merge_proposals
-             WHERE user_id = $1 AND status = 'dismissed'",
-        )
-        .bind(user_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(db_err)?
-        .iter()
-        .map(|members| sorted(members))
-        .collect();
-
-        let mut out = Vec::with_capacity(proposals.len());
-        for proposal in proposals {
-            let members = sorted(&proposal.members);
-            if dismissed.contains(&members) {
-                continue;
-            }
-            let row = sqlx::query_as::<_, ProposalRow>(&format!(
-                "INSERT INTO tag_merge_proposals (user_id, canonical, members, source, confidence)
-                 VALUES ($1, $2, $3, $4, $5)
-                 RETURNING {PROPOSAL_COLUMNS}"
-            ))
-            .bind(user_id)
-            .bind(&proposal.canonical)
-            .bind(&members)
-            .bind(source.as_str())
-            .bind(proposal.confidence.as_str())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(db_err)?;
-            out.push(proposal_from_row(row)?);
-        }
+        let out = replace_pending_tx(&mut tx, user_id, source, proposals).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(out)
     }
@@ -481,29 +520,6 @@ impl TagAliasRepository for PostgresPool {
         .into_iter()
         .map(proposal_from_row)
         .collect()
-    }
-
-    async fn set_proposal_canonical(
-        &self,
-        user_id: Uuid,
-        id: Uuid,
-        canonical: &str,
-    ) -> Result<(), DomainError> {
-        let updated = sqlx::query(
-            "UPDATE tag_merge_proposals SET canonical = $3
-             WHERE user_id = $1 AND id = $2 AND status = 'pending'",
-        )
-        .bind(user_id)
-        .bind(id)
-        .bind(canonical)
-        .execute(&self.pool)
-        .await
-        .map_err(db_err)?
-        .rows_affected();
-        if updated == 0 {
-            return Err(DomainError::NotFound);
-        }
-        Ok(())
     }
 
     async fn dismiss_proposals(&self, user_id: Uuid, ids: &[Uuid]) -> Result<u64, DomainError> {
@@ -567,20 +583,66 @@ impl TagAliasRepository for PostgresPool {
             ChangeKind::Normalize
         };
         let merges: Vec<TagMerge> = proposals.iter().map(TagMergeProposal::merge).collect();
-        let batch = apply_merges_tx(&mut tx, user_id, kind, &merges, false)
-            .await?
-            .ok_or_else(|| DomainError::Internal("no batch recorded for proposals".into()))?;
-        sqlx::query(
-            "UPDATE tag_merge_proposals
-             SET status = 'applied', batch_id = $3, decided_at = now()
-             WHERE user_id = $1 AND id = ANY($2)",
-        )
+        let batch = apply_proposal_merges_tx(&mut tx, user_id, kind, &merges, &ids).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(batch)
+    }
+
+    async fn apply_reviewed(
+        &self,
+        user_id: Uuid,
+        rows: &[ReviewedRow],
+    ) -> Result<TagChangeBatch, DomainError> {
+        if rows.is_empty() {
+            return Err(DomainError::InvalidInput(
+                "Check at least one merge.".into(),
+            ));
+        }
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        lock_user_tags(&mut tx, user_id).await?;
+        let pending = sqlx::query_as::<_, ProposalRow>(&format!(
+            "SELECT {PROPOSAL_COLUMNS} FROM tag_merge_proposals
+             WHERE user_id = $1 AND status = 'pending'
+             ORDER BY created_at, id
+             FOR UPDATE"
+        ))
         .bind(user_id)
-        .bind(&ids)
-        .bind(batch.id)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(db_err)?;
+        .map_err(db_err)?
+        .into_iter()
+        .map(proposal_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+        let aliases = load_aliases(&mut *tx, user_id).await?;
+        let on_bookmarks: HashSet<String> = load_tag_counts(&mut *tx, user_id)
+            .await?
+            .into_iter()
+            .map(|(tag, _)| tag)
+            .collect();
+        let plan = plan_reviewed_apply(
+            rows,
+            &resolve_through_aliases(&pending, &aliases, &on_bookmarks),
+        )?;
+        // Edited targets are saved with the apply, so a failed apply leaves
+        // none behind and a second tab cannot slip its own in between.
+        for (id, canonical) in &plan.edited {
+            sqlx::query(
+                "UPDATE tag_merge_proposals SET canonical = $3 WHERE user_id = $1 AND id = $2",
+            )
+            .bind(user_id)
+            .bind(id)
+            .bind(canonical)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        let kind = if plan.llm {
+            ChangeKind::LlmMerge
+        } else {
+            ChangeKind::Normalize
+        };
+        let batch =
+            apply_proposal_merges_tx(&mut tx, user_id, kind, &plan.merges, &plan.ids).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(batch)
     }

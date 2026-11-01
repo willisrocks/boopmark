@@ -1,6 +1,8 @@
-use super::PostgresPool;
+use super::tag_alias_repo::replace_pending_tx;
+use super::{PostgresPool, lock_user_tags};
 use crate::domain::error::DomainError;
 use crate::domain::ports::tag_consolidation_job_repo::TagConsolidationJobRepository;
+use crate::domain::tag_alias::{NewTagMergeProposal, ProposalSource};
 use crate::domain::tag_consolidation::{ConsolidationJob, JobOutcome, JobStatus};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -45,6 +47,32 @@ impl TagConsolidationJobRepository for PostgresPool {
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)
+    }
+
+    async fn store_run_proposals(
+        &self,
+        user_id: Uuid,
+        run_id: Uuid,
+        proposals: &[NewTagMergeProposal],
+    ) -> Result<Option<usize>, DomainError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        lock_user_tags(&mut tx, user_id).await?;
+        let current = sqlx::query_scalar::<_, Uuid>(
+            "SELECT run_id FROM tag_consolidation_jobs
+             WHERE user_id = $1 AND run_id = $2 AND status = 'running'
+             FOR UPDATE",
+        )
+        .bind(user_id)
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if current.is_none() {
+            return Ok(None);
+        }
+        let stored = replace_pending_tx(&mut tx, user_id, ProposalSource::Llm, proposals).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(Some(stored.len()))
     }
 
     async fn finish_job(
@@ -124,7 +152,9 @@ mod tag_consolidation_postgres_tests {
     };
     use crate::domain::ports::tag_resolver::TagResolver;
     use crate::domain::tag_alias::{ProposalSource, TagWrite};
-    use crate::domain::tag_consolidation::STALE_RUN_MINUTES;
+    use crate::domain::tag_consolidation::{
+        LIST_CHANGED, ReviewRow, ReviewedRow, STALE_RUN_MINUTES,
+    };
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use sqlx::postgres::PgPoolOptions;
@@ -247,6 +277,38 @@ mod tag_consolidation_postgres_tests {
         .expect("load bookmarks")
         .into_iter()
         .collect()
+    }
+
+    /// The row with this target and source, checked as the page showed it.
+    fn checked(
+        rows: &[ReviewRow],
+        canonical: &str,
+        source: ProposalSource,
+        edited: Option<&str>,
+    ) -> ReviewedRow {
+        let row = rows
+            .iter()
+            .find(|r| r.canonical == canonical && r.source == source)
+            .unwrap_or_else(|| panic!("no {canonical} row"));
+        ReviewedRow {
+            id: row.id,
+            shown: row.chips.iter().map(|c| c.tag.clone()).collect(),
+            canonical: Some(edited.unwrap_or(&row.canonical).to_string()),
+        }
+    }
+
+    async fn pending_canonical(
+        tags: &TagAliasService<PostgresPool>,
+        user: Uuid,
+        id: Uuid,
+    ) -> String {
+        tags.list_proposals(user, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap()
+            .canonical
     }
 
     type Service = TagConsolidationService<PostgresPool, PostgresPool, PostgresPool>;
@@ -389,28 +451,40 @@ mod tag_consolidation_postgres_tests {
             ])
         );
 
-        // Apply only some rows: javascript (which brings its JS/js row),
-        // github, and kubernetes under an edited name. `remote work` stays
-        // unchecked and must not apply.
-        let id_of = |canonical: &str, source: ProposalSource| {
-            review
-                .rows
-                .iter()
-                .find(|r| r.canonical == canonical && r.source == source)
-                .unwrap()
-                .id
-        };
-        let kubernetes = id_of("kubernetes", ProposalSource::Llm);
-        let selected = [
-            id_of("javascript", ProposalSource::Llm),
-            id_of("github", ProposalSource::Deterministic),
-            kubernetes,
+        // Two tabs show the same rows and edit the kubernetes target
+        // differently. Tab A checks javascript (which brings its JS/js row),
+        // github and kubernetes; `remote work` stays unchecked.
+        let tab_a = vec![
+            checked(&review.rows, "javascript", ProposalSource::Llm, None),
+            checked(&review.rows, "github", ProposalSource::Deterministic, None),
+            checked(
+                &review.rows,
+                "kubernetes",
+                ProposalSource::Llm,
+                Some("Kubernetes"),
+            ),
         ];
-        let canonicals = HashMap::from([(kubernetes, "Kubernetes".to_string())]);
-        let batch = svc
-            .apply(user, &selected, &canonicals)
-            .await
-            .expect("apply");
+        let tab_b = vec![checked(
+            &review.rows,
+            "kubernetes",
+            ProposalSource::Llm,
+            Some("K8S"),
+        )];
+
+        // A failed apply saves no edit: tab B adds a row id that does not
+        // exist, so its kubernetes edit must not stick.
+        let mut broken = tab_b.clone();
+        broken.push(ReviewedRow {
+            id: Uuid::new_v4(),
+            shown: vec![],
+            canonical: None,
+        });
+        assert!(svc.apply(user, &broken).await.is_err());
+        assert_eq!(tags_by_id(&pool, user).await, before);
+        let kubernetes = pending_canonical(&tags, user, tab_b[0].id).await;
+        assert_eq!(kubernetes, "kubernetes");
+
+        let batch = svc.apply(user, &tab_a).await.expect("apply");
         assert_eq!(batch.summary.bookmarks_changed, 5);
 
         let after = tags_by_id(&pool, user).await;
@@ -420,6 +494,12 @@ mod tag_consolidation_postgres_tests {
         assert_eq!(after[&b_k8s], s(&["Kubernetes"]));
         assert_eq!(after[&b_github], s(&["github"]));
         assert_eq!(after[&b_wfh], s(&["wfh"]), "an unchecked row never applies");
+        // A double submit and the second tab are refused; nothing changes.
+        for stale in [&tab_a, &tab_b] {
+            let error = svc.apply(user, stale).await.unwrap_err();
+            assert!(matches!(error, DomainError::InvalidInput(ref m) if m == LIST_CHANGED));
+            assert_eq!(tags_by_id(&pool, user).await, after);
+        }
         // The next save resolves the merged spellings.
         let resolved = tags
             .resolve_tags(
@@ -467,6 +547,101 @@ mod tag_consolidation_postgres_tests {
             "{error}"
         );
         assert!(svc.review(user).await.unwrap().rows.is_empty());
+        cleanup(&pool, user).await;
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a Postgres database in DATABASE_URL"]
+    async fn a_spelling_that_appears_after_the_page_loaded_is_not_merged() {
+        let pool = connect().await;
+        let user = new_user(&pool).await;
+        bookmark(&pool, user, &["javascript"]).await;
+        let b_js = bookmark(&pool, user, &["js"]).await;
+        let (svc, _) = service(&pool, user, false).await;
+        let repo = PostgresPool::new(pool.clone());
+        let run_id = repo
+            .start_job(user, STALE_RUN_MINUTES)
+            .await
+            .unwrap()
+            .unwrap();
+        svc.run(user, run_id).await;
+        let page = svc.review(user).await.unwrap().rows;
+        let row = checked(&page, "javascript", ProposalSource::Llm, None);
+        assert_eq!(row.shown, ["javascript", "js"]);
+
+        // Another client adds `JS`, and another tab finds it as a spelling
+        // variant of `js`, which the old row would now also merge.
+        let b_cased = bookmark(&pool, user, &["JS"]).await;
+        svc.propose_normalization(user).await.unwrap();
+        let error = svc
+            .apply(user, std::slice::from_ref(&row))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DomainError::InvalidInput(ref m) if m == LIST_CHANGED));
+        let tags = tags_by_id(&pool, user).await;
+        assert_eq!(tags[&b_js], ["js"]);
+        assert_eq!(tags[&b_cased], ["JS"]);
+
+        // After a reload the row shows `JS` and applying it merges it.
+        let page = svc.review(user).await.unwrap().rows;
+        let row = checked(&page, "javascript", ProposalSource::Llm, None);
+        assert_eq!(row.shown, ["javascript", "js", "JS"]);
+        svc.apply(user, &[row]).await.expect("apply after reload");
+        let tags = tags_by_id(&pool, user).await;
+        assert_eq!(tags[&b_js], ["javascript"]);
+        assert_eq!(tags[&b_cased], ["javascript"]);
+
+        cleanup(&pool, user).await;
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a Postgres database in DATABASE_URL"]
+    async fn a_replaced_run_cannot_store_its_proposals() {
+        let pool = connect().await;
+        let user = new_user(&pool).await;
+        bookmark(&pool, user, &["javascript"]).await;
+        bookmark(&pool, user, &["js"]).await;
+        let (svc, tags) = service(&pool, user, false).await;
+        let repo = PostgresPool::new(pool.clone());
+        let old = repo
+            .start_job(user, STALE_RUN_MINUTES)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query(
+            "UPDATE tag_consolidation_jobs SET started_at = now() - interval '2 hours'
+             WHERE user_id = $1",
+        )
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let new = repo
+            .start_job(user, STALE_RUN_MINUTES)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The old worker finishes late: it stores and records nothing.
+        svc.run(user, old).await;
+        let llm_rows = |rows: Vec<crate::domain::tag_alias::TagMergeProposal>| {
+            rows.into_iter()
+                .filter(|p| p.source == ProposalSource::Llm)
+                .count()
+        };
+        assert_eq!(llm_rows(tags.list_proposals(user, None).await.unwrap()), 0);
+        let job = svc.job(user).await.unwrap().unwrap();
+        assert_eq!((job.run_id, job.status), (new, JobStatus::Running));
+
+        svc.run(user, new).await;
+        assert_eq!(llm_rows(tags.list_proposals(user, None).await.unwrap()), 1);
+        assert_eq!(
+            svc.job(user).await.unwrap().unwrap().status,
+            JobStatus::Succeeded
+        );
+
         cleanup(&pool, user).await;
         pool.close().await;
     }

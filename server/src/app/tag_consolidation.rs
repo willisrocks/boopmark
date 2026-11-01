@@ -13,15 +13,12 @@ use crate::domain::ports::llm_client::LlmClient;
 use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
 use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::ports::tag_consolidation_job_repo::TagConsolidationJobRepository;
-use crate::domain::tag_alias::{
-    ChangeKind, ProposalSource, ProposalStatus, TagChangeBatch, TagMergeProposal,
-};
+use crate::domain::tag_alias::{ChangeKind, ProposalStatus, TagChangeBatch, TagMergeProposal};
 use crate::domain::tag_consolidation::{
-    ConsolidationJob, JobOutcome, JobStatus, MAX_TAG_CHARS, ReviewRow, STALE_RUN_MINUTES,
-    expand_selection, review_rows, tag_units,
+    ConsolidationJob, JobOutcome, JobStatus, ReviewRow, ReviewedRow, STALE_RUN_MINUTES,
+    resolve_through_aliases, review_rows, tag_units,
 };
-use crate::domain::tag_normalize::clean_tag;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -103,10 +100,15 @@ where
     }
 
     /// One run: refresh the deterministic proposals, ask the model, store
-    /// its proposals, and record the outcome on the job row.
+    /// its proposals, and record the outcome on the job row. A run that a
+    /// newer one replaced stores and records nothing.
     pub async fn run(&self, user_id: Uuid, run_id: Uuid) {
-        let outcome = match self.search(user_id).await {
-            Ok((search, stored)) => JobOutcome {
+        let outcome = match self.search(user_id, run_id).await {
+            Ok(None) => {
+                tracing::warn!(user_id = %user_id, "tag consolidation run was replaced; its proposals are dropped");
+                return;
+            }
+            Ok(Some((search, stored))) => JobOutcome {
                 status: JobStatus::Succeeded,
                 error: None,
                 proposals: i32::try_from(stored).unwrap_or(i32::MAX),
@@ -137,7 +139,13 @@ where
         }
     }
 
-    async fn search(&self, user_id: Uuid) -> Result<(MergeSearch, usize), DomainError> {
+    /// The run's work; `None` when a newer run replaced it before it could
+    /// store its proposals.
+    async fn search(
+        &self,
+        user_id: Uuid,
+        run_id: Uuid,
+    ) -> Result<Option<(MergeSearch, usize)>, DomainError> {
         let credentials = self
             .settings
             .get_text_provider_credentials(user_id)
@@ -160,12 +168,11 @@ where
             output_tokens = search.usage.output_tokens,
             "tag consolidation run finished"
         );
-        let stored = self
-            .tags
-            .replace_pending_proposals(user_id, ProposalSource::Llm, &search.proposals)
+        Ok(self
+            .jobs
+            .store_run_proposals(user_id, run_id, &search.proposals)
             .await?
-            .len();
-        Ok((search, stored))
+            .map(|stored| (search, stored)))
     }
 
     pub async fn job(&self, user_id: Uuid) -> Result<Option<ConsolidationJob>, DomainError> {
@@ -182,6 +189,9 @@ where
             .list_proposals(user_id, Some(ProposalStatus::Pending))
             .await?;
         let samples = self.tags.tag_samples(user_id).await?;
+        let aliases = self.tags.list_aliases(user_id).await?;
+        let on_bookmarks: HashSet<String> = samples.iter().map(|s| s.tag.clone()).collect();
+        let pending = resolve_through_aliases(&pending, &aliases, &on_bookmarks);
         let batches = self
             .tags
             .list_batches(user_id, RECENT_BATCHES * 4)
@@ -205,52 +215,14 @@ where
         self.tags.propose_normalization(user_id).await
     }
 
-    /// Apply the rows the user checked as one undoable batch. `canonicals`
-    /// holds edited merge targets by proposal id. An LLM row also applies
-    /// the spelling-variant rows of its members, which it shows.
+    /// Apply the rows the user checked, exactly as the page showed them, as
+    /// one undoable batch; see [`TagAliasService::apply_reviewed`].
     pub async fn apply(
         &self,
         user_id: Uuid,
-        selected: &[Uuid],
-        canonicals: &HashMap<Uuid, String>,
+        rows: &[ReviewedRow],
     ) -> Result<TagChangeBatch, DomainError> {
-        let mut selected = selected.to_vec();
-        selected.sort();
-        selected.dedup();
-        if selected.is_empty() {
-            return Err(DomainError::InvalidInput(
-                "Check at least one merge.".into(),
-            ));
-        }
-        let pending = self
-            .tags
-            .list_proposals(user_id, Some(ProposalStatus::Pending))
-            .await?;
-        for proposal in pending.iter().filter(|p| selected.contains(&p.id)) {
-            let Some(edited) = canonicals.get(&proposal.id) else {
-                continue;
-            };
-            let edited = clean_tag(edited)
-                .filter(|t| t.chars().count() <= MAX_TAG_CHARS)
-                .ok_or_else(|| {
-                    DomainError::InvalidInput(format!(
-                        "\"{}\" is not a valid tag name.",
-                        edited.trim()
-                    ))
-                })?;
-            if edited != proposal.canonical {
-                self.tags
-                    .set_proposal_canonical(user_id, proposal.id, edited)
-                    .await?;
-            }
-        }
-        let ids = expand_selection(&selected, &pending);
-        if ids.len() < selected.len() {
-            return Err(DomainError::InvalidInput(
-                "Some suggestions changed since this page loaded. Reload and try again.".into(),
-            ));
-        }
-        self.tags.apply_merge(user_id, &ids).await
+        self.tags.apply_reviewed(user_id, rows).await
     }
 
     pub async fn dismiss(&self, user_id: Uuid, ids: &[Uuid]) -> Result<u64, DomainError> {

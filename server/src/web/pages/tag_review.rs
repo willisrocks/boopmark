@@ -19,7 +19,9 @@ use uuid::Uuid;
 use crate::app::tag_consolidation::{NO_PROVIDER, StartOutcome};
 use crate::domain::error::DomainError;
 use crate::domain::tag_alias::{ChangeKind, Confidence, ProposalSource, TagChangeBatch};
-use crate::domain::tag_consolidation::{ConsolidationJob, JobStatus, ReviewChip, ReviewRow};
+use crate::domain::tag_consolidation::{
+    ConsolidationJob, JobStatus, ReviewChip, ReviewRow, ReviewedRow,
+};
 use crate::web::extractors::AuthUser;
 use crate::web::pages::shared::UserView;
 use crate::web::state::AppState;
@@ -27,11 +29,16 @@ use crate::web::state::AppState;
 const PAGE: &str = "/tags/review";
 /// Form fields carrying an edited merge target are named `canonical:<id>`.
 const CANONICAL_FIELD: &str = "canonical:";
+/// Hidden fields named `shown:<id>` carry the JSON list of spellings a row
+/// showed, so the apply merges exactly those.
+const SHOWN_FIELD: &str = "shown:";
 
 struct RowView {
     id: String,
     canonical: String,
     chips: Vec<ReviewChip>,
+    /// The chips as a JSON list, posted back with the row.
+    shown: String,
     bookmarks: i64,
     sample_title: Option<String>,
     confidence: &'static str,
@@ -44,6 +51,10 @@ impl From<ReviewRow> for RowView {
         Self {
             id: row.id.to_string(),
             canonical: row.canonical,
+            shown: serde_json::to_string(
+                &row.chips.iter().map(|c| c.tag.as_str()).collect::<Vec<_>>(),
+            )
+            .unwrap_or_default(),
             chips: row.chips,
             bookmarks: row.bookmarks,
             sample_title: row.sample_title,
@@ -274,20 +285,37 @@ async fn normalize(State(state): State<AppState>, AuthUser(user): AuthUser) -> R
     }
 }
 
-/// The checked ids and the edited targets of a review form.
-fn parse_selection(fields: Vec<(String, String)>) -> (Vec<Uuid>, HashMap<Uuid, String>) {
-    let mut ids = Vec::new();
-    let mut canonicals = HashMap::new();
+/// The checked rows of a review form, each with the spellings it showed
+/// and its submitted target. A row whose spellings are missing or garbled
+/// shows nothing, which the apply refuses as a changed list.
+fn parse_selection(fields: Vec<(String, String)>) -> Vec<ReviewedRow> {
+    let mut ids: Vec<Uuid> = Vec::new();
+    let mut shown: HashMap<Uuid, Vec<String>> = HashMap::new();
+    let mut canonicals: HashMap<Uuid, String> = HashMap::new();
+    let field_id = |name: &str, prefix: &str| {
+        name.strip_prefix(prefix)
+            .and_then(|id| Uuid::parse_str(id).ok())
+    };
     for (name, value) in fields {
         if name == "ids" {
-            ids.extend(Uuid::parse_str(&value).ok());
-        } else if let Some(id) = name.strip_prefix(CANONICAL_FIELD)
-            && let Ok(id) = Uuid::parse_str(id)
-        {
+            if let Ok(id) = Uuid::parse_str(&value)
+                && !ids.contains(&id)
+            {
+                ids.push(id);
+            }
+        } else if let Some(id) = field_id(&name, SHOWN_FIELD) {
+            shown.insert(id, serde_json::from_str(&value).unwrap_or_default());
+        } else if let Some(id) = field_id(&name, CANONICAL_FIELD) {
             canonicals.insert(id, value);
         }
     }
-    (ids, canonicals)
+    ids.into_iter()
+        .map(|id| ReviewedRow {
+            id,
+            shown: shown.remove(&id).unwrap_or_default(),
+            canonical: canonicals.remove(&id),
+        })
+        .collect()
 }
 
 async fn apply(
@@ -295,12 +323,8 @@ async fn apply(
     AuthUser(user): AuthUser,
     Form(fields): Form<Vec<(String, String)>>,
 ) -> Response {
-    let (ids, canonicals) = parse_selection(fields);
-    match state
-        .tag_consolidation
-        .apply(user.id, &ids, &canonicals)
-        .await
-    {
+    let rows = parse_selection(fields);
+    match state.tag_consolidation.apply(user.id, &rows).await {
         Ok(batch) => {
             let merges = batch.summary.merges.len();
             back(
@@ -327,7 +351,7 @@ async fn dismiss(
     AuthUser(user): AuthUser,
     Form(fields): Form<Vec<(String, String)>>,
 ) -> Response {
-    let (ids, _) = parse_selection(fields);
+    let ids: Vec<Uuid> = parse_selection(fields).iter().map(|r| r.id).collect();
     match state.tag_consolidation.dismiss(user.id, &ids).await {
         Ok(0) => back("error", "Check the suggestions to dismiss.", None),
         Ok(n) => back(
@@ -366,19 +390,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selection_reads_checked_ids_and_edited_targets() {
+    fn selection_reads_checked_rows_with_their_shown_spellings_and_targets() {
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
-        let (ids, canonicals) = parse_selection(vec![
+        let c = Uuid::new_v4();
+        let rows = parse_selection(vec![
+            ("ids".into(), a.to_string()),
             ("ids".into(), a.to_string()),
             ("ids".into(), "not-a-uuid".into()),
+            ("ids".into(), c.to_string()),
+            (format!("shown:{a}"), r#"["js","javascript"]"#.into()),
             (format!("canonical:{a}"), "JavaScript".into()),
+            // Unchecked rows are ignored.
+            (format!("shown:{b}"), r#"["rust"]"#.into()),
             (format!("canonical:{b}"), "rust".into()),
-            ("other".into(), "x".into()),
+            // Garbled spellings show nothing, which the apply refuses.
+            (format!("shown:{c}"), "not json".into()),
         ]);
-        assert_eq!(ids, vec![a]);
-        assert_eq!(canonicals[&a], "JavaScript");
-        assert_eq!(canonicals[&b], "rust");
+        assert_eq!(
+            rows,
+            vec![
+                ReviewedRow {
+                    id: a,
+                    shown: vec!["js".into(), "javascript".into()],
+                    canonical: Some("JavaScript".into()),
+                },
+                ReviewedRow {
+                    id: c,
+                    shown: vec![],
+                    canonical: None,
+                },
+            ]
+        );
     }
 
     #[test]

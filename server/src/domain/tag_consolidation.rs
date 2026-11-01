@@ -17,9 +17,10 @@
 
 use crate::domain::error::DomainError;
 use crate::domain::tag_alias::{
-    Confidence, NewTagMergeProposal, ProposalSource, ProposalStatus, TagMergeProposal,
+    Confidence, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagMerge,
+    TagMergeProposal,
 };
-use crate::domain::tag_normalize::{Level, choose_display, clean_tag, group_tags};
+use crate::domain::tag_normalize::{Level, choose_display, clean_tag, compact_key, group_tags};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
@@ -541,8 +542,10 @@ impl JobStatus {
 }
 
 /// A run still marked running this long after it started died with its
-/// process; a new run may replace it.
-pub const STALE_RUN_MINUTES: i64 = 15;
+/// process; a new run may replace it. This is longer than the slowest
+/// possible run (42 calls at the 60 s vendor timeout), and a replaced run
+/// can no longer store its proposals.
+pub const STALE_RUN_MINUTES: i64 = 60;
 
 /// The latest consolidation run of one user.
 #[derive(Debug, Clone, PartialEq)]
@@ -640,6 +643,151 @@ pub fn expand_selection(selected: &[Uuid], pending: &[TagMergeProposal]) -> Vec<
     ids
 }
 
+/// Every spelling that applying `proposal` merges: its members, then the
+/// members of the spelling-variant rows it covers, each once.
+pub fn row_spellings(proposal: &TagMergeProposal, pending: &[TagMergeProposal]) -> Vec<String> {
+    let mut spellings: Vec<String> = Vec::new();
+    for tag in proposal
+        .members
+        .iter()
+        .chain(covered(proposal, pending).flat_map(|p| &p.members))
+    {
+        if !spellings.contains(tag) {
+            spellings.push(tag.clone());
+        }
+    }
+    spellings
+}
+
+/// Pending proposals as they apply now. A member or target that is on no
+/// bookmark any more, and whose alias points at another tag, was merged
+/// since the proposal was made (maybe under an edited name); it is replaced
+/// by that tag. So `js -> javascript` still merges `JS` after `JS, js` was
+/// merged into `JS`. Proposals left with nothing to merge drop out.
+pub fn resolve_through_aliases(
+    pending: &[TagMergeProposal],
+    aliases: &[TagAlias],
+    on_bookmarks: &HashSet<String>,
+) -> Vec<TagMergeProposal> {
+    let by_key: HashMap<&str, &str> = aliases
+        .iter()
+        .map(|a| (a.alias_key.as_str(), a.canonical.as_str()))
+        .collect();
+    let current = |tag: &String| -> String {
+        if on_bookmarks.contains(tag) {
+            return tag.clone();
+        }
+        by_key
+            .get(compact_key(tag).as_str())
+            .map_or_else(|| tag.clone(), |c| c.to_string())
+    };
+    pending
+        .iter()
+        .filter_map(|proposal| {
+            let canonical = current(&proposal.canonical);
+            let mut members: Vec<String> = Vec::new();
+            for member in proposal.members.iter().map(current) {
+                if !members.contains(&member) {
+                    members.push(member);
+                }
+            }
+            members
+                .iter()
+                .any(|m| *m != canonical)
+                .then(|| TagMergeProposal {
+                    canonical,
+                    members,
+                    ..proposal.clone()
+                })
+        })
+        .collect()
+}
+
+/// Shown when a checked row no longer matches what the page showed.
+pub const LIST_CHANGED: &str =
+    "These suggestions changed since the page loaded. Reload the page and check them again.";
+
+/// One row the user checked, as the page showed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewedRow {
+    pub id: Uuid,
+    /// The spellings the row showed (its chips).
+    pub shown: Vec<String>,
+    /// The merge target as submitted, maybe edited.
+    pub canonical: Option<String>,
+}
+
+/// What applying the checked rows does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewedApply {
+    /// The checked rows plus the spelling-variant rows they cover.
+    pub ids: Vec<Uuid>,
+    pub merges: Vec<TagMerge>,
+    /// Edited targets to save on their proposals.
+    pub edited: Vec<(Uuid, String)>,
+    /// True when an AI proposal is among them (an `llm_merge` batch).
+    pub llm: bool,
+}
+
+/// Plan applying the checked rows against the proposals pending now
+/// (already passed through [`resolve_through_aliases`]). Every checked row
+/// must still be pending and merge exactly the spellings it showed, so a
+/// spelling that appeared after the page loaded is never merged. Edited
+/// targets must be valid tags.
+pub fn plan_reviewed_apply(
+    rows: &[ReviewedRow],
+    pending: &[TagMergeProposal],
+) -> Result<ReviewedApply, DomainError> {
+    let changed = || DomainError::InvalidInput(LIST_CHANGED.into());
+    let mut targets: HashMap<Uuid, String> = HashMap::new();
+    let mut edited = Vec::new();
+    for row in rows {
+        let proposal = pending
+            .iter()
+            .find(|p| p.id == row.id && p.status == ProposalStatus::Pending)
+            .ok_or_else(changed)?;
+        let shown: HashSet<&String> = row.shown.iter().collect();
+        let now = row_spellings(proposal, pending);
+        if now.len() != shown.len() || !now.iter().all(|s| shown.contains(s)) {
+            return Err(changed());
+        }
+        let target = match &row.canonical {
+            Some(submitted) => clean_tag(submitted)
+                .filter(|t| t.chars().count() <= MAX_TAG_CHARS)
+                .ok_or_else(|| {
+                    DomainError::InvalidInput(format!(
+                        "\"{}\" is not a valid tag name.",
+                        submitted.trim()
+                    ))
+                })?
+                .to_string(),
+            None => proposal.canonical.clone(),
+        };
+        if target != proposal.canonical {
+            edited.push((proposal.id, target.clone()));
+        }
+        targets.insert(proposal.id, target);
+    }
+    let selected: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let ids = expand_selection(&selected, pending);
+    let applied: Vec<&TagMergeProposal> = ids
+        .iter()
+        .filter_map(|id| pending.iter().find(|p| p.id == *id))
+        .collect();
+    Ok(ReviewedApply {
+        merges: applied
+            .iter()
+            .map(|p| TagMerge {
+                canonical: targets.get(&p.id).unwrap_or(&p.canonical).clone(),
+                members: p.members.clone(),
+            })
+            .collect(),
+        llm: applied.iter().any(|p| p.source == ProposalSource::Llm),
+        ids,
+        edited,
+    })
+}
+
 /// The review screen's rows: "Check these" (`medium`, then `low`) first,
 /// unchecked; then the `high` rows, checked. Within a section, the rows
 /// that change the most bookmarks come first.
@@ -649,26 +797,17 @@ pub fn review_rows(pending: &[TagMergeProposal], samples: &[TagSample]) -> Vec<R
         .iter()
         .filter(|p| p.status == ProposalStatus::Pending)
         .map(|proposal| {
-            let mut spellings: Vec<&str> = Vec::new();
-            for tag in proposal
-                .members
-                .iter()
-                .chain(covered(proposal, pending).flat_map(|p| &p.members))
-            {
-                if !spellings.contains(&tag.as_str()) {
-                    spellings.push(tag);
-                }
-            }
+            let mut spellings = row_spellings(proposal, pending);
             // The canonical first, then the most used.
             spellings.sort_by_key(|tag| {
-                let count = by_tag.get(tag).map_or(0, |s| s.count);
+                let count = by_tag.get(tag.as_str()).map_or(0, |s| s.count);
                 (*tag != proposal.canonical, -count)
             });
             let chips: Vec<ReviewChip> = spellings
                 .iter()
                 .map(|tag| ReviewChip {
-                    tag: tag.to_string(),
-                    count: by_tag.get(tag).map_or(0, |s| s.count),
+                    tag: tag.clone(),
+                    count: by_tag.get(tag.as_str()).map_or(0, |s| s.count),
                 })
                 .collect();
             ReviewRow {
@@ -683,7 +822,7 @@ pub fn review_rows(pending: &[TagMergeProposal], samples: &[TagSample]) -> Vec<R
                     .sum(),
                 sample_title: spellings
                     .iter()
-                    .find_map(|tag| by_tag.get(tag)?.sample_title.clone()),
+                    .find_map(|tag| by_tag.get(tag.as_str())?.sample_title.clone()),
                 chips,
                 prechecked: proposal.confidence == Confidence::High,
             }
@@ -1160,5 +1299,113 @@ mod tests {
             ..job
         };
         assert_eq!(fresh.settle(Utc::now()).status, JobStatus::Running);
+    }
+
+    fn shown(proposal: &TagMergeProposal, pending: &[TagMergeProposal]) -> ReviewedRow {
+        ReviewedRow {
+            id: proposal.id,
+            shown: row_spellings(proposal, pending),
+            canonical: None,
+        }
+    }
+
+    #[test]
+    fn apply_merges_exactly_what_was_shown_with_edited_targets() {
+        use ProposalSource::*;
+        let variants = proposal("js", &["JS", "js"], Deterministic, Confidence::High);
+        let llm = proposal("javascript", &["javascript", "js"], Llm, Confidence::High);
+        let pending = vec![variants.clone(), llm.clone()];
+        let mut row = shown(&llm, &pending);
+        assert_eq!(row.shown, s(&["javascript", "js", "JS"]));
+        row.canonical = Some(" JavaScript ".into());
+
+        let plan = plan_reviewed_apply(&[row.clone()], &pending).unwrap();
+        assert_eq!(plan.ids, vec![llm.id, variants.id]);
+        assert!(plan.llm);
+        assert_eq!(plan.edited, vec![(llm.id, "JavaScript".to_string())]);
+        assert_eq!(
+            plan.merges,
+            vec![
+                TagMerge {
+                    canonical: "JavaScript".into(),
+                    members: s(&["javascript", "js"])
+                },
+                TagMerge {
+                    canonical: "js".into(),
+                    members: s(&["JS", "js"])
+                },
+            ]
+        );
+
+        // An invalid edited target is refused.
+        row.canonical = Some("bad\ntag".into());
+        assert!(plan_reviewed_apply(&[row], &pending).is_err());
+    }
+
+    #[test]
+    fn apply_refuses_a_row_that_changed_since_the_page_loaded() {
+        use ProposalSource::*;
+        let llm = proposal("javascript", &["javascript", "js"], Llm, Confidence::High);
+        let row = shown(&llm, std::slice::from_ref(&llm));
+        assert_eq!(row.shown, s(&["javascript", "js"]));
+
+        // A spelling-variant row for `js` appeared after the page loaded:
+        // applying the old row would merge `JS`, which the user never saw.
+        let variants = proposal("js", &["JS", "js"], Deterministic, Confidence::High);
+        let now = vec![llm.clone(), variants];
+        let error = plan_reviewed_apply(std::slice::from_ref(&row), &now).unwrap_err();
+        assert!(matches!(error, DomainError::InvalidInput(m) if m == LIST_CHANGED));
+
+        // A checked row that is no longer pending is refused before any
+        // expansion, even next to a row that is still fine.
+        let other = proposal("rust", &["Rust", "rust"], Deterministic, Confidence::High);
+        let fine = shown(&other, std::slice::from_ref(&other));
+        assert!(plan_reviewed_apply(&[fine.clone(), row], std::slice::from_ref(&other)).is_err());
+        assert!(plan_reviewed_apply(&[fine], &[other]).is_ok());
+    }
+
+    #[test]
+    fn proposals_follow_merges_made_since_but_keep_spellings_still_in_use() {
+        use ProposalSource::*;
+        let alias = |spelling: &str, canonical: &str| TagAlias {
+            alias_key: compact_key(spelling),
+            alias: spelling.to_string(),
+            canonical: canonical.to_string(),
+            source: crate::domain::tag_alias::AliasSource::Manual,
+            batch_id: None,
+        };
+        // `JS, js` was merged into `JS` (an edited target); `js` is gone.
+        let llm = proposal("javascript", &["javascript", "js"], Llm, Confidence::High);
+        let on_bookmarks: HashSet<String> = ["JS", "javascript"].map(String::from).into();
+        let resolved = resolve_through_aliases(
+            std::slice::from_ref(&llm),
+            &[alias("js", "JS")],
+            &on_bookmarks,
+        );
+        assert_eq!(resolved[0].members, s(&["javascript", "JS"]));
+        assert_eq!(resolved[0].id, llm.id);
+
+        // A spelling still on bookmarks keeps its proposal, even when an
+        // older alias row points its key elsewhere.
+        let variants = proposal(
+            "github",
+            &["GitHub", "github"],
+            Deterministic,
+            Confidence::High,
+        );
+        let on_bookmarks: HashSet<String> = ["GitHub", "github"].map(String::from).into();
+        let resolved = resolve_through_aliases(
+            std::slice::from_ref(&variants),
+            &[alias("github", "github")],
+            &on_bookmarks,
+        );
+        assert_eq!(resolved, vec![variants]);
+
+        // Nothing left to merge: the proposal drops out.
+        let gone = proposal("rust", &["Rust", "rust"], Deterministic, Confidence::High);
+        let on_bookmarks: HashSet<String> = ["rust"].map(String::from).into();
+        assert!(
+            resolve_through_aliases(&[gone], &[alias("Rust", "rust")], &on_bookmarks).is_empty()
+        );
     }
 }

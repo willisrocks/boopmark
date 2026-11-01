@@ -1,4 +1,5 @@
 <li data-testid="review-row" data-canonical="{{ row.canonical }}" data-confidence="{{ row.confidence }}" class="flex flex-col gap-3 rounded-lg border border-gray-700 bg-[#0f1117] p-4 sm:flex-row sm:items-start">
+    <input type="hidden" name="shown:{{ row.id }}" value="{{ row.shown }}" form="review-form">
     <input
         type="checkbox"
         name="ids"

@@ -137,10 +137,10 @@ pub fn suggest_user_prompt(input: &EnrichmentInput, canonical: &[(String, i64)])
     )
 }
 
-/// Enforce what the vendor schema may not: enum membership (compared
-/// case-insensitively, since vendors do not guarantee enum casing, and
-/// mapped back to the listed spelling), at most one new tag that is a valid
-/// tag, no duplicates, at most `MAX_SUGGESTED_TAGS`. The save path resolves
+/// Enforce what the vendor schema may not: enum membership, at most one new
+/// tag that is a valid tag, no duplicates, at most `MAX_SUGGESTED_TAGS`.
+/// The adapter already rejects an answer outside the exact enum, so listed
+/// tags are matched exactly. The save path resolves
 /// the result through the alias table.
 pub fn parse_suggestion(json: &Value, canonical: &[String]) -> EnrichmentOutput {
     let text = |key: &str| {
@@ -165,9 +165,8 @@ pub fn parse_suggestion(json: &Value, canonical: &[String]) -> EnrichmentOutput 
         }
     };
     for tag in strings("existing") {
-        let tag = tag.trim().to_lowercase();
-        if let Some(listed) = canonical.iter().find(|c| c.to_lowercase() == tag) {
-            push(listed, &mut tags);
+        if canonical.iter().any(|c| c == tag) {
+            push(tag, &mut tags);
         }
     }
     if let Some(new) = strings("new")
@@ -457,7 +456,9 @@ pub struct MergeSearch {
 /// 3. [`build_proposals`] with cannot-link.
 ///
 /// A key or request the vendor rejects (`InvalidInput`) ends the run; a
-/// transient failure only costs that call's proposals.
+/// transient failure only costs that call's proposals, unless no call
+/// succeeded or every pair batch failed: then the run is an error, so the
+/// existing proposals are kept.
 pub async fn find_merges(
     client: &dyn LlmClient,
     credentials: &TextProviderCredentials,
@@ -476,6 +477,7 @@ pub async fn find_merges(
         };
 
     let mut groups = Vec::new();
+    let mut answered_calls = 0;
     let whole_list = request(
         WHOLE_LIST_SYSTEM,
         whole_list_user_prompt(units),
@@ -486,6 +488,7 @@ pub async fn find_merges(
         search.whole_list_attempts += 1;
         match client.complete_structured(whole_list.clone()).await {
             Ok(response) => {
+                answered_calls += 1;
                 add_usage(&mut search.usage, response.usage);
                 groups = validate_whole_list(&parse_whole_list(&response.json), units);
                 if !groups.is_empty() {
@@ -521,6 +524,7 @@ pub async fn find_merges(
                     verdicts.extend(found);
                     search.echo_mismatches += mismatches;
                     answered = true;
+                    answered_calls += 1;
                     break;
                 }
                 Err(DomainError::InvalidInput(message)) => {
@@ -532,6 +536,14 @@ pub async fn find_merges(
         if !answered {
             search.failed_batches += 1;
         }
+    }
+    // An outage must not read as "no duplicates": the caller keeps the
+    // pending proposals and reports the run as failed.
+    let batches = pairs.len().div_ceil(PAIRS_PER_CALL);
+    if answered_calls == 0 || (batches > 0 && search.failed_batches == batches) {
+        return Err(DomainError::Internal(
+            "no tag consolidation call succeeded".into(),
+        ));
     }
     search.pairs_checked = pairs.len();
     search.proposals = build_proposals(units, &groups, &pairs, &verdicts);
@@ -614,7 +626,7 @@ pub(crate) mod tests {
     async fn enricher_sends_an_enum_schema_and_keeps_listed_tags_plus_one_new() {
         let client = Arc::new(StubLlm::answering(json!({
             "title": "Borrow checker", "description": "How it works.",
-            "existing": ["rust", "RUST", "Compilers", "made-up"],
+            "existing": ["rust", "rust", "compilers", "made-up"],
             "new": ["borrow checker", "second new"]
         })));
         let enricher = LlmClientEnricher::new(client.clone());
@@ -627,7 +639,6 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        // Enum casing is not guaranteed: `Compilers` maps back to `compilers`.
         assert_eq!(out.tags, ["rust", "compilers", "borrow checker"]);
         assert_eq!(out.title.as_deref(), Some("Borrow checker"));
 
@@ -789,6 +800,44 @@ pub(crate) mod tests {
                 )]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_outage_is_an_error_not_an_empty_result() {
+        let units = units(&[("javascript", 9), ("js", 4)]);
+        // Every call fails with a retryable error.
+        let stub = StubLlm::new(vec![None]);
+        let error = find_merges(&stub, &credentials(), &units)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DomainError::Internal(_)));
+        // Whole-list call, its retry, the pair batch and its retry.
+        assert_eq!(stub.requests().len(), 4);
+
+        // The whole-list call answered, but every pair batch failed.
+        let stub = StubLlm::new(vec![
+            Some(json!({"merges": []})),
+            Some(json!({"merges": []})),
+            None,
+        ]);
+        let error = find_merges(&stub, &credentials(), &units)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DomainError::Internal(_)));
+    }
+
+    #[test]
+    fn parse_keeps_only_exact_enum_spellings() {
+        // The adapter rejects answers outside the exact enum before parsing;
+        // the parser never maps a cased variant onto a listed tag.
+        let canonical = vec!["compilers".to_string()];
+        let out = parse_suggestion(
+            &json!({"existing": ["Compilers", "compilers"], "new": []}),
+            &canonical,
+        );
+        assert_eq!(out.tags, ["compilers"]);
+        let out = parse_suggestion(&json!({"existing": ["Compilers"], "new": []}), &canonical);
+        assert!(out.tags.is_empty());
     }
 
     #[tokio::test]

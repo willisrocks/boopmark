@@ -12,11 +12,10 @@ use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::ports::tag_resolver::{ResolveFuture, TagResolver};
 use crate::domain::ports::tag_vocabulary::TagVocabulary;
 use crate::domain::tag_alias::{
-    ChangeKind, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch,
-    TagMerge, TagMergeProposal, TagWrite, canonical_tag_counts, normalization_proposals,
-    preview_tags,
+    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMerge,
+    TagMergeProposal, TagWrite, canonical_tag_counts, normalization_proposals, preview_tags,
 };
-use crate::domain::tag_consolidation::TagSample;
+use crate::domain::tag_consolidation::{ReviewedRow, TagSample};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -78,19 +77,6 @@ where
         Ok(())
     }
 
-    /// Store proposals from `source` in place of its pending ones, skipping
-    /// groups the user dismissed. Changes no tag.
-    pub async fn replace_pending_proposals(
-        &self,
-        user_id: Uuid,
-        source: ProposalSource,
-        proposals: &[NewTagMergeProposal],
-    ) -> Result<Vec<TagMergeProposal>, DomainError> {
-        self.repo
-            .replace_pending_proposals(user_id, source, proposals)
-            .await
-    }
-
     /// Apply the chosen pending proposals as one undoable batch.
     pub async fn apply_merge(
         &self,
@@ -131,16 +117,14 @@ where
         self.repo.dismiss_proposals(user_id, ids).await
     }
 
-    /// Change a pending proposal's merge target before it is applied.
-    pub async fn set_proposal_canonical(
+    /// Apply the rows checked on the review screen, exactly as shown, as
+    /// one undoable batch. See [`TagAliasRepository::apply_reviewed`].
+    pub async fn apply_reviewed(
         &self,
         user_id: Uuid,
-        id: Uuid,
-        canonical: &str,
-    ) -> Result<(), DomainError> {
-        self.repo
-            .set_proposal_canonical(user_id, id, canonical)
-            .await
+        rows: &[ReviewedRow],
+    ) -> Result<TagChangeBatch, DomainError> {
+        self.repo.apply_reviewed(user_id, rows).await
     }
 
     /// Each distinct tag with its count and a sample title.
@@ -285,12 +269,11 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn set_proposal_canonical(
+        async fn apply_reviewed(
             &self,
             _user_id: Uuid,
-            _id: Uuid,
-            _canonical: &str,
-        ) -> Result<(), DomainError> {
+            _rows: &[ReviewedRow],
+        ) -> Result<TagChangeBatch, DomainError> {
             unimplemented!("not used by these tests")
         }
 

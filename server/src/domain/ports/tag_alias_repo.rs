@@ -3,7 +3,7 @@ use crate::domain::tag_alias::{
     ChangeKind, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch,
     TagMerge, TagMergeProposal, TagWrite,
 };
-use crate::domain::tag_consolidation::TagSample;
+use crate::domain::tag_consolidation::{ReviewedRow, TagSample};
 use uuid::Uuid;
 
 /// Storage for aliases, merge proposals and undoable change batches.
@@ -50,16 +50,6 @@ pub trait TagAliasRepository: Send + Sync {
         status: Option<ProposalStatus>,
     ) -> Result<Vec<TagMergeProposal>, DomainError>;
 
-    /// Change the merge target of a pending proposal (edited on the review
-    /// screen before applying). `NotFound` unless it is the user's and
-    /// pending.
-    async fn set_proposal_canonical(
-        &self,
-        user_id: Uuid,
-        id: Uuid,
-        canonical: &str,
-    ) -> Result<(), DomainError>;
-
     /// Mark pending proposals dismissed. Returns how many changed.
     async fn dismiss_proposals(&self, user_id: Uuid, ids: &[Uuid]) -> Result<u64, DomainError>;
 
@@ -70,6 +60,18 @@ pub trait TagAliasRepository: Send + Sync {
         &self,
         user_id: Uuid,
         ids: &[Uuid],
+    ) -> Result<TagChangeBatch, DomainError>;
+
+    /// Apply the rows checked on the review screen as one batch, in one
+    /// transaction under the per-user lock: the proposals pending now are
+    /// resolved through the current aliases, every row must still match
+    /// what the page showed ([`crate::domain::tag_consolidation::plan_reviewed_apply`]),
+    /// and edited targets are saved with the apply. Fails without changes
+    /// otherwise.
+    async fn apply_reviewed(
+        &self,
+        user_id: Uuid,
+        rows: &[ReviewedRow],
     ) -> Result<TagChangeBatch, DomainError>;
 
     /// Apply merges that did not come from proposals (manual merge, rename).
