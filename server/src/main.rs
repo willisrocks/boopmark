@@ -6,6 +6,8 @@ mod web;
 
 use adapters::anthropic::AnthropicEnricher;
 use adapters::anthropic_tag_consolidator::AnthropicTagConsolidator;
+use adapters::embedder::EmbedderRouter;
+use adapters::llm_client::{LlmClientConfig, LlmClientRouter};
 use adapters::llm_router::{LlmEnricherRouter, LlmPromptAssistantRouter, TagConsolidatorRouter};
 use adapters::login::google::GoogleLoginProvider;
 use adapters::login::local_password::LocalPasswordLoginProvider;
@@ -27,7 +29,9 @@ use app::invite::InviteService;
 use app::secrets::SecretBox;
 use app::settings::{ConfiguredImageAiSettingsProvider, SettingsService};
 use config::{Config, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, StorageBackend};
+use domain::ports::embedder::Embedder;
 use domain::ports::image_generator::{ImageAiSettingsProvider, ImageGenerator};
+use domain::ports::llm_client::LlmClient;
 use domain::ports::llm_enricher::LlmEnricher;
 use domain::ports::llm_prompt_assistant::LlmPromptAssistant;
 use domain::ports::login_provider::LoginProvider;
@@ -192,6 +196,12 @@ async fn main() {
         settings_service.clone(),
     ));
     let invite_service = Arc::new(InviteService::new(db.clone()));
+    let llm_client: Arc<dyn LlmClient> =
+        Arc::new(LlmClientRouter::from_config(&LlmClientConfig::from_env()));
+    let embedder: Arc<dyn Embedder> = Arc::new(
+        EmbedderRouter::from_env().unwrap_or_else(|e| panic!("invalid embedding config: {e}")),
+    );
+    tracing::info!("embeddings: {}", embedder.model_id());
 
     let login_provider: Arc<dyn LoginProvider> = match config.login_adapter {
         LoginAdapter::Google => {
@@ -226,6 +236,8 @@ async fn main() {
         )),
         login_provider,
         invites: invite_service,
+        llm_client,
+        embedder,
     };
 
     let app = web::router::create_router(state);

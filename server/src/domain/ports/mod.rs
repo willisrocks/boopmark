@@ -1,7 +1,9 @@
 pub mod api_key_repo;
 pub mod bookmark_repo;
+pub mod embedder;
 pub mod image_generator;
 pub mod invite_repo;
+pub mod llm_client;
 pub mod llm_enricher;
 pub mod llm_prompt_assistant;
 pub mod llm_settings_repo;

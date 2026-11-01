@@ -1,5 +1,7 @@
 pub mod anthropic;
 pub mod anthropic_tag_consolidator;
+pub mod embedder;
+pub mod llm_client;
 pub mod llm_router;
 pub mod login;
 pub mod metadata;
@@ -8,3 +10,4 @@ pub mod openai_image;
 pub mod postgres;
 pub mod screenshot;
 pub mod storage;
+pub mod vendor_http;

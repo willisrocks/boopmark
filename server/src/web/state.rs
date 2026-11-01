@@ -10,6 +10,8 @@ use crate::app::settings::SettingsService;
 use crate::app::tag_consolidation::TagConsolidationService;
 use crate::config::Config;
 use crate::domain::error::DomainError;
+use crate::domain::ports::embedder::Embedder;
+use crate::domain::ports::llm_client::LlmClient;
 use crate::domain::ports::login_provider::LoginProvider;
 use crate::domain::ports::storage::ObjectStorage;
 use std::collections::HashSet;
@@ -35,6 +37,10 @@ pub struct AppState {
     pub active_tag_consolidation_jobs: Arc<Mutex<HashSet<Uuid>>>,
     pub login_provider: Arc<dyn LoginProvider>,
     pub invites: Arc<InviteService<PostgresPool>>,
+    /// Shared structured-output LLM port, routed by the user's provider.
+    pub llm_client: Arc<dyn LlmClient>,
+    /// Operator-configured embedder (`EMBEDDING_BACKEND`, disabled by default).
+    pub embedder: Arc<dyn Embedder>,
 }
 
 #[derive(Clone)]

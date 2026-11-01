@@ -36,6 +36,12 @@ urlencoding.workspace = true
 base64 = "0.22"
 ring = "0.17"
 image.workspace = true
+# Local embeddings (EMBEDDING_BACKEND=local); ONNX Runtime is loaded at run
+# time from ORT_DYLIB_PATH, so the build downloads no native binaries.
+fastembed = { version = "7.5", optional = true, default-features = false, features = ["ort-load-dynamic", "hf-hub-rustls-tls"] }
+
+[features]
+local-embeddings = ["dep:fastembed"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
