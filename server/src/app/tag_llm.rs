@@ -112,10 +112,10 @@ pub fn parse_suggestion(json: &Value, canonical: &[String]) -> EnrichmentOutput 
             tags.push(tag);
         }
     }
-    if let Some(new) = strings("new").into_iter().next() {
-        if !tags.iter().any(|t| t.eq_ignore_ascii_case(&new)) {
-            tags.push(new);
-        }
+    if let Some(new) = strings("new").into_iter().next()
+        && !tags.iter().any(|t| t.eq_ignore_ascii_case(&new))
+    {
+        tags.push(new);
     }
     tags.truncate(MAX_TAGS);
     EnrichmentOutput {
