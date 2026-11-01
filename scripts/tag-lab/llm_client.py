@@ -90,11 +90,11 @@ def _post(url, headers, body, timeout):
         raise LlmError(f"cannot reach {url.split('/')[2]}: {e.reason}") from None
 
 
-def _parse(text, vendor):
+def _parse(text, vendor, usage):
     try:
         return json.loads(text.strip())
     except (ValueError, AttributeError):
-        raise LlmError(f"{vendor} returned invalid structured JSON") from None
+        raise LlmError(f"{vendor} returned invalid structured JSON", usage) from None
 
 
 def _anthropic(req):
@@ -114,7 +114,7 @@ def _anthropic(req):
         raise LlmError(f"Anthropic stopped with {stop}", usage)
     # Thinking blocks may come first; the answer is the text block.
     text = next((b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text"), "")
-    return StructuredResponse(_parse(text, "Anthropic"), usage, stop or "")
+    return StructuredResponse(_parse(text, "Anthropic", usage), usage, stop or "")
 
 
 def _openai(req):
@@ -131,7 +131,7 @@ def _openai(req):
     text = resp.get("output_text") or "".join(
         c.get("text", "") for item in resp.get("output", []) if item.get("type") == "message"
         for c in item.get("content", []))
-    return StructuredResponse(_parse(text, "OpenAI"), usage, resp.get("status") or "")
+    return StructuredResponse(_parse(text, "OpenAI", usage), usage, resp.get("status") or "")
 
 
 def _llamacpp(req):
@@ -143,9 +143,9 @@ def _llamacpp(req):
                       "name": "result", "strict": True, "schema": req.json_schema}}},
                  timeout=1800)
     u = resp.get("usage", {})
-    return StructuredResponse(_parse(resp["choices"][0]["message"]["content"], "llama.cpp"),
-                              TokenUsage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0)),
-                              resp["choices"][0].get("finish_reason") or "")
+    usage = TokenUsage(u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+    return StructuredResponse(_parse(resp["choices"][0]["message"]["content"], "llama.cpp", usage),
+                              usage, resp["choices"][0].get("finish_reason") or "")
 
 
 ADAPTERS = {"anthropic": _anthropic, "openai": _openai, "llamacpp": _llamacpp}

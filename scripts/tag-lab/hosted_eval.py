@@ -307,7 +307,7 @@ def step_pairs(ask, truth, det, samples, proposals, echo=False):
                      "answered": i in verdicts})
 
     def accepted(levels, source=None):
-        acc = [r for r in rows if r["same"] and r["confidence"] in levels
+        acc = [r for r in rows if r["same"] and r["confidence"] in levels and r["echo_ok"] is not False
                and (source is None or r["source"] == source or r["source"] == "both")]
         c = sum(r["label"] == "same" for r in acc)
         w = sum(r["label"] == "different" for r in acc)

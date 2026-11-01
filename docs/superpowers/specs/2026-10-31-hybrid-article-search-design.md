@@ -141,9 +141,8 @@ SELECT count(*) FROM bookmarks;   -- 334 at the move
 ```
 
 Neon's hosts end in `neon.tech`, which identifies the provider from the
-`DATABASE_URL` host if the secret is ever shown. AGENTS.md should say "Fly
-Managed Postgres". That edit is outside this spec PR (it is the tag
-worker's and the owner's file too).
+`DATABASE_URL` host if the secret is ever shown. AGENTS.md now says "Fly
+Managed Postgres in production".
 
 ### Extensions on both providers (primary docs, checked 2026-11-01)
 
