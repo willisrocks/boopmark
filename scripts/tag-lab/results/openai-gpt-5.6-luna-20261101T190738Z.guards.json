@@ -1,0 +1,330 @@
+{
+ "source": "openai-gpt-5.6-luna-20261101T190738Z.json",
+ "second": "results/anthropic-claude-haiku-5-5-20261101T190559Z.json",
+ "guards": {
+  "baseline: pair check high": {
+   "accepted": 68,
+   "correct": 68,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 238,
+    "merges": 362,
+    "correct": 362,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.933,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 238,
+    "merges": 362,
+    "correct": 362,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.933,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "pair check high + echo matches": {
+   "accepted": 68,
+   "correct": 68,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 238,
+    "merges": 362,
+    "correct": 362,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.933,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 238,
+    "merges": 362,
+    "correct": 362,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.933,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "candidates only (no whole-list pairs)": {
+   "accepted": 59,
+   "correct": 59,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 247,
+    "merges": 353,
+    "correct": 353,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9098,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 247,
+    "merges": 353,
+    "correct": 353,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9098,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "fix: symbol-aware candidates": {
+   "accepted": 68,
+   "correct": 68,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 238,
+    "merges": 362,
+    "correct": 362,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.933,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 238,
+    "merges": 362,
+    "correct": 362,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.933,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "veto: narrower-topic rule": {
+   "accepted": 57,
+   "correct": 57,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 248,
+    "merges": 352,
+    "correct": 352,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9072,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 248,
+    "merges": 352,
+    "correct": 352,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9072,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "symbol fix + narrower-topic veto": {
+   "accepted": 57,
+   "correct": 57,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 248,
+    "merges": 352,
+    "correct": 352,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9072,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 248,
+    "merges": 352,
+    "correct": 352,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9072,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "agreement: pair high AND whole-list proposed it": {
+   "accepted": 47,
+   "correct": 47,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 256,
+    "merges": 344,
+    "correct": 344,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8866,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 256,
+    "merges": 344,
+    "correct": 344,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8866,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "agreement: pair high AND whole-list proposed it high": {
+   "accepted": 46,
+   "correct": 46,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 257,
+    "merges": 343,
+    "correct": 343,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.884,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 257,
+    "merges": 343,
+    "correct": 343,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.884,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "whole-list high OR pair check high": {
+   "accepted": 69,
+   "correct": 69,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 237,
+    "merges": 363,
+    "correct": 363,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9356,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 237,
+    "merges": 363,
+    "correct": 363,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9356,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "whole-list proposals at high, no pair check": {
+   "accepted": 47,
+   "correct": 47,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 256,
+    "merges": 344,
+    "correct": 344,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8866,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 256,
+    "merges": 344,
+    "correct": 344,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8866,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "cross-model: both say high (pairs both were asked)": {
+   "accepted": 52,
+   "correct": 52,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 252,
+    "merges": 348,
+    "correct": 348,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8969,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 252,
+    "merges": 348,
+    "correct": 348,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8969,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "cross-model: both say high, or only this one was asked": {
+   "accepted": 55,
+   "correct": 55,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 249,
+    "merges": 351,
+    "correct": 351,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9046,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 249,
+    "merges": 351,
+    "correct": 351,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9046,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  }
+ }
+}

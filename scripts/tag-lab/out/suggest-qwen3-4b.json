@@ -1,0 +1,473 @@
+{
+ "stats": {
+  "current": {
+   "dup": 3,
+   "new": 13,
+   "reuse": 84,
+   "on_topic": 33,
+   "judged": 87,
+   "tags": 100,
+   "in": 61004,
+   "out": 1187,
+   "sec": 283.22476959228516
+  },
+  "proposed": {
+   "dup": 0,
+   "new": 0,
+   "reuse": 77,
+   "on_topic": 27,
+   "judged": 77,
+   "tags": 77,
+   "in": 39604,
+   "out": 539,
+   "sec": 141.3529441356659
+  }
+ },
+ "rows": [
+  {
+   "url": "https://substack.com/lab/0331-github",
+   "title": "An opinionated intro to github",
+   "labels": [
+    "git hub",
+    "git",
+    "operating systems"
+   ],
+   "current": [
+    "github",
+    "dev tools",
+    "programming",
+    "frontend",
+    "software engineering"
+   ],
+   "proposed": [
+    "github",
+    "dev tools",
+    "software-engineering",
+    "programming"
+   ]
+  },
+  {
+   "url": "https://substack.com/lab/0154-sql",
+   "title": "A practical guide to sql",
+   "labels": [
+    "sql",
+    "python",
+    "analytics"
+   ],
+   "current": [
+    "sql",
+    "database",
+    "postgres",
+    "analytics",
+    "tutorial"
+   ],
+   "proposed": [
+    "sql",
+    "databases",
+    "data engineering",
+    "backend"
+   ]
+  },
+  {
+   "url": "https://blog.example.dev/lab/0404-vector-db",
+   "title": "vector database for people who already know mcp",
+   "labels": [
+    "vector db",
+    "transformers",
+    "llama-cpp",
+    "artificial intelligence",
+    "model context protocol"
+   ],
+   "current": [
+    "vector db",
+    "mcp",
+    "ai",
+    "database",
+    "analytics"
+   ],
+   "proposed": [
+    "vector database",
+    "mobile",
+    "ai",
+    "data science"
+   ]
+  },
+  {
+   "url": "https://simonwillison.net/lab/0049-terminal",
+   "title": "How I use terminal every day",
+   "labels": [
+    "system-design",
+    "Cloud",
+    "o11y",
+    "cryptography",
+    "terminal emulator"
+   ],
+   "current": [
+    "terminal",
+    "productivity",
+    "dev tools",
+    "command line",
+    "keyboard"
+   ],
+   "proposed": [
+    "terminal",
+    "cli",
+    "command line",
+    "dev tools",
+    "programming"
+   ]
+  },
+  {
+   "url": "https://youtube.com/lab/0074-philosophy",
+   "title": "Building a small philosophy project with statistics",
+   "labels": [
+    "philosophy",
+    "statistics"
+   ],
+   "current": [
+    "philosophy",
+    "statistics",
+    "analytics",
+    "research",
+    "data"
+   ],
+   "proposed": [
+    "math",
+    "Philosophy",
+    "statistics"
+   ]
+  },
+  {
+   "url": "https://dev.to/lab/0548-tokio",
+   "title": "What nobody tells you about tokio",
+   "labels": [
+    "tokio",
+    "performance",
+    "axum",
+    "postgres"
+   ],
+   "current": [
+    "tokio",
+    "rust",
+    "async",
+    "backend",
+    "programming"
+   ],
+   "proposed": [
+    "tokio",
+    "async rust",
+    "rust",
+    "backend",
+    "programming"
+   ]
+  },
+  {
+   "url": "https://arxiv.org/lab/0096-nix",
+   "title": "nix: a field guide",
+   "labels": [
+    "serverless",
+    "CICD",
+    "nix"
+   ],
+   "current": [
+    "nix",
+    "system design",
+    "dev tools",
+    "configuration management",
+    "linux"
+   ],
+   "proposed": [
+    "nixos"
+   ]
+  },
+  {
+   "url": "https://dev.to/lab/0374-saas",
+   "title": "The hidden costs of saas",
+   "labels": [
+    "saas",
+    "Blockchain",
+    "google",
+    "email"
+   ],
+   "current": [
+    "saas",
+    "business",
+    "startup",
+    "costs",
+    "analytics"
+   ],
+   "proposed": [
+    "saas",
+    "business",
+    "databases",
+    "mobile",
+    "frontend"
+   ]
+  },
+  {
+   "url": "https://lobste.rs/lab/0596-android",
+   "title": "Notes on android and swift",
+   "labels": [
+    "Android",
+    "keyboards",
+    "swift"
+   ],
+   "current": [
+    "android",
+    "swift",
+    "keyboards",
+    "mobile",
+    "frontend"
+   ],
+   "proposed": [
+    "android",
+    "swift"
+   ]
+  },
+  {
+   "url": "https://simonwillison.net/lab/0059-cli",
+   "title": "What nobody tells you about cli",
+   "labels": [
+    "CLI",
+    "continuous integration",
+    "networking",
+    "Nix",
+    "distributed systems"
+   ],
+   "current": [
+    "cli",
+    "command line",
+    "hardware",
+    "tools",
+    "productivity"
+   ],
+   "proposed": [
+    "cli",
+    "command line",
+    "dev tools",
+    "tools",
+    "programming"
+   ]
+  },
+  {
+   "url": "https://github.com/lab/0519-energy",
+   "title": "energy: a field guide",
+   "labels": [
+    "energy",
+    "personal-finance",
+    "Recipes"
+   ],
+   "current": [
+    "energy",
+    "hardware",
+    "mobile",
+    "self-hosted",
+    "open source"
+   ],
+   "proposed": [
+    "energy",
+    "databases",
+    "hardware",
+    "mobile"
+   ]
+  },
+  {
+   "url": "https://youtube.com/lab/0219-functional-programming",
+   "title": "functional programming for people who already know swift",
+   "labels": [
+    "FP",
+    "JavaScript",
+    "swift"
+   ],
+   "current": [
+    "functional-programming",
+    "swift",
+    "programming",
+    "dev-tools",
+    "mobile"
+   ],
+   "proposed": [
+    "functional programming",
+    "swift",
+    "programming",
+    "react",
+    "react native"
+   ]
+  },
+  {
+   "url": "https://substack.com/lab/0038-science",
+   "title": "science in 2026: what actually changed",
+   "labels": [
+    "Science",
+    "recipes",
+    "space"
+   ],
+   "current": [
+    "science",
+    "news",
+    "analytics",
+    "future",
+    "trends"
+   ],
+   "proposed": [
+    "Science",
+    "machine learning",
+    "ai",
+    "data science",
+    "python"
+   ]
+  },
+  {
+   "url": "https://simonwillison.net/lab/0088-keyboards",
+   "title": "Notes on keyboards and raspberry pi",
+   "labels": [
+    "keyboards",
+    "linux",
+    "arduino",
+    "raspberry-pi"
+   ],
+   "current": [
+    "keyboards",
+    "hardware",
+    "raspberry pi",
+    "ios",
+    "mobile"
+   ],
+   "proposed": [
+    "keyboards",
+    "raspberry pi",
+    "hardware"
+   ]
+  },
+  {
+   "url": "https://arxiv.org/lab/0444-linux",
+   "title": "Why we moved from electronics to linux",
+   "labels": [
+    "linux",
+    "3d-printing",
+    "arduino",
+    "Electronics"
+   ],
+   "current": [
+    "linux",
+    "hardware",
+    "electronics",
+    "mobile",
+    "system design"
+   ],
+   "proposed": [
+    "linux",
+    "hardware",
+    "keyboards"
+   ]
+  },
+  {
+   "url": "https://medium.com/lab/0428-seo",
+   "title": "Why we moved from saas to seo",
+   "labels": [
+    "seo",
+    "no-code",
+    "Google",
+    "SaaS"
+   ],
+   "current": [
+    "seo",
+    "business",
+    "strategy",
+    "saaS",
+    "growth"
+   ],
+   "proposed": [
+    "seo",
+    "saas",
+    "business",
+    "marketing"
+   ]
+  },
+  {
+   "url": "https://simonwillison.net/lab/0071-books",
+   "title": "books for people who already know blogging",
+   "labels": [
+    "books",
+    "reference",
+    "blogging"
+   ],
+   "current": [
+    "books",
+    "blog",
+    "writing",
+    "blogger",
+    "content-creation"
+   ],
+   "proposed": [
+    "books",
+    "blogging"
+   ]
+  },
+  {
+   "url": "https://dev.to/lab/0246-robotics",
+   "title": "Building a small robotics project with 3d printing",
+   "labels": [
+    "robotics",
+    "3d-printing"
+   ],
+   "current": [
+    "robotics",
+    "3d printing",
+    "hardware",
+    "project",
+    "mobile"
+   ],
+   "proposed": [
+    "robotics",
+    "3d printing",
+    "hardware"
+   ]
+  },
+  {
+   "url": "https://news.ycombinator.com/lab/0092-networking",
+   "title": "How I use networking every day",
+   "labels": [
+    "networking",
+    "home lab"
+   ],
+   "current": [
+    "networking",
+    "news",
+    "mobile",
+    "tech",
+    "frontend"
+   ],
+   "proposed": [
+    "networking",
+    "mobile",
+    "hardware",
+    "software-engineering",
+    "dev tools"
+   ]
+  },
+  {
+   "url": "https://news.ycombinator.com/lab/0564-browsers",
+   "title": "Lessons from a year of browsers",
+   "labels": [
+    "browsers",
+    "Google",
+    "api design"
+   ],
+   "current": [
+    "news",
+    "browsers",
+    "frontend",
+    "web-development",
+    "mobile"
+   ],
+   "proposed": [
+    "mobile",
+    "web development",
+    "frontend",
+    "ui",
+    "design"
+   ]
+  }
+ ]
+}

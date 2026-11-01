@@ -1,0 +1,191 @@
+{
+ "run": "openai-gpt-5.6-luna-20261101T185452Z",
+ "provider": "openai",
+ "model": "gpt-5.6-luna",
+ "effort": "low",
+ "dry_run": false,
+ "budget_usd": 3.0,
+ "started_utc": "2026-11-01T18:54:52+00:00",
+ "seed": {
+  "raw_tags": 600,
+  "deterministic_tags": 303,
+  "concepts": 212
+ },
+ "consolidate": {
+  "proposed_groups": 53,
+  "dropped_invalid": 4,
+  "applied_unreviewed": {
+   "tags": 249,
+   "merges": 351,
+   "correct": 351,
+   "ambiguous": 0,
+   "wrong": 0,
+   "precision": 1.0,
+   "recall": 0.9046
+  },
+  "llm_only": {
+   "proposals": 54,
+   "correct": 54,
+   "wrong": 0,
+   "ambiguous": 0,
+   "precision": 1.0,
+   "by_confidence": {
+    "high": {
+     "correct": 47,
+     "wrong": 0,
+     "ambiguous": 0,
+     "precision": 1.0
+    },
+    "medium": {
+     "correct": 7,
+     "wrong": 0,
+     "ambiguous": 0,
+     "precision": 1.0
+    },
+    "low": {
+     "correct": 0,
+     "wrong": 0,
+     "ambiguous": 0,
+     "precision": null
+    }
+   }
+  },
+  "wrong_merges": []
+ },
+ "pairs": {
+  "pairs": 294,
+  "answered": 294,
+  "by_source": {
+   "candidate": 240,
+   "whole-list": 7,
+   "both": 47
+  },
+  "same_concept_pairs_offered": 79,
+  "residual_same_pairs": 102,
+  "accepted": {
+   "high": {
+    "accepted": 65,
+    "correct": 63,
+    "wrong": 2,
+    "ambiguous": 0,
+    "precision": 0.9692,
+    "recall_of_residual": 0.6176
+   },
+   "high_or_medium": {
+    "accepted": 71,
+    "correct": 69,
+    "wrong": 2,
+    "ambiguous": 0,
+    "precision": 0.9718,
+    "recall_of_residual": 0.6765
+   }
+  },
+  "accepted_candidates_only": {
+   "high": {
+    "accepted": 59,
+    "correct": 57,
+    "wrong": 2,
+    "ambiguous": 0,
+    "precision": 0.9661,
+    "recall_of_residual": 0.5588
+   },
+   "high_or_medium": {
+    "accepted": 64,
+    "correct": 62,
+    "wrong": 2,
+    "ambiguous": 0,
+    "precision": 0.9688,
+    "recall_of_residual": 0.6078
+   }
+  },
+  "wrong_accepted": [
+   [
+    "c#",
+    "cpp",
+    "high"
+   ],
+   [
+    "ai",
+    "tailwind",
+    "high"
+   ]
+  ],
+  "pipeline": {
+   "high": {
+    "tags": 240,
+    "merges": 360,
+    "correct": 353,
+    "ambiguous": 0,
+    "wrong": 7,
+    "precision": 0.9806,
+    "recall": 0.9098
+   },
+   "high_or_medium": {
+    "tags": 234,
+    "merges": 366,
+    "correct": 359,
+    "ambiguous": 0,
+    "wrong": 7,
+    "precision": 0.9809,
+    "recall": 0.9253
+   }
+  }
+ },
+ "suggest": {
+  "bookmarks": 30,
+  "current": {
+   "tags": 103,
+   "reuse": 101,
+   "dup": 2,
+   "new": 0,
+   "on_topic": 49,
+   "judged": 103,
+   "reuse_rate": 0.9806,
+   "duplicate_rate": 0.0194,
+   "new_tag_rate": 0.0,
+   "on_topic_rate": 0.4757
+  },
+  "proposed": {
+   "tags": 77,
+   "reuse": 77,
+   "dup": 0,
+   "new": 0,
+   "on_topic": 43,
+   "judged": 77,
+   "reuse_rate": 1.0,
+   "duplicate_rate": 0.0,
+   "new_tag_rate": 0.0,
+   "on_topic_rate": 0.5584
+  }
+ },
+ "seconds": 215.4,
+ "usd_total": 0.059049,
+ "worst_case_usd_of_requests_built": 0.1745,
+ "tokens_by_step": {
+  "consolidate": {
+   "calls": 1,
+   "input_tokens": 6340,
+   "output_tokens": 3111,
+   "usd": 0.005001
+  },
+  "pairs": {
+   "calls": 8,
+   "input_tokens": 12941,
+   "output_tokens": 6418,
+   "usd": 0.010289
+  },
+  "suggest_current": {
+   "calls": 30,
+   "input_tokens": 91173,
+   "output_tokens": 3847,
+   "usd": 0.02285
+  },
+  "suggest_proposed": {
+   "calls": 30,
+   "input_tokens": 83733,
+   "output_tokens": 3467,
+   "usd": 0.020906
+  }
+ },
+ "stopped": null
+}
