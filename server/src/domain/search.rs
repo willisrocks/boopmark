@@ -245,9 +245,11 @@ fn websearch_tokens(text: &str) -> Vec<WebsearchToken> {
             i = end + 1;
             continue;
         }
+        // A quote ends a word and starts a phrase, as in Postgres
+        // (`coffee"cold brew"` is `'coffe' & 'cold' <-> 'brew'`).
         let end = chars[body..]
             .iter()
-            .position(|c| c.is_whitespace())
+            .position(|c| c.is_whitespace() || *c == '"')
             .map_or(chars.len(), |p| body + p);
         let word: String = chars[body..end].iter().collect();
         if !signs.is_empty() {
@@ -378,6 +380,19 @@ mod tests {
         assert_eq!(websearch_constraints("plain words"), None);
         assert_eq!(websearch_constraints("dangling - \"\""), None);
         assert_eq!(websearch_constraints("coffee -"), None);
+        // Glued quotes still make a phrase, as Postgres reads them.
+        assert_eq!(
+            websearch_constraints("coffee\"cold brew\"").as_deref(),
+            Some("\"cold brew\"")
+        );
+        assert_eq!(
+            websearch_constraints("coffee -\"cold brew\"tea").as_deref(),
+            Some("-\"cold brew\"")
+        );
+        assert_eq!(
+            semantic_query_text("coffee\"cold brew\""),
+            "coffee cold brew"
+        );
     }
 
     /// Postgres reads a spaced minus as an exclusion (`coffee - tea` is

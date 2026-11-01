@@ -458,10 +458,18 @@ pub struct FastembedEmbedder {
     model_id: String,
     dims: usize,
     query_prefix: &'static str,
+    /// Query embeds running at once, timed-out ones included: a blocking
+    /// thread cannot be cancelled, so without a cap a busy model (a
+    /// backfill) would let abandoned queries pile up in the blocking pool.
+    query_slots: Arc<tokio::sync::Semaphore>,
 }
 
 #[cfg(feature = "local-embeddings")]
 impl FastembedEmbedder {
+    /// Searches that embed their query at the same time; more fall back to
+    /// the lexical legs at once.
+    const QUERY_SLOTS: usize = 4;
+
     /// Inputs embedded per lock. A query waits for at most one such batch of
     /// a running document job (about 2 s on a shared vCPU), not the whole job.
     const BATCH_SIZE: usize = 16;
@@ -508,6 +516,7 @@ impl FastembedEmbedder {
             model_id: format!("fastembed:{model_code}@{}", info.dim),
             dims: info.dim,
             query_prefix,
+            query_slots: Arc::new(tokio::sync::Semaphore::new(Self::QUERY_SLOTS)),
         })
     }
 }
@@ -532,12 +541,22 @@ impl Embedder for FastembedEmbedder {
             EmbedKind::Query => self.query_prefix,
             EmbedKind::Document => "",
         };
+        let query_slots = self.query_slots.clone();
         Box::pin(async move {
             reject_empty(&inputs)?;
+            // The permit moves into the blocking closure, so a timed-out query
+            // keeps its slot until its thread really ends.
+            let permit = match kind {
+                EmbedKind::Query => Some(query_slots.try_acquire_owned().map_err(|_| {
+                    DomainError::Internal("fastembed is busy with other queries".into())
+                })?),
+                EmbedKind::Document => None,
+            };
             let inputs: Vec<String> = inputs.into_iter().map(|t| format!("{prefix}{t}")).collect();
             // The lock is taken per batch, so a search query waits for one
             // batch of a long document job at most, not the whole job.
             let job = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let mut vectors = Vec::with_capacity(inputs.len());
                 for chunk in inputs.chunks(Self::BATCH_SIZE) {
                     let embedded = model

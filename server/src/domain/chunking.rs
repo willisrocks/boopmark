@@ -20,6 +20,13 @@ pub const MAX_CHUNK_CHARS: usize = 1600;
 /// Shorter article text is not chunked; the bookmark gets the metadata chunk
 /// instead. Migration 018's sync trigger repeats this number.
 pub const MIN_CHUNKED_TEXT_CHARS: usize = 300;
+/// The header is cut to these many characters, so an embedding input stays
+/// at most about 2,400 characters: even at two tokens a character (some
+/// scripts), that is far below OpenAI's 8,192 tokens per input, and a huge
+/// saved description cannot get the whole bookmark refused (HTTP 400 is
+/// final, and would leave it with no vectors).
+pub const MAX_HEADER_TITLE_CHARS: usize = 200;
+pub const MAX_HEADER_DESCRIPTION_CHARS: usize = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
@@ -186,19 +193,25 @@ pub fn chunk_article(title: Option<&str>, description: Option<&str>, text: &str)
         };
     }
 
-    let title = title.map(str::trim).filter(|t| !t.is_empty());
-    let description = description.map(str::trim).filter(|d| !d.is_empty());
+    let title = title
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| truncate_chars(t, MAX_HEADER_TITLE_CHARS));
+    let description = description
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(|d| truncate_chars(d, MAX_HEADER_DESCRIPTION_CHARS));
     passages
         .into_iter()
         .enumerate()
         .map(|(i, text)| {
             let mut input = String::new();
-            if let Some(title) = title {
+            if let Some(title) = &title {
                 input.push_str(title);
                 input.push('\n');
             }
             if i == 0
-                && let Some(description) = description
+                && let Some(description) = &description
             {
                 input.push_str(description);
                 input.push('\n');
@@ -272,6 +285,27 @@ mod tests {
 
         let bare = chunk_article(None, Some("  "), "just text");
         assert_eq!(bare[0].input, "just text");
+    }
+
+    #[test]
+    fn a_huge_title_or_description_cannot_blow_up_the_input() {
+        let title = "t".repeat(10_000);
+        let description = "d ".repeat(50_000);
+        let chunks = chunk_article(Some(&title), Some(&description), &words(0..400));
+        let cap = MAX_HEADER_TITLE_CHARS + MAX_HEADER_DESCRIPTION_CHARS + MAX_CHUNK_CHARS + 2;
+        assert!(chunks.iter().all(|c| c.input.chars().count() <= cap));
+        assert!(
+            chunks[0]
+                .input
+                .starts_with(&"t".repeat(MAX_HEADER_TITLE_CHARS))
+        );
+        assert!(
+            !chunks[0]
+                .input
+                .contains(&"t".repeat(MAX_HEADER_TITLE_CHARS + 1))
+        );
+        // The stored passage is unaffected.
+        assert!(chunks[0].text.starts_with("w0 "));
     }
 
     #[test]

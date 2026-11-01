@@ -69,6 +69,18 @@ impl EmbeddingRepository for PostgresPool {
         chunks: &[EmbeddedChunk],
     ) -> Result<bool, DomainError> {
         let mut tx = self.pool.begin().await.map_err(db_error)?;
+        // Lock in the order a delete does (bookmark, then its contents and
+        // chunks), so a concurrent delete waits instead of deadlocking: the
+        // chunk inserts below would otherwise take this key lock last. A
+        // deleted bookmark is simply gone.
+        let exists = sqlx::query("SELECT 1 FROM bookmarks WHERE id = $1 FOR KEY SHARE")
+            .bind(job.bookmark_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_error)?;
+        if exists.is_none() {
+            return Ok(false);
+        }
         // Locks the row: an edit's trigger waits for this commit and then
         // queues the bookmark again.
         let marked = sqlx::query(
@@ -165,7 +177,9 @@ impl SearchIndexRepository for PostgresPool {
                         count(*) FILTER (WHERE status = 'fetched'),
                         count(*) FILTER (WHERE status = 'pending'),
                         count(*) FILTER (WHERE status IN ('failed', 'skipped')),
-                        count(*) FILTER (WHERE embedded_model = $2)
+                        -- A final embedding failure is done for the model but has
+                        -- no vectors (its error stays set until a success).
+                        count(*) FILTER (WHERE embedded_model = $2 AND embed_error IS NULL)
                  FROM bookmark_contents WHERE user_id = $1",
             )
             .bind(user_id)
@@ -583,8 +597,28 @@ mod embedding_tests {
             "{plan:?}"
         );
 
-        // Deleting a bookmark deletes its chunks.
+        // Deleting a bookmark deletes its chunks, and a result for it that
+        // arrives later is dropped.
+        sqlx::query("UPDATE bookmark_contents SET embedded_model = NULL WHERE bookmark_id = $1")
+            .bind(kitchen.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = claim_one(&pool, &repo, &embedder.model_id, kitchen.id)
+            .await
+            .unwrap();
         repo.delete(kitchen.id, alice).await.unwrap();
+        assert!(chunks_of(&pool, kitchen.id).await.is_empty());
+        let late = [EmbeddedChunk {
+            text: "late".into(),
+            embedding: embedder.vector("late"),
+        }];
+        assert!(
+            !repo
+                .store_chunks(&job, &embedder.model_id, &late)
+                .await
+                .unwrap()
+        );
         assert!(chunks_of(&pool, kitchen.id).await.is_empty());
     }
 
@@ -877,6 +911,20 @@ mod embedding_tests {
                 .unwrap()
         );
         embed_all(&pool, &repo, &embedder, &[owner]).await;
+        // A final embedding failure is done for the model but has no vectors.
+        sqlx::query("UPDATE bookmark_contents SET embedded_model = NULL WHERE bookmark_id = $1")
+            .bind(pdf.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job = claim_one(&pool, &repo, &embedder.model_id, pdf.id)
+            .await
+            .unwrap();
+        assert!(
+            repo.record_embed_failure(&job, &embedder.model_id, "HTTP 400", None)
+                .await
+                .unwrap()
+        );
 
         let status = repo
             .index_status(owner, Some(&embedder.model_id))
@@ -891,7 +939,7 @@ mod embedding_tests {
             ),
             (5, 1, 1, 3)
         );
-        assert_eq!(status.embedded, Some(4), "every non-pending row");
+        assert_eq!(status.embedded, Some(3), "non-pending rows with vectors");
         assert_eq!(
             status.failing_domains,
             vec![
