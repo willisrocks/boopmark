@@ -89,8 +89,9 @@ jobs:
       - name: Test search and ingest DB
         run: >-
           cargo test -p boopmark-server
-          adapters::postgres::search_repo::search_tests
           -- --ignored
+          adapters::postgres::search_repo::search_tests
+          adapters::postgres::embedding_repo::embedding_tests
       - name: Test tag consolidation DB
         run: >-
           cargo test -p boopmark-server

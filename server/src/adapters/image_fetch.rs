@@ -67,6 +67,13 @@ impl GuardedImageFetcher {
                 }
             )));
         }
+        // An SVG is a document that can carry script. Served from our own
+        // origin (local storage), it would run as boopmark when opened.
+        if content_type.starts_with("image/svg") {
+            return Err(DomainError::InvalidInput(format!(
+                "SVG images are not stored: {content_type}"
+            )));
+        }
         let bytes = read_capped(resp, MAX_IMAGE_BYTES)
             .await
             .map_err(|e| match e {
@@ -161,6 +168,15 @@ mod tests {
                 get(|| async { ([(header::CONTENT_TYPE, "text/html")], "<html></html>") }),
             )
             .route(
+                "/logo.svg",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+                        r#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#,
+                    )
+                }),
+            )
+            .route(
                 "/huge.jpg",
                 get(|| async {
                     (
@@ -189,6 +205,10 @@ mod tests {
         assert!(matches!(
             fetcher.fetch(&format!("{base}/huge.jpg")).await,
             Err(DomainError::InvalidInput(msg)) if msg.contains("larger than 10 MB")
+        ));
+        assert!(matches!(
+            fetcher.fetch(&format!("{base}/logo.svg")).await,
+            Err(DomainError::InvalidInput(msg)) if msg.contains("SVG images are not stored")
         ));
         assert!(fetcher.is_reachable(&format!("{base}/cat.png")).await);
         assert!(!fetcher.is_reachable(&format!("{base}/missing.png")).await);

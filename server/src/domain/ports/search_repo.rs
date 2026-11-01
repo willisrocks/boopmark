@@ -1,5 +1,5 @@
 use crate::domain::error::DomainError;
-use crate::domain::search::{IngestFailure, IngestJob, SearchHit, SearchQuery};
+use crate::domain::search::{IngestFailure, IngestJob, SearchHit, SearchIndexStatus, SearchQuery};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -39,4 +39,28 @@ pub trait SearchRepository: Send + Sync {
         job: &IngestJob,
         failure: &IngestFailure,
     ) -> Result<bool, DomainError>;
+}
+
+/// The user-facing state of the search index (Settings → Search index).
+#[trait_variant::make(Send)]
+pub trait SearchIndexRepository: Send + Sync {
+    /// Counts of the user's bookmarks by ingest state, and how many are
+    /// embedded by `model_id` (when embeddings are on).
+    async fn index_status(
+        &self,
+        user_id: Uuid,
+        model_id: Option<&str>,
+    ) -> Result<SearchIndexStatus, DomainError>;
+
+    /// Queue every failed or skipped fetch of the user again. Returns how
+    /// many were queued.
+    async fn retry_failed_fetches(&self, user_id: Uuid) -> Result<u64, DomainError>;
+
+    /// Queue one of the user's bookmarks for a new fetch, whatever its
+    /// state. Returns false when the user has no such bookmark.
+    async fn refetch(&self, user_id: Uuid, bookmark_id: Uuid) -> Result<bool, DomainError>;
+
+    /// `(name, version)` of the installed search extensions (`pg_trgm`,
+    /// `vector`), for the owner's deploy check.
+    async fn extension_versions(&self) -> Result<Vec<(String, String)>, DomainError>;
 }

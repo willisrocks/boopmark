@@ -2,6 +2,7 @@ pub mod api_key_repo;
 pub mod article_fetcher;
 pub mod bookmark_repo;
 pub mod embedder;
+pub mod embedding_repo;
 pub mod image_fetcher;
 pub mod image_generator;
 pub mod invite_repo;

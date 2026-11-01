@@ -55,6 +55,8 @@ struct BookmarkView {
     created_at_display: String,
     /// Why a search matched, with the matched terms highlighted.
     snippet: Option<Vec<SnippetSegment>>,
+    /// Found by meaning only (the vector leg), with no keyword match.
+    semantic: bool,
 }
 
 impl From<Bookmark> for BookmarkView {
@@ -69,6 +71,7 @@ impl From<Bookmark> for BookmarkView {
             tags: b.tags,
             created_at_display: b.created_at.format("%b %d, %Y").to_string(),
             snippet: None,
+            semantic: false,
         }
     }
 }
@@ -77,6 +80,7 @@ impl From<SearchHit> for BookmarkView {
     fn from(hit: SearchHit) -> Self {
         Self {
             snippet: hit.snippet.map(|s| s.segments),
+            semantic: hit.semantic,
             ..hit.bookmark.into()
         }
     }
@@ -778,6 +782,7 @@ mod tests {
             snippet: crate::domain::search::Snippet::from_marked(
                 "tasks <img src=x onerror=alert(1)> hold a \u{2}mutex\u{3} guard",
             ),
+            semantic: false,
         };
         let body = render_list(vec![hit.into()], true, false);
         assert!(body.contains("data-testid=\"bookmark-card-snippet\""));
@@ -786,6 +791,23 @@ mod tests {
         assert!(!body.contains("<img src=x"));
         assert!(body.contains("<option value=\"relevance\" selected>Relevance</option>"));
         assert!(!body.contains("search-cap-notice"));
+    }
+
+    #[test]
+    fn semantic_hits_show_a_plain_excerpt_and_a_label() {
+        let hit = SearchHit {
+            bookmark: bookmark("Ownership"),
+            snippet: crate::domain::search::Snippet::excerpt(
+                "The borrow checker <b>keeps</b> references valid.",
+            ),
+            semantic: true,
+        };
+        let body = render_list(vec![hit.into()], true, false);
+        assert!(body.contains("data-testid=\"bookmark-card-semantic\""));
+        assert!(body.contains("&lt;b&gt;keeps&lt;/b&gt;"));
+        assert!(!body.contains("<mark"));
+        let plain = render_list(vec![bookmark("Plain").into()], true, false);
+        assert!(!plain.contains("bookmark-card-semantic"));
     }
 
     #[test]

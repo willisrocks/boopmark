@@ -1,5 +1,6 @@
 use super::PostgresPool;
 use crate::domain::bookmark::{Bookmark, BookmarkSort};
+use crate::domain::chunking::MIN_CHUNKED_TEXT_CHARS;
 use crate::domain::error::DomainError;
 use crate::domain::ports::search_repo::SearchRepository;
 use crate::domain::search::{
@@ -9,10 +10,17 @@ use crate::domain::search::{
 use std::time::Duration;
 use uuid::Uuid;
 
+fn db_error(e: sqlx::Error) -> DomainError {
+    DomainError::Internal(e.to_string())
+}
+
 /// Each leg contributes its top `LEG_DEPTH` to the fusion, and RRF scores a
 /// rank `r` as `1 / (RRF_K + r)` (the measured configuration).
 const LEG_DEPTH: i64 = 50;
 const RRF_K: i64 = 60;
+/// The vector leg ranks bookmarks by their best chunk among this many nearest
+/// chunks (about 10 a bookmark, so enough for its top `LEG_DEPTH`).
+const NEAREST_CHUNKS: i64 = 200;
 /// A claim considers the next rows of at most this many users (those
 /// waiting longest) when it picks its jobs round-robin by user and host.
 const MAX_CLAIM_USERS: i64 = 100;
@@ -41,57 +49,81 @@ struct SearchRow {
     #[sqlx(flatten)]
     bookmark: Bookmark,
     snippet: Option<String>,
+    /// The bookmark's nearest article chunk, when the vector leg found it.
+    chunk_text: Option<String>,
+    semantic: bool,
+}
+
+/// What `search_sql` binds besides `$1` (user) and `$2` (query text).
+#[derive(Debug, Clone, Copy)]
+struct SearchShape {
+    has_tags: bool,
+    has_constraints: bool,
+    /// The query vector's size, when the vector leg runs.
+    vector_dims: Option<usize>,
+    sort: BookmarkSort,
 }
 
 /// Build the hybrid search statement. Each leg is one CTE that applies the
 /// user and tag scope itself, so that its index stays usable:
 ///
 /// - `lex_and` / `lex_or` / `lex`: weighted full text, the websearch (AND)
-///   query, falling back to the OR of the same terms when AND finds nothing;
+///   query. Without a vector leg it falls back to the OR of the same terms
+///   when AND finds nothing (the measured lexical-only setup); with one, it
+///   is AND only, as measured for the three legs.
 /// - `trg`: `pg_trgm` word similarity over title + description, which
 ///   catches prefixes and typos.
+/// - `nn` / `vec`: the nearest chunks built by the configured embedder
+///   (`model` *and* size must match, so a re-embed to another model of the
+///   same size never compares two vector spaces), ranked per bookmark by its
+///   best chunk. The size is inlined so the matching partial HNSW index is
+///   used.
 ///
 /// `fused` combines the legs with Reciprocal Rank Fusion and keeps the top
-/// `MAX_SEARCH_RESULTS`. A further leg (the vector leg) is one more CTE that
-/// returns `(bookmark_id, r)`, and one more arm in `legs`.
+/// `MAX_SEARCH_RESULTS`.
 ///
-/// Quoted phrases and `-exclusions` (`cq`) filter inside each lexical leg,
-/// so excluded bookmarks do not use up a leg's top 50, and again on the
-/// fused union, so no leg can bring back a bookmark the query excludes.
-fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> String {
-    // $1 user, $2 query text, then the optional tags and constraints, then
-    // limit and offset.
+/// Quoted phrases and `-exclusions` (`cq`) filter inside each leg, so
+/// excluded bookmarks do not use up a leg's top 50, and again on the fused
+/// union, so no leg can bring back a bookmark the query excludes.
+fn search_sql(shape: SearchShape) -> String {
+    // $1 user, $2 query text, then the optional tags, constraints, query
+    // vector and model, then limit and offset.
     let mut next = 3;
     let mut param = || {
         let p = format!("${next}");
         next += 1;
         p
     };
-    let (scope_join, scope_filter) = if has_tags {
-        let tags = param();
-        (
-            " JOIN bookmarks tb ON tb.id = c.bookmark_id".to_string(),
-            format!(" AND tb.tags && {tags}"),
-        )
-    } else {
-        (String::new(), String::new())
-    };
-    let (constraint_column, leg_constraint, fused_constraint) = if has_constraints {
-        let constraints = param();
-        (
-            format!(",\n                    websearch_to_tsquery('english', {constraints}) AS cq"),
-            " AND (numnode(q.cq) = 0 OR c.search @@ q.cq)",
-            " WHERE EXISTS (SELECT 1 FROM bookmark_contents fc CROSS JOIN q
-                     WHERE fc.bookmark_id = u.bookmark_id
-                       AND (numnode(q.cq) = 0 OR fc.search @@ q.cq))",
-        )
-    } else {
-        (String::new(), "", "")
-    };
+    let tags = shape.has_tags.then(&mut param);
+    let constraints = shape.has_constraints.then(&mut param);
+    let vector = shape.vector_dims.map(|dims| (dims, param(), param()));
     let limit = param();
     let offset = param();
 
-    let order = match sort {
+    let (scope_join, scope_filter, chunk_join, chunk_filter) = match &tags {
+        Some(tags) => (
+            " JOIN bookmarks tb ON tb.id = c.bookmark_id",
+            format!(" AND tb.tags && {tags}"),
+            " JOIN bookmarks tb ON tb.id = ch.bookmark_id",
+            format!(" AND tb.tags && {tags}"),
+        ),
+        None => ("", String::new(), "", String::new()),
+    };
+    let (constraint_column, leg_constraint, chunk_constraint, fused_constraint) = match &constraints
+    {
+        Some(constraints) => (
+            format!(",\n                    websearch_to_tsquery('english', {constraints}) AS cq"),
+            " AND (numnode(q.cq) = 0 OR c.search @@ q.cq)",
+            " AND (numnode(q.cq) = 0 OR EXISTS (SELECT 1 FROM bookmark_contents fc
+                     WHERE fc.bookmark_id = ch.bookmark_id AND fc.search @@ q.cq))",
+            " WHERE EXISTS (SELECT 1 FROM bookmark_contents fc CROSS JOIN q
+                     WHERE fc.bookmark_id = u.bookmark_id
+                       AND (numnode(q.cq) = 0 OR fc.search @@ q.cq))",
+        ),
+        None => (String::new(), "", "", ""),
+    };
+
+    let order = match shape.sort {
         BookmarkSort::Relevance => "f.score DESC, b.id",
         BookmarkSort::Newest => "b.created_at DESC, b.id",
         BookmarkSort::Oldest => "b.created_at ASC, b.id",
@@ -99,11 +131,52 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Stri
         BookmarkSort::Domain => "b.domain ASC NULLS LAST, f.score DESC, b.id",
     };
 
-    let legs = [
-        "SELECT bookmark_id, r, true AS lexical FROM lex",
-        "SELECT bookmark_id, r, false AS lexical FROM trg",
-    ]
-    .join(" UNION ALL ");
+    let mut legs = vec![
+        "SELECT bookmark_id, r, 'lex' AS leg FROM lex",
+        "SELECT bookmark_id, r, 'trg' AS leg FROM trg",
+    ];
+    // Without a vector leg, OR fills in for an AND that finds nothing.
+    let (lex_or_gate, vector_ctes, chunk_select, chunk_from) = match &vector {
+        Some((dims, query_vector, model)) => {
+            legs.push("SELECT bookmark_id, r, 'vec' AS leg FROM vec");
+            let distance = format!(
+                "ch.embedding::halfvec({dims}) <=> {query_vector}::real[]::halfvec({dims})"
+            );
+            (
+                "false",
+                format!(
+                    ",
+         nn AS (
+             SELECT ch.bookmark_id, ch.ord, {distance} AS dist
+             FROM bookmark_chunks ch CROSS JOIN q{chunk_join}
+             WHERE ch.user_id = $1 AND ch.model = {model}
+               AND vector_dims(ch.embedding) = {dims}{chunk_filter}{chunk_constraint}
+             ORDER BY {distance}
+             LIMIT {NEAREST_CHUNKS}
+         ),
+         vec AS (
+             SELECT bookmark_id, best_ord, row_number() OVER (ORDER BY dist, bookmark_id) AS r
+             FROM (
+                 SELECT bookmark_id, min(dist) AS dist,
+                        (array_agg(ord ORDER BY dist, ord))[1] AS best_ord
+                 FROM nn GROUP BY bookmark_id
+             ) v
+             ORDER BY dist, bookmark_id
+             LIMIT {LEG_DEPTH}
+         )"
+                ),
+                // Never the metadata chunk: it says nothing the card does not.
+                format!(
+                    "CASE WHEN c.status = 'fetched' AND c.text_chars >= {MIN_CHUNKED_TEXT_CHARS}
+                          THEN bc.text END"
+                ),
+                " LEFT JOIN vec v ON v.bookmark_id = p.bookmark_id
+         LEFT JOIN bookmark_chunks bc ON bc.bookmark_id = v.bookmark_id AND bc.ord = v.best_ord",
+            )
+        }
+        None => ("true", String::new(), "NULL::text".to_string(), ""),
+    };
+    let legs = legs.join(" UNION ALL ");
 
     format!(
         "WITH q AS (
@@ -121,7 +194,7 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Stri
          lex_or AS (
              SELECT c.bookmark_id, ts_rank(c.search, q.or_q, 1) AS rank
              FROM bookmark_contents c CROSS JOIN q{scope_join}
-             WHERE NOT EXISTS (SELECT 1 FROM lex_and)
+             WHERE {lex_or_gate} AND NOT EXISTS (SELECT 1 FROM lex_and)
                AND c.user_id = $1 AND c.search @@ q.or_q{scope_filter}{leg_constraint}
              ORDER BY rank DESC, c.bookmark_id
              LIMIT {LEG_DEPTH}
@@ -143,17 +216,17 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Stri
                  ORDER BY sim DESC, c.bookmark_id
                  LIMIT {LEG_DEPTH}
              ) t
-         ),
+         ){vector_ctes},
          fused AS (
              SELECT u.bookmark_id, sum(1.0 / ({RRF_K} + u.r)) AS score,
-                    bool_or(u.lexical) AS lexical
+                    bool_or(u.leg = 'lex') AS lexical, bool_and(u.leg = 'vec') AS semantic
              FROM ({legs}) u{fused_constraint}
              GROUP BY u.bookmark_id
              ORDER BY score DESC, u.bookmark_id
              LIMIT {MAX_SEARCH_RESULTS}
          ),
          page AS (
-             SELECT f.bookmark_id, f.lexical, row_number() OVER (ORDER BY {order}) AS pos
+             SELECT f.bookmark_id, f.lexical, f.semantic, row_number() OVER (ORDER BY {order}) AS pos
              FROM fused f JOIN bookmarks b ON b.id = f.bookmark_id
              ORDER BY pos
              LIMIT {limit} OFFSET {offset}
@@ -163,10 +236,12 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Stri
                 CASE WHEN p.lexical AND c.status = 'fetched' AND c.text IS NOT NULL
                      THEN ts_headline('english', left(c.text, {HEADLINE_SOURCE_CHARS}),
                                       (SELECT q FROM lex_q), {HEADLINE_OPTIONS})
-                END AS snippet
+                END AS snippet,
+                {chunk_select} AS chunk_text,
+                p.semantic
          FROM page p
          JOIN bookmarks b ON b.id = p.bookmark_id
-         JOIN bookmark_contents c ON c.bookmark_id = p.bookmark_id
+         JOIN bookmark_contents c ON c.bookmark_id = p.bookmark_id{chunk_from}
          ORDER BY p.pos"
     )
 }
@@ -178,7 +253,12 @@ impl SearchRepository for PostgresPool {
         query: &SearchQuery,
     ) -> Result<Vec<SearchHit>, DomainError> {
         let constraints = websearch_constraints(&query.text);
-        let sql = search_sql(query.tags.is_some(), constraints.is_some(), query.sort);
+        let sql = search_sql(SearchShape {
+            has_tags: query.tags.is_some(),
+            has_constraints: constraints.is_some(),
+            vector_dims: query.vector.as_ref().map(|v| v.values.len()),
+            sort: query.sort,
+        });
         let mut q = sqlx::query_as::<_, SearchRow>(&sql)
             .bind(user_id)
             .bind(&query.text);
@@ -188,17 +268,38 @@ impl SearchRepository for PostgresPool {
         if constraints.is_some() {
             q = q.bind(&constraints);
         }
-        let rows = q
-            .bind(query.limit)
-            .bind(query.offset)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DomainError::Internal(e.to_string()))?;
+        if let Some(vector) = &query.vector {
+            q = q.bind(&vector.values).bind(&vector.model_id);
+        }
+        let q = q.bind(query.limit).bind(query.offset);
+        let rows = if query.vector.is_some() {
+            let mut tx = self.pool.begin().await.map_err(db_error)?;
+            // pgvector >= 0.8: keep scanning the HNSW graph until the user
+            // filter has enough rows, so other users' chunks cannot starve it.
+            sqlx::query("SET LOCAL hnsw.iterative_scan = relaxed_order")
+                .execute(&mut *tx)
+                .await
+                .map_err(db_error)?;
+            sqlx::query("SET LOCAL hnsw.ef_search = 100")
+                .execute(&mut *tx)
+                .await
+                .map_err(db_error)?;
+            let rows = q.fetch_all(&mut *tx).await.map_err(db_error)?;
+            tx.commit().await.map_err(db_error)?;
+            rows
+        } else {
+            q.fetch_all(&self.pool).await.map_err(db_error)?
+        };
         Ok(rows
             .into_iter()
             .map(|row| SearchHit {
                 bookmark: row.bookmark,
-                snippet: row.snippet.as_deref().and_then(Snippet::from_marked),
+                snippet: row
+                    .snippet
+                    .as_deref()
+                    .and_then(Snippet::from_marked)
+                    .or_else(|| row.chunk_text.as_deref().and_then(Snippet::excerpt)),
+                semantic: row.semantic,
             })
             .collect())
     }
@@ -214,9 +315,10 @@ impl SearchRepository for PostgresPool {
         // longest ago first (`bookmark_ingest_turns`), so fairness holds
         // across claims, even when each claim takes a single job. `due` locks
         // each waiting user's share of the batch, so however big one import
-        // is, every other waiting user is a candidate. `picked` takes one row
-        // per user in rank order, then a second, and so on; within a user,
-        // rows rotate through hosts. `turns` records the users served. Every
+        // is, every other waiting user is a candidate; within a user, the share
+        // is taken by host turn, so an old single-host backlog does not hold
+        // back that user's other hosts. `picked` takes one row per user in
+        // rank order, then a second, and so on. `turns` records the users served. Every
         // claim gets a fresh token, so a worker whose lease ran out can no
         // longer write.
         let sql = format!(
@@ -240,32 +342,37 @@ impl SearchRepository for PostgresPool {
              ),
              due AS (
                  SELECT w.user_rank, d.* FROM waiting w CROSS JOIN LATERAL (
-                     SELECT c.bookmark_id, c.user_id, c.next_attempt_at,
-                            lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)')) AS host
-                     FROM bookmark_contents c JOIN bookmarks b ON b.id = c.bookmark_id
-                     WHERE c.user_id = w.user_id AND c.status = 'pending'
-                       AND c.next_attempt_at <= now() AND c.attempts < $3
-                     ORDER BY c.next_attempt_at, c.bookmark_id
+                     SELECT c.bookmark_id, c.user_id, c.next_attempt_at, r.host_turn
+                     FROM (
+                         -- Every due row of this user, numbered within its
+                         -- host, so the share below rotates through hosts
+                         -- however old a single-host backlog is.
+                         SELECT q.bookmark_id,
+                                row_number() OVER (
+                                    PARTITION BY lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)'))
+                                    ORDER BY q.next_attempt_at, q.bookmark_id) AS host_turn
+                         FROM bookmark_contents q JOIN bookmarks b ON b.id = q.bookmark_id
+                         WHERE q.user_id = w.user_id AND q.status = 'pending'
+                           AND q.next_attempt_at <= now() AND q.attempts < $3
+                     ) r
+                     JOIN bookmark_contents c ON c.bookmark_id = r.bookmark_id
+                     -- Rechecked on the locked row version.
+                     WHERE c.status = 'pending' AND c.next_attempt_at <= now() AND c.attempts < $3
+                     ORDER BY r.host_turn, c.next_attempt_at, c.bookmark_id
                      -- Each user's share of the batch.
                      LIMIT ceil($1::numeric / (SELECT count(*) FROM waiting))::bigint
                      FOR UPDATE OF c SKIP LOCKED
                  ) d
              ),
-             -- Two levels, because a user's turn order depends on its host
-             -- turns, and window functions cannot sit next to FOR UPDATE in `due`.
+             -- A second level, because window functions cannot sit next to
+             -- FOR UPDATE in `due`.
              picked AS (
                  SELECT bookmark_id FROM (
                      SELECT bookmark_id, user_rank,
                             row_number() OVER (PARTITION BY user_id
                                                ORDER BY host_turn, next_attempt_at, bookmark_id)
                                 AS user_turn
-                     FROM (
-                         SELECT due.*,
-                                row_number() OVER (PARTITION BY user_id, host
-                                                   ORDER BY next_attempt_at, bookmark_id)
-                                    AS host_turn
-                         FROM due
-                     ) h
+                     FROM due
                  ) u
                  ORDER BY user_turn, user_rank
                  LIMIT $1
@@ -308,6 +415,10 @@ impl SearchRepository for PostgresPool {
              UPDATE bookmark_contents c
              SET status = 'fetched', error = NULL, claim_token = NULL,
                  text = $4, text_chars = char_length($4), content_hash = $5,
+                 -- New text needs new chunks; a refetch of the same text keeps them.
+                 embedded_model = CASE WHEN c.content_hash IS DISTINCT FROM $5
+                                       THEN NULL ELSE c.embedded_model END,
+                 embed_attempts = 0, embed_next_attempt_at = now(),
                  search = bookmark_search_document(b.title, b.description, b.url, b.tags, $4),
                  fetched_at = now(), updated_at = now()
              FROM b
@@ -351,7 +462,7 @@ impl SearchRepository for PostgresPool {
 }
 
 #[cfg(test)]
-mod search_tests {
+pub(super) mod search_tests {
     use super::*;
     use crate::domain::bookmark::CreateBookmark;
     use crate::domain::ports::bookmark_repo::BookmarkRepository;
@@ -360,7 +471,7 @@ mod search_tests {
     use sqlx::postgres::PgPoolOptions;
     use std::collections::HashMap;
 
-    async fn pool() -> PgPool {
+    pub(crate) async fn pool() -> PgPool {
         let database_url = std::env::var("DATABASE_URL")
             .expect("DATABASE_URL is required for the ignored Postgres search test");
         PgPoolOptions::new()
@@ -370,7 +481,7 @@ mod search_tests {
             .expect("DATABASE_URL must point at a migrated database")
     }
 
-    async fn user(pool: &PgPool) -> Uuid {
+    pub(crate) async fn user(pool: &PgPool) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO users (id, email, name) VALUES ($1, $2, 'search test')")
             .bind(id)
@@ -381,7 +492,7 @@ mod search_tests {
         id
     }
 
-    async fn bookmark(
+    pub(crate) async fn bookmark(
         repo: &PostgresPool,
         user_id: Uuid,
         url: &str,
@@ -405,8 +516,8 @@ mod search_tests {
     }
 
     /// The tests claim from the shared queue, so they must not interleave.
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    const LEASE: Duration = Duration::from_secs(600);
+    pub(crate) static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(crate) const LEASE: Duration = Duration::from_secs(600);
 
     /// Release claims that belong to rows outside these tests, as if they
     /// had never been claimed.
@@ -442,7 +553,7 @@ mod search_tests {
     /// Move these users' pending rows to the head of the queue (ahead of
     /// anything else in a shared database), claim them, and release whatever
     /// else the claim took.
-    async fn claim_mine(
+    pub(crate) async fn claim_mine(
         pool: &PgPool,
         repo: &PostgresPool,
         users: &[Uuid],
@@ -463,7 +574,7 @@ mod search_tests {
             .collect()
     }
 
-    async fn store(repo: &PostgresPool, job: &IngestJob, text: &str) {
+    pub(crate) async fn store(repo: &PostgresPool, job: &IngestJob, text: &str) {
         assert!(repo.store_article(job, text, "hash").await.unwrap());
     }
 
@@ -486,13 +597,14 @@ mod search_tests {
                 sort,
                 limit: MAX_SEARCH_RESULTS,
                 offset: 0,
+                vector: None,
             },
         )
         .await
         .expect("search")
     }
 
-    fn ids(hits: &[SearchHit]) -> Vec<Uuid> {
+    pub(crate) fn ids(hits: &[SearchHit]) -> Vec<Uuid> {
         hits.iter().map(|h| h.bookmark.id).collect()
     }
 
@@ -704,6 +816,7 @@ mod search_tests {
                     sort: BookmarkSort::Relevance,
                     limit: 1,
                     offset: 1,
+                    vector: None,
                 },
             )
             .await
@@ -773,6 +886,77 @@ mod search_tests {
             .await
             .unwrap();
         pool.close().await;
+    }
+
+    /// Within one user, the claim's share rotates through hosts before it
+    /// looks at age: an old single-host backlog does not hold back the same
+    /// user's link to another host.
+    #[tokio::test]
+    #[ignore = "requires a migrated Postgres database (DATABASE_URL)"]
+    async fn a_users_share_of_a_claim_rotates_through_hosts() {
+        let _serial = SERIAL.lock().await;
+        let pool = pool().await;
+        let repo = PostgresPool::new(pool.clone());
+        let owner = user(&pool).await;
+        let mut backlog = Vec::new();
+        for i in 0..20 {
+            let b = bookmark(
+                &repo,
+                owner,
+                &format!("https://one-host.example.net/page-{i}"),
+                "backlog",
+                None,
+                &[],
+            )
+            .await;
+            backlog.push(b.id);
+        }
+        let other_host = bookmark(
+            &repo,
+            owner,
+            "https://another-host.example.org/new",
+            "new",
+            None,
+            &[],
+        )
+        .await;
+        sqlx::query(
+            "UPDATE bookmark_contents SET next_attempt_at = '1970-01-01' WHERE bookmark_id = ANY($1)",
+        )
+        .bind(&backlog)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE bookmark_contents SET next_attempt_at = '1970-01-02' WHERE bookmark_id = $1",
+        )
+        .bind(other_host.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Two rows for every waiting user (other tests' rows may wait too),
+        // so this user's share is exactly two.
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(DISTINCT user_id) FROM bookmark_contents
+             WHERE status = 'pending' AND next_attempt_at <= now() AND attempts < $1",
+        )
+        .bind(MAX_INGEST_ATTEMPTS)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let jobs = repo.claim_ingest_batch(2 * waiting, LEASE).await.unwrap();
+        let mut mine = backlog.clone();
+        mine.push(other_host.id);
+        release_others(&pool, &jobs, &mine).await;
+        let claimed: Vec<Uuid> = jobs
+            .iter()
+            .map(|j| j.bookmark_id)
+            .filter(|id| mine.contains(id))
+            .collect();
+        assert_eq!(claimed.len(), 2);
+        assert!(claimed.contains(&other_host.id), "{claimed:?}");
+        assert!(claimed.iter().any(|id| backlog.contains(id)));
+        reset_claims(&pool, &[owner]).await;
     }
 
     #[tokio::test]
