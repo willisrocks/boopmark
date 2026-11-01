@@ -1,28 +1,95 @@
 # search-eval
 
 Prototype and benchmark for `docs/superpowers/specs/2026-10-31-hybrid-article-search-design.md`.
-It compares lexical, vector and hybrid retrieval on 24 hand-labelled queries.
+It compares today's search, Postgres full-text variants, pg_trgm, ParadeDB
+BM25, vector search and their RRF hybrids on 48 hand-labelled queries.
 
-Everything runs locally. The only paid step is the optional hosted-model run in
-step 6, and it logs what it spends.
+There are two ways to run it:
+
+- **A. The hosted-model comparison** (`hosted_eval.py`). It needs no
+  Postgres, Docker or Rust, only `uv` and `OPENAI_API_KEY`.
+- **B. The full Postgres reproduction** (`eval.py`). It produces every
+  lexical, trigram and BM25 number and the lexical rankings that A reuses.
 
 ## Files
 
 | file | purpose |
 |---|---|
-| `fetch_corpus.py` | Builds the corpus: Wikipedia pages from 20 categories, plus the Hacker News links extracted with trafilatura. It also writes `ingest_log.jsonl` with the per-URL failure reasons. |
-| `sql/prototype_schema.sql` | The proposed `bookmark_contents` and `bookmark_chunks` tables. This is not a real migration, so CI is unaffected. |
-| `chunking.py` | Splits articles into chunks of about 200 words with 30 words of overlap, adds a title header, and keeps at most 64 chunks. |
-| `seed.py` | Loads the corpus into the real `bookmarks` table for one user, fills the prototype tables, and embeds the chunks with bge-small. |
-| `embed_variant.py` | Embeds the corpus with another model or mode (`chunks` or `metadata`) into `eval_chunks`. |
-| `embedders.py` | The embedding providers: local fastembed, OpenAI and Voyage. The hosted ones log their spend to `spend.jsonl`. |
-| `queries.jsonl` | 24 labelled queries: 7 keyword, 9 natural-language and 8 "deep", meaning the answer is only in the article body. The labels are completed by judging the pool of every method's top 10. |
-| `eval.py` | Runs every method as one SQL statement, then prints recall@10, MRR@10, nDCG@10, the zero-result rate and p50 latency. |
+| `fetch_corpus.py` | Builds the corpus: 342 Wikipedia pages from 20 categories, plus Hacker News links extracted with trafilatura. `--from-manifest` refetches exactly the pinned documents. |
+| `corpus_manifest.jsonl` | Pins the corpus: id, URL, title, description, and the sha256 of each text. The text itself is not committed. |
+| `unscraped.jsonl` | The 72 real HN links whose fetch failed (403, JS-only, PDF, ...). They become metadata-only bookmarks. |
+| `queries.jsonl` | 48 labelled queries: keyword 7, natural 9, deep 8, typo 8, prefix 6, unscraped 10. Labels were completed by judging the pooled top 10 of every method. |
+| `common.py` | Ids, scenarios, RRF and metrics, shared by both harnesses. |
+| `chunking.py` | Splits articles into windows of about 200 words with 30 words of overlap, adds a title header, and keeps at most 64 chunks. |
+| `sql/prototype_schema.sql` | The proposed `bookmark_contents` and `bookmark_chunks` tables. This is not a migration. |
+| `seed.py` | Loads the corpus and the failed links into the real `bookmarks` table, fills the prototype tables, and embeds the chunks with bge-small. |
+| `embed_variant.py` | Embeds the corpus with another model or mode (`chunks`, or `metadata`, which is the fallback) into `eval_chunks`. |
+| `embedders.py` | Embedding providers used by B: fastembed, OpenAI and Voyage. |
+| `eval.py` | B: every leg as SQL in four index scenarios, the fusions, the fallback-gap table and latency. It writes `results/local.json` and `results/lexical_runs.json`. |
+| `hosted_eval.py` | A: embeds with hosted models and the local baseline, ranks with exact cosine in numpy, and fuses with `results/lexical_runs.json`. Spend guard included. |
+| `results/` | Committed results. `results/cache/` holds local embedding caches and is gitignored. |
 
-## Reproduce
+## A. Hosted-model comparison from a clean macOS clone
 
-1. **Start Postgres 16** with pgvector, and with pg_search if you want `--bm25`.
-   Docker is not required. With nix:
+You need `uv`: `brew install uv`, or
+`curl -LsSf https://astral.sh/uv/install.sh | sh`. `uv` fetches Python 3.12
+and every dependency itself. Postgres, Docker, nix and cargo are not needed.
+
+```bash
+git clone https://github.com/willisrocks/boopmark.git
+cd boopmark
+git checkout spec-hybrid-search
+
+# 1. Rebuild the pinned corpus. This is free: about 490 public pages, ~3 min.
+uv run --python 3.12 scripts/search-eval/fetch_corpus.py \
+    --out ~/search-eval-data --from-manifest scripts/search-eval/corpus_manifest.jsonl
+
+# 2. Run the comparison. The key goes in the environment only; this prompts for it without echoing.
+read -rs OPENAI_API_KEY && export OPENAI_API_KEY
+uv run --python 3.12 scripts/search-eval/hosted_eval.py \
+    --corpus ~/search-eval-data/corpus.jsonl \
+    --models openai:text-embedding-3-small,openai:text-embedding-3-large
+unset OPENAI_API_KEY
+
+# 3. Commit the result file (metrics and spend only, no keys, no text).
+git add scripts/search-eval/results/hosted-*.json
+git commit -m "search-eval: hosted embedding results"
+git push
+```
+
+- **Expected cost.** About 1.36M input tokens per model.
+  `text-embedding-3-small` costs about $0.03 and `text-embedding-3-large`
+  about $0.18, so roughly $0.21 in total.
+- **Spend guard.**
+  - Before the first paid call, the script projects the spend with tiktoken
+    and aborts if it is over `--max-usd`, which defaults to 3.
+  - During the run, it keeps a tally from the API's reported usage. Once
+    the tally crosses the cap, it makes no further call; the last batch can
+    overshoot the cap by a cent or so.
+  - It prints only counts, metrics and HTTP status codes, never the key or a
+    request or response body.
+- **Time.** Step 1 takes about 3 minutes. Step 2 runs the local bge-small
+  baseline on the same text first (about 5 minutes on an Apple-silicon Mac;
+  the model download is about 130 MB), then the hosted calls (a few minutes).
+- **Output.** `scripts/search-eval/results/hosted-<UTC date>.json` holds:
+  - nDCG/MRR/recall per model and dimension (1536 and 512 for small; 3072,
+    1024 and 512 for large), per scenario and per query type;
+  - the fallback-gap table;
+  - corpus coverage;
+  - query-embedding latency;
+  - spend, as `{model: {calls, tokens, usd}}`.
+- **Corpus drift.** Pages edited since 2026-10-31 are kept (counted as
+  `edited`). Pages that no longer load are dropped together with their
+  labels (`missing`). The local baseline runs on the same rebuilt text, so
+  the comparison stays like for like. On 2026-11-01 the rebuild got 489 of
+  490 pages, 4 of them edited, and the baseline reproduced the Postgres
+  numbers to within 0.002 nDCG.
+
+## B. Full reproduction with Postgres
+
+1. **Start Postgres 16** with pgvector and the contrib extensions
+   (`pg_trgm`, `unaccent`). Add pg_search only if you want `--bm25`. Docker
+   is not required. With nix:
 
    ```bash
    PG=$(nix build --no-link --print-out-paths --impure --expr \
@@ -34,49 +101,35 @@ step 6, and it logs what it spends.
    $PG/createdb -h 127.0.0.1 -p 55432 -U boopmark boopmark
    ```
 
-2. **Run the server once** so it applies migrations 001–014. Use
-   `DATABASE_URL=postgres://boopmark@127.0.0.1:55432/boopmark` and `PORT=4100`.
-   Then create the user `eval@example.com`. You can hash a password with
-   `cargo run -p boopmark-server --example hash_password`.
+   With Homebrew, `brew install postgresql@16 pgvector` works instead; skip
+   `--bm25` there.
 
-3. **Build the corpus.** This takes about 10 minutes and the result is not
-   committed.
+2. **Run the server once** to apply migrations 001–014: set
+   `DATABASE_URL=postgres://boopmark@127.0.0.1:55432/boopmark` and
+   `PORT=4100`. Then create the user `eval@example.com`; hash a password
+   with `cargo run -p boopmark-server --example hash_password`.
 
-   ```bash
-   uv run scripts/search-eval/fetch_corpus.py --out ~/search-eval-data
-   ```
+3. **Rebuild the corpus** with step A1.
 
-4. **Seed the database.** This embeds the 5k chunks with bge-small, which
-   takes about 9 minutes on 4 vCPUs.
+4. **Seed and embed.** This embeds the 5k chunks with bge-small (about 9
+   minutes on 4 vCPUs), then adds the metadata vectors for the fallback.
 
    ```bash
    cd scripts/search-eval
+   DB=postgres://boopmark@127.0.0.1:55432/boopmark
    uv run seed.py --db $DB --corpus ~/search-eval-data/corpus.jsonl --email eval@example.com
-   ```
-
-5. **Optional: add more embedding variants.**
-
-   ```bash
-   uv run embed_variant.py --db $DB --corpus ... --email eval@example.com \
+   uv run embed_variant.py --db $DB --corpus ~/search-eval-data/corpus.jsonl --email eval@example.com \
        --variant meta-bge --embedder fastembed:BAAI/bge-small-en-v1.5 --mode metadata
-   uv run embed_variant.py ... --variant minilm --embedder fastembed:sentence-transformers/all-MiniLM-L6-v2
    ```
 
-6. **Optional: run hosted models.** These calls are paid and need
-   `OPENAI_API_KEY` or `VOYAGE_API_KEY`. The corpus is about 1.32M tokens, so
-   `text-embedding-3-small` costs about $0.03 and `voyage-4-lite` about the
-   same.
-
-   ```bash
-   uv run embed_variant.py ... --variant oai-small --embedder openai:text-embedding-3-small
-   ```
-
-7. **Evaluate.**
+5. **Evaluate.**
 
    ```bash
    uv run eval.py --db $DB --email eval@example.com --bm25 \
-       --variants meta-bge=fastembed:BAAI/bge-small-en-v1.5,oai-small=openai:text-embedding-3-small
+       --json results/local.json --export-runs results/lexical_runs.json --pool pool.jsonl
    ```
 
-Add `--pool pool.jsonl` to write the union of every method's top 10. Judge the
-unlabelled hits in that file, then add the relevant ones to `queries.jsonl`.
+   It prints the method table, the fallback-gap table and latency. It also
+   checks that the Python RRF equals the production SQL from the spec; this
+   matched on 48 of 48 queries. To judge new hits, look at the unlabelled
+   results in `pool.jsonl` and add the relevant ones to `queries.jsonl`.

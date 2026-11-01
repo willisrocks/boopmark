@@ -1,31 +1,52 @@
 # Hybrid Full-Article Search — Design
 
 **Status:** Draft (exploration; prototype on branch `spec-hybrid-search`)
-**Date:** 2026-10-31
-**Prototype + harness:** `scripts/search-eval/` (corpus fetcher, seed, chunker, labelled queries, eval)
+**Date:** 2026-10-31, revised 2026-11-01 after review
+**Prototype + harness:** `scripts/search-eval/` (corpus manifest, seed, chunker, 48 labelled queries, Postgres eval, no-Postgres hosted eval) and `server/src/{domain/ports,adapters}/embedder.rs`
 
 ## Summary
 
 Search the **full article text** of every bookmark, not only its title,
-description and URL, with **hybrid retrieval**: a weighted Postgres full-text
-leg and a pgvector embedding leg over article chunks, fused with Reciprocal
-Rank Fusion (RRF) in one SQL statement. Article text is fetched and extracted
-by a background ingestion worker after the bookmark is saved, so saving stays
-as fast as today.
+description and URL, with **hybrid retrieval**. Three legs are fused with
+Reciprocal Rank Fusion (RRF):
 
-On a 490-article corpus (342 Wikipedia pages + 148 extracted Hacker News
-articles) with 24 hand-labelled queries, the recommended hybrid scores
-**nDCG@10 0.936 / MRR@10 0.979 / recall@10 0.960**. Today's search scores
-**nDCG@10 0.106** and returns nothing for 83% of the queries.
+1. a weighted Postgres full-text leg;
+2. a `pg_trgm` leg over title + description, for prefixes and typos;
+3. a pgvector leg over article chunks.
 
-**Recommendation: Option A.** Postgres-native hybrid search: pgvector (HNSW) +
-weighted `tsvector` (`websearch_to_tsquery`, ranked by `ts_rank`), fused with RRF. Embeddings come through a
-new `Embedder` port. An operator-configured hosted model is the production
-default (`text-embedding-3-small`, about **$0.05 per 1,000 bookmarks** to
-ingest). A local fastembed adapter covers self-hosters, and a `disabled`
-setting degrades to full-text-only search. This is the only option that runs
-on Fly Managed Postgres, which supports pgvector but not ParadeDB or any other
-BM25 extension.
+A background worker fetches and extracts the article text after the
+bookmark is saved, so saving stays as fast as today. When the fetch fails,
+which happens for a third of real links, the bookmark is still indexed in
+both the lexical and the vector leg by its title, description, URL and tags.
+
+The test corpus has 562 bookmarks: 342 Wikipedia pages, 148 extracted Hacker
+News articles, and 72 real HN links whose fetch failed. On 48 hand-labelled
+queries (keyword, natural-language, deep-in-the-body, typo, prefix, and
+failed-link):
+
+- **The recommended hybrid scores nDCG@10 0.926.** On the original 24
+  queries it scores 0.932 (the two-leg version scored 0.936 there).
+- **Today's search scores 0.053** and returns nothing for 92% of the
+  queries.
+- **BM25 is not needed.** Every hybrid built on Postgres built-ins beats
+  BM25 + vector (0.874). Without embeddings, built-in full text + `pg_trgm`
+  scores 0.791, against 0.706 for BM25 alone.
+- **The failed-link fallback works.** On queries about the 72 failed
+  links, nDCG goes from 0.061 to 0.918. On a simulated 33% failure rate, it
+  closes 68% of the gap to full text.
+
+**Recommendation: Option A**, Postgres-native hybrid search. It needs only
+`vector` (pgvector) and `pg_trgm`, and **both Fly Managed Postgres (where
+production runs since 2026-10-26) and Neon offer both**, so the
+recommendation holds on either provider. Neither provider offers
+ParadeDB/BM25.
+
+Embeddings go through an `Embedder` port with OpenAI, local fastembed and
+disabled adapters, chosen by configuration. The production default is the
+operator-paid `text-embedding-3-small`, at about **$0.05 per 1,000
+bookmarks** to ingest. The hosted model's quality is measured by a helper
+with the real key; the harness is ready, see
+[Hosted measurement](#hosted-measurement).
 
 ## Problem
 
@@ -38,7 +59,7 @@ Today's search (`bookmark_repo.rs::list`) is a boolean filter over
    bookmark by something it *said*, the search misses it.
 2. **Every term must appear in the metadata** (`plainto_tsquery` ANDs every
    word), so natural-language queries almost always return zero results. Of
-   the 24 evaluation queries, 20 returned nothing.
+   the 48 evaluation queries, 44 returned nothing.
 3. **No ranking.** When a query does match, the best result can sit anywhere
    in the newest-first list.
 
@@ -48,25 +69,109 @@ and discards everything else.
 
 ## Goals
 
-- Find a bookmark by any passage of its article, by keyword *or* by meaning.
+- Find a bookmark by any passage of its article, by keyword *or* by meaning,
+  and tolerate prefixes and typos.
 - Rank by relevance, and show why each result matched (a snippet).
-- Fit the current stack: Postgres on Fly MPG, SQLx 0.8, hexagonal ports and
-  adapters, HTMX. No new always-on service.
+- Fit the current stack: Postgres (Fly MPG today, Neon before), SQLx 0.8,
+  hexagonal ports and adapters, HTMX. No new always-on service.
+- Every embedding and LLM vendor sits behind a port, so it can be swapped by
+  configuration.
 - Keep saving a bookmark as fast as it is today; ingestion is asynchronous.
-- Degrade gracefully: if the embedder is unavailable, search falls back to
-  full-text; if the article fetch fails, metadata stays searchable.
+- Degrade gracefully:
+  - if the embedder is unavailable, search falls back to the lexical legs;
+  - if the article fetch fails, the bookmark stays searchable by its
+    metadata in every leg.
 - Self-hosting stays possible without any paid API.
 
 ## Non-Goals (v1)
 
 - PDFs, YouTube transcripts, and JS-rendered SPAs (v1 ingests HTML only; these
-  show up as `skipped` or `failed`).
+  show up as `skipped` or `failed`, and fall back to metadata).
 - Question answering / RAG over bookmarks (this design is its foundation,
-  though).
+  though), and LLM query rewriting. v1 search makes no LLM call.
 - Cross-user search, and offline search in the mobile app or the browser
   extension.
 - Re-crawling bookmarks to pick up changed articles (the text is a snapshot
   taken at save time; manual "refetch" only).
+
+---
+
+## Where production runs, and which extensions it allows
+
+### Production database: Fly Managed Postgres (moved from Neon on 2026-10-26)
+
+Evidence from the repository and git history (checked 2026-11-01):
+
+| source | says |
+|---|---|
+| PR #33, "Move production from Railway to Fly.io", merged 2026-10-26 (`gh pr view 33`) | "Production now runs on Fly.io with Fly Managed Postgres". Under "Already done outside this PR": "DB moved Neon → Fly MPG (2 users, 334 bookmarks, migration 14 verified)". |
+| `fly.toml` (from #33) | app `boopmark`, region `sjc`. The release workflow deploys with `flyctl deploy --image`. |
+| PR #34 (`README.md`, `skills/boop/references/server-setup.md`) | Self-hosting docs: `fly mpg create` / `fly mpg attach`, and `fly mpg connect` for psql. |
+| `AGENTS.md:68` (= `CLAUDE.md:68`) | "… Docker Compose, Neon (Postgres)". The file was last changed on 2026-03-22 (`git log -- AGENTS.md`), seven months before the move, so this line is stale. It dates from the 2026-03 prod-deployment design (`docs/superpowers/specs/2026-03-17-prod-deployment-design.md`, Neon + Railway). |
+
+**What cannot be verified without prod secrets:**
+
+- **Which host the live `DATABASE_URL` points to.** Fly secrets are
+  write-only, and `fly secrets list` shows only a digest. I did not use
+  flyctl or any prod credential.
+- **Whether the Neon project still exists**, with or without a stale copy
+  of the data. The "Boopmark - Prod - Neon" vault item suggests it was not
+  deleted. If it still holds data, someone should decide whether to delete
+  it.
+- **The pgvector version on the MPG cluster**, and whether `vector` and
+  `pg_trgm` are already enabled.
+
+Someone with access can settle all three in a minute. Run `fly mpg list`,
+then `fly mpg connect <cluster-id>`, then:
+
+```sql
+SELECT name, default_version, installed_version FROM pg_available_extensions
+WHERE name IN ('vector', 'pg_trgm', 'unaccent', 'pg_search');
+SELECT count(*) FROM bookmarks;   -- 334 at the move
+```
+
+Neon's hosts end in `neon.tech`, which identifies the provider from the
+`DATABASE_URL` host if the secret is ever shown. AGENTS.md should say "Fly
+Managed Postgres". That edit is outside this spec PR (it is the tag
+worker's and the owner's file too).
+
+### Extensions on both providers (primary docs, checked 2026-11-01)
+
+| extension | needs `shared_preload_libraries` | Fly MPG ([docs.fly.io/mpg/extensions](https://docs.fly.io/mpg/extensions)) | Neon ([neon.com/docs/extensions/pg-extensions](https://neon.com/docs/extensions/pg-extensions)) | used by this design |
+|---|---|---|---|---|
+| `vector` (pgvector) | no | ✓ (one of two third-party extensions, with PostGIS); version not published | ✓ 0.8.0 on PG14–17, 0.8.6 on PG18 | **yes**: chunk vectors, `halfvec`, `iterative_scan` (needs ≥ 0.8.0) |
+| `pg_trgm` | no | ✓ | ✓ 1.6 | **yes**: prefix/typo leg (`word_similarity`, GIN `gin_trgm_ops`) |
+| `unaccent` | no | ✓ | ✓ 1.1 | optional (accent-folding config; small measured gain, see below) |
+| `fuzzystrmatch` | no | ✓ | ✓ | no |
+| `btree_gin` | no | ✓ | ✓ | no |
+| `pg_search` (ParadeDB BM25) | yes | ✗ not listed; third-party support is "Vector and PostGIS for now" | ✗ "Unavailable"; the docs say the library is deprecated and "do not add it for new projects" | no |
+| `pg_textsearch` (Tiger BM25), `vchord_bm25` | yes | ✗ not listed | ✗ not listed | no |
+| `rum` | no | ✗ not listed | ✓ 1.3 on PG14–17 | no |
+
+**How to enable them:**
+
+- **Fly MPG.** Toggle each extension on the cluster's Extensions page in
+  the dashboard; it is per database, not cluster-wide. The app role is not
+  a superuser.
+- **Neon.** Run `CREATE EXTENSION`; the default role, `neon_superuser`, may
+  do this.
+- **In the migration.** It starts with `CREATE EXTENSION IF NOT EXISTS
+  vector; CREATE EXTENSION IF NOT EXISTS pg_trgm;`. These do nothing once
+  an extension is enabled, so the same migration runs on both providers. On
+  MPG, flip the toggles first.
+- **Trust.** `pg_trgm`, `unaccent` and `fuzzystrmatch` are "trusted"
+  extensions (their control files say so), so a database owner could create
+  them. `vector` is not trusted (`vector.control` has no `trusted` line);
+  that is why MPG gates it behind the toggle.
+- **Version.** Clusters created before 2025-07-23 need a role-system upgrade
+  before extensions can be managed
+  ([announcement](https://community.fly.io/t/mpg-extensions-management-is-here/25551)).
+
+**Plans:**
+
+- MPG Basic: 1 GB RAM, $38/mo. Starter: 2 GB, $72/mo. Storage:
+  $0.28/GB-month.
+- Neon pricing was not compared; the design doesn't depend on it.
 
 ---
 
@@ -75,23 +180,30 @@ and discards everything else.
 ### Environment
 
 Docker is not available on the shared host, so `devproxy` could not run.
-The prototype instead runs Postgres 16.15 with pgvector 0.8.2 and ParadeDB
-pg_search 0.15 from nixpkgs, on its own port (55432). The real server
-(`boopmark-server`, migrations 001–014) runs on port 4100 against that
-database, with one seeded user. The app shows the seeded bookmarks, and its
-live search reproduces the "today" numbers below. For example, `/bookmarks?search=how do bees tell other bees where the flowers are`
+The prototype instead runs Postgres 16.15 from nixpkgs, with pgvector 0.8.2,
+pg_trgm 1.6, unaccent 1.1 and ParadeDB pg_search 0.23.0, on its own port
+(55432). The real server (`boopmark-server`, migrations 001–014) runs on
+port 4100 against that database, with one seeded user. The app shows the
+seeded bookmarks, and its live search reproduces the "today" numbers below.
+For example, `/bookmarks?search=how do bees tell other bees where the flowers are`
 returns 0 cards, while `search=bees` returns 15.
 
-### Corpus (`fetch_corpus.py`; regenerated, not committed)
+### Corpus (`fetch_corpus.py`, pinned by `corpus_manifest.jsonl`)
 
 | source | docs | article chars median / p90 / max | notes |
 |---|---|---|---|
 | Wikipedia, 20 categories × ≤18 pages | 342 | 5.6k / 22k / 92k | Neighbouring pages in a category serve as hard negatives (sorting algorithms, hash functions, Icelandic volcanoes, coffee, …). |
 | Hacker News stories with >900 points, extracted with trafilatura | 148 of 220 | 7.2k / 32k / 99k | Real-world ingestion: blogs, news, vendor pages, X posts. |
+| the 72 HN links that failed to extract (`unscraped.jsonl`) | 72 | 0 | Metadata-only bookmarks. The HN title stands in for the title the user or the LLM enrichment would have saved; there is no description. |
 
-Totals: **490 bookmarks, 5,052 chunks**, 1.14M article tokens (2,334 per
-bookmark, cl100k), 1.32M embedding-input tokens (2,696 per bookmark, which
-includes chunk overlap and headers).
+Totals: **562 bookmarks, 5,052 chunks**, 1.14M article tokens (2,334 per
+scraped bookmark, cl100k), 1.32M embedding-input tokens (2,696 per scraped
+bookmark, including chunk overlap and headers).
+
+`corpus_manifest.jsonl` pins every document: URL, title, description and
+the sha256 of its text. `fetch_corpus.py --from-manifest` refetches exactly
+those documents. A rebuild on 2026-11-01 returned 489 of 490 documents, 485
+of them byte-identical.
 
 **Ingestion failure rate on real links (HN, n=220): 33% failed.**
 
@@ -109,163 +221,270 @@ includes chunk overlap and headers).
 
 ### Labelled queries (`queries.jsonl`)
 
-There are 24 queries in three types:
+There are 48 queries in six types. Each has 1–8 relevant bookmarks.
 
-- **keyword** (7): exact terms, e.g. `sscanf strlen`, `Laki 1783 eruption`.
-- **natural** (9): paraphrases that share few words with the target, e.g.
-  *"why the first price I hear skews my judgement"* → Anchoring effect.
-- **deep** (8): the answer sits in the article body, not in the title or
-  description, e.g. *"why a game's online mode took minutes to load and how
-  parsing JSON was fixed"* → "How I cut GTA Online loading times by 70%".
+| type | n | example |
+|---|---|---|
+| keyword | 7 | `sscanf strlen`, `Laki 1783 eruption` |
+| natural | 9 | *"why the first price I hear skews my judgement"* → Anchoring effect |
+| deep (answer only in the body) | 8 | *"why a game's online mode took minutes to load and how parsing JSON was fixed"* → "How I cut GTA Online loading times by 70%" |
+| typo (added in review) | 8 | `byzantine fualt tolerance`, `aeropres coffee maker`, `Grimsvotn volcano` (no accents; the page is "Grímsvötn") |
+| prefix (added in review) | 6 | `garb collect`, `byzant`, `dynamo` (→ Amazon DynamoDB), `kaprek` |
+| unscraped (added in review) | 10 | *"popular third-party Reddit app shutting down"* → "Apollo will close down on June 30th" (fetch failed: HTTP 403) |
 
-Relevance labels were written first. They were then completed by judging the
-**pool**, the union of every method's top 10 (TREC-style), so no method was
-scored against labels that only another method could find. The pool was judged twice: once after the main methods ran, and again after
-the embedding variants (metadata-only, MiniLM, bge-base) added new hits. The
-second pass added no relevant documents, so the variant rows are not biased by
-labels frozen before they ran. Each query has 1–8 relevant bookmarks.
+Relevance labels were written first, then completed by judging the
+**pool**: the union of every method's top 10 across every scenario
+(TREC-style). That way no method was scored against labels only another
+method could find.
 
-### Results (exact KNN; `eval.py --bm25`)
+- The original 24 queries were judged in two passes; the second pass added
+  nothing.
+- The 24 new queries were judged after the new methods ran. That added 10
+  relevant documents to 6 queries. For example, `byzantine fualt tolerance`
+  gained "Consensus (computer science)" and "Brooks–Iyengar algorithm", the
+  same pages the original Byzantine query (q16) counts.
 
-| method | R@10 | MRR@10 | nDCG@10 | zero-result | nDCG keyword | nDCG natural | nDCG deep | p50 ms |
-|---|---|---|---|---|---|---|---|---|
-| **today** (metadata filter, newest first) | 0.090 | 0.167 | 0.106 | 83% | 0.222 | 0.111 | 0.000 | 0.2 |
-| metadata `ts_rank` | 0.090 | 0.167 | 0.106 | 83% | 0.222 | 0.111 | 0.000 | 17 |
-| full-text AND (`websearch_to_tsquery`, `ts_rank_cd`) | 0.625 | 0.708 | 0.635 | 25% | 0.976 | 0.490 | 0.500 | 0.3 |
-| full-text OR (`ts_rank`) | 0.840 | 0.686 | 0.722 | 0% | 0.923 | 0.546 | 0.746 | 2.2 |
-| BM25 (ParadeDB pg_search) — *not on Fly MPG* | 0.924 | 0.833 | 0.848 | 0% | 0.984 | 0.663 | 0.938 | 1.9 |
-| vector (bge-small-en-v1.5, 384-d, chunks) | 0.960 | 0.948 | 0.918 | 0% | 0.960 | 0.814 | 1.000 | 12.6 |
-| **hybrid RRF: full-text AND + vector** ⭐ | **0.960** | **0.979** | **0.936** | 0% | **0.990** | **0.838** | 1.000 | 12.9 |
-| hybrid RRF: full-text OR + vector | 0.950 | 0.844 | 0.858 | 0% | 0.965 | 0.753 | 0.883 | 15.4 |
-| hybrid RRF: BM25 + vector — *not on Fly MPG* | 0.939 | 0.943 | 0.912 | 0% | 0.981 | 0.780 | 1.000 | 15.3 |
+### Index scenarios
 
-**Embedding variants** (`embed_variant.py`; the same labels, the same
-full-text AND lexical leg in the hybrid; exact KNN):
+Every method runs in four scenarios (`common.scenarios`):
 
-| variant | dims | embed speed (4 shared vCPU) | vector nDCG@10 | hybrid nDCG@10 | hybrid MRR@10 | vector nDCG keyword / natural / deep |
-|---|---|---|---|---|---|---|
-| **bge-small-en-v1.5, article chunks** (prototype default) | 384 | 9.6 chunks/s | 0.918 | 0.936 | 0.979 | 0.960 / 0.814 / 1.000 |
-| bge-small-en-v1.5, **metadata only** (title + description + URL; 1 vector per bookmark) | 384 | 39 docs/s | 0.813 | 0.915 | 0.946 | 0.713 / 0.765 / 0.954 |
-| all-MiniLM-L6-v2, article chunks | 384 | 35 chunks/s | 0.919 | 0.926 | 0.979 | 0.961 / 0.855 / 0.954 |
-| bge-base-en-v1.5, article chunks | 768 | 3.2 chunks/s | 0.905 | **0.941** | 0.979 | 0.942 / 0.859 / 0.923 |
-| OpenAI text-embedding-3-small, article chunks | 1536 | — | pending | pending | — | not run: no API key was available (see Open questions) |
+| scenario | failed links (72) | scraped articles (490) |
+|---|---|---|
+| `main/no-fallback` | not indexed | full text |
+| `main/fallback` (**the design**) | metadata only, in both legs | full text |
+| `sim/no-fallback` | not indexed | a fixed random 33% (162) treated as failed and not indexed |
+| `sim/fallback` | metadata only | those 162 metadata only |
 
-The variants show three things:
+`main/no-fallback` on the original 24 queries is exactly the previous
+corpus, and it reproduces every number of the first draft. The Python RRF
+equals the production SQL (below) on 48 of 48 queries.
 
-- **Chunk embeddings of the article add +0.105 vector nDCG** over embedding
-  only the metadata (0.813 → 0.918). Most of that is on keyword queries
-  (0.713 → 0.960).
-- **Inside the hybrid, the article's lexical leg recovers much of the
-  difference** (0.915 vs 0.936). A cheap "one vector per bookmark" variant is
-  a credible fallback if storage or embedding cost ever matters (see Option
-  A, variant A2).
-- **The three local models are within noise of each other** (0.926–0.941
-  hybrid). Model choice can rest on cost, speed and RAM rather than quality.
+### Results (`eval.py --bm25`, exact KNN, scenario `main/fallback`)
 
+nDCG@10 unless marked. The last column is the original 24 queries on the
+original corpus, comparable with the first draft.
 
-Latency is the SQL time only (warm, local, 490 bookmarks / 5k chunks). Query
-embedding is extra: **6.5 ms p50 / 10.3 ms p95** locally with bge-small (warm, one query at a time, printed by `eval.py`; a standalone run measured 4.1 / 7.0 ms; the process RSS with ONNX Runtime and the model loaded was 274 MB in Python), or one HTTPS
-round trip (~100–300 ms) for a hosted model. With
-`hnsw.iterative_scan = relaxed_order` and `ef_search = 100`, the HNSW index
-gave identical rankings and latency at this size. Per-user corpora are small
-enough that the planner's exact scan over the user's chunks is fine; HNSW
-matters once the *table* holds millions of chunks across users.
+| method | nDCG (48) | MRR | R@10 | zero | keyword | natural | deep | typo | prefix | unscraped | orig. 24 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **today** (metadata filter, newest first) | 0.053 | 0.083 | 0.045 | 92% | 0.222 | 0.111 | 0.000 | 0.000 | 0.000 | 0.000 | 0.106 |
+| *Postgres full text (built-in)* | | | | | | | | | | | |
+| fts AND (`websearch_to_tsquery`), `ts_rank` weighted | 0.353 | 0.385 | 0.354 | 54% | 0.972 | 0.499 | 0.500 | 0.125 | 0.105 | 0.000 | 0.637 |
+| fts AND, `ts_rank` unweighted (`'{1,1,1,1}'`) | 0.327 | 0.340 | 0.354 | 54% | 0.870 | 0.439 | 0.500 | 0.125 | 0.105 | 0.000 | 0.585 |
+| fts AND, `ts_rank_cd` weighted | 0.352 | 0.385 | 0.354 | 54% | 0.976 | 0.490 | 0.500 | 0.125 | 0.105 | 0.000 | 0.635 |
+| fts OR, `ts_rank` weighted | 0.656 | 0.628 | 0.774 | 8% | 0.870 | 0.507 | 0.547 | 0.799 | 0.239 | 0.861 | 0.722 |
+| fts AND, falling back to OR when AND is empty | 0.706 | 0.743 | 0.734 | 8% | 0.972 | 0.610 | 0.766 | 0.799 | 0.239 | 0.761 | 0.789 |
+| fts AND, every term as prefix (`term:*`) | 0.447 | 0.490 | 0.458 | 42% | 0.957 | 0.378 | 0.500 | 0.125 | 0.957 | 0.061 | 0.587 |
+| fts AND, `unaccent` text-search config | 0.373 | 0.406 | 0.375 | 52% | 0.972 | 0.499 | 0.500 | 0.250 | 0.105 | 0.000 | 0.637 |
+| fts AND+ (unaccent; unknown words → `word:* \| nearest known word` via pg_trgm) | 0.531 | 0.594 | 0.531 | 33% | 0.948 | 0.445 | 0.500 | 0.625 | 0.873 | 0.061 | 0.610 |
+| *pg_trgm* | | | | | | | | | | | |
+| `word_similarity`, title + description | 0.295 | 0.354 | 0.283 | 62% | 0.444 | 0.068 | 0.000 | 0.622 | 0.913 | 0.000 | 0.155 |
+| `word_similarity`, title + description + body | 0.380 | 0.403 | 0.424 | 54% | 0.784 | 0.207 | 0.000 | 0.713 | 0.863 | 0.000 | 0.307 |
+| *BM25 (not on Fly MPG or Neon)* | | | | | | | | | | | |
+| BM25 (ParadeDB pg_search, title ×3, description ×1.5) | 0.706 | 0.697 | 0.785 | 8% | 0.984 | 0.667 | 0.938 | 0.865 | 0.105 | 0.595 | 0.850 |
+| *Lexical-only fusions (`EMBEDDING_BACKEND=disabled`)* | | | | | | | | | | | |
+| fts AND + trgm title+description | 0.550 | 0.625 | 0.536 | 31% | 0.976 | 0.567 | 0.500 | 0.622 | 0.913 | 0.000 | 0.664 |
+| **fts AND→OR + trgm title+description** ⭐ disabled mode | **0.791** | 0.837 | 0.812 | 0% | 0.976 | 0.610 | 0.766 | 0.797 | 0.919 | 0.761 | 0.790 |
+| fts AND+ + trgm title+description | 0.578 | 0.656 | 0.562 | 27% | 0.976 | 0.503 | 0.500 | 0.750 | 0.960 | 0.061 | 0.640 |
+| *Vector (bge-small-en-v1.5, 384-d)* | | | | | | | | | | | |
+| vector, article chunks (+ metadata chunk for failed links) | 0.923 | 0.953 | 0.944 | 0% | 0.960 | 0.814 | 1.000 | 0.931 | 0.820 | 0.992 | 0.918 |
+| vector, metadata only (1 per bookmark) | 0.855 | 0.907 | 0.878 | 0% | 0.713 | 0.754 | 0.954 | 0.894 | 0.808 | 0.961 | 0.813 |
+| *Hybrids (RRF k=60, top 50 per leg) with the chunk vector leg* | | | | | | | | | | | |
+| fts AND weighted + vector (first draft's pick) | 0.917 | 0.948 | 0.944 | 0% | 0.990 | 0.838 | 1.000 | 0.931 | 0.820 | 0.918 | **0.936** |
+| fts AND unweighted + vector | 0.901 | 0.927 | 0.944 | 0% | 0.933 | 0.797 | 1.000 | 0.931 | 0.820 | 0.918 | 0.904 |
+| fts AND `ts_rank_cd` + vector | 0.917 | 0.948 | 0.944 | 0% | 0.990 | 0.838 | 1.000 | 0.931 | 0.820 | 0.918 | 0.936 |
+| fts OR + vector | 0.880 | 0.884 | 0.949 | 0% | 0.965 | 0.771 | 0.929 | 0.890 | 0.817 | 0.910 | 0.873 |
+| fts AND→OR + vector | 0.888 | 0.898 | 0.954 | 0% | 0.990 | 0.796 | 0.929 | 0.890 | 0.817 | 0.907 | 0.897 |
+| fts AND prefix + vector | 0.903 | 0.915 | 0.959 | 0% | 0.975 | 0.749 | 1.000 | 0.868 | 0.930 | 0.926 | 0.898 |
+| fts AND unaccent + vector | 0.917 | 0.948 | 0.944 | 0% | 0.990 | 0.838 | 1.000 | 0.931 | 0.820 | 0.918 | 0.936 |
+| fts AND+ + vector | 0.915 | 0.936 | 0.959 | 0% | 0.984 | 0.808 | 1.000 | 0.868 | 0.928 | 0.926 | 0.923 |
+| trgm title+description + vector | 0.931 | 0.953 | 0.954 | 0% | 0.960 | 0.796 | 1.000 | 0.931 | 0.904 | 0.992 | 0.912 |
+| trgm title+description+body + vector (1 s per query, rejected) | 0.947 | 0.950 | 0.980 | 0% | 0.975 | 0.796 | 1.000 | 0.992 | 0.936 | 0.992 | 0.916 |
+| BM25 + vector (not on MPG/Neon) | 0.874 | 0.866 | 0.944 | 0% | 0.981 | 0.774 | 1.000 | 0.896 | 0.743 | 0.849 | 0.910 |
+| **fts AND weighted + trgm title+description + vector** ⭐ | **0.926** | 0.948 | 0.954 | 0% | **0.990** | 0.828 | 1.000 | 0.931 | 0.904 | 0.918 | 0.932 |
+| fts AND+ + trgm title+description + vector | 0.916 | 0.929 | 0.959 | 0% | 0.990 | 0.797 | 1.000 | 0.868 | 0.943 | 0.926 | 0.921 |
+
+**Latency** (production-shaped single statements, warm, local, 562
+bookmarks; `eval.py` prints these):
+
+| statement | p50 ms | p95 ms |
+|---|---|---|
+| fts AND on `search` (GIN) | 0.3 | 0.6 |
+| fts AND, unaccent config (GIN) | 0.4 | 0.9 |
+| fts AND+ rewrite: lexicon lookups, per query | 1.7 | 3.2 |
+| trgm `word_similarity` on title + description (GIN trgm) | 0.6 | 3.7 |
+| trgm `word_similarity` on title + description + body (GIN trgm) | **1,023** | 1,292 |
+| vector, exact scan of the user's chunks | 13.0 | 15.7 |
+| hybrid SQL (fts AND + vector) | 12.7 | 17.0 |
+
+Query embedding is extra:
+
+- locally with bge-small: **6.5 ms p50 / 10.3 ms p95** (warm, one query at
+  a time; the Python process held 274 MB with ONNX Runtime and the model
+  loaded);
+- with a hosted model: one HTTPS round trip, measured by the hosted harness.
+
+With `hnsw.iterative_scan = relaxed_order` and `ef_search = 100`, the HNSW
+index gave the same rankings and latency at this size.
+
+**Embedding variants** (first draft, original 24 queries and corpus,
+`embed_variant.py`, same fts AND lexical leg):
+
+| variant | dims | embed speed (4 shared vCPU) | vector nDCG@10 | hybrid nDCG@10 |
+|---|---|---|---|---|
+| **bge-small-en-v1.5, article chunks** (prototype default) | 384 | 9.6 chunks/s | 0.918 | 0.936 |
+| bge-small-en-v1.5, metadata only | 384 | 39 docs/s | 0.813 | 0.915 |
+| all-MiniLM-L6-v2, article chunks | 384 | 35 chunks/s | 0.919 | 0.926 |
+| bge-base-en-v1.5, article chunks | 768 | 3.2 chunks/s | 0.905 | 0.941 |
+| OpenAI text-embedding-3-small / -large | 1536 / 3072, and truncated to 512 / 1024 | — | pending | pending: the helper runs `hosted_eval.py`; see [Hosted measurement](#hosted-measurement) |
+
+### Do we need BM25? No.
+
+The question was whether Postgres built-ins plus `pg_trgm` are enough. They
+are:
+
+1. **Next to vectors, BM25 makes the result worse, not better.** BM25 +
+   vector scores 0.874. Every hybrid built on the AND full-text leg scores
+   0.901–0.926, and trgm + vector scores 0.931. BM25 and the OR query match
+   on any term, so they feed the fusion a long tail of weak matches. The AND
+   leg contributes only when every term matches, which is exactly when it
+   is trustworthy.
+2. **Without vectors** (`EMBEDDING_BACKEND=disabled`), built-ins + trgm beat
+   BM25 overall, 0.791 vs 0.706.
+   - BM25 is still clearly better on natural and deep queries: 0.667 vs
+     0.610, and 0.938 vs 0.766. On the original 24 it scores 0.850 vs 0.790.
+     Saturating term frequency and IDF matter when there is no vector leg.
+   - BM25 has no answer to prefixes (0.105), and trigram has (0.919).
+3. **BM25 is not available anyway.** Neither MPG nor Neon offers
+   `pg_search` (Neon deprecated it), and all the BM25 extensions need
+   `shared_preload_libraries`.
+
+The built-in variants rank as follows:
+
+- **Weighted beats unweighted.** The title (A) and description (B) weights
+  are worth +0.016 in the hybrid and +0.03–0.05 alone.
+- **`ts_rank` and `ts_rank_cd` are equivalent.**
+- **OR alone is too loose; "AND, else OR"** gets the recall without
+  flooding the fusion. It is the right lexical leg when there is no vector
+  leg, and the wrong one beside a vector leg (0.888).
+- **`term:*` prefixes and the AND+ rewrite** fix prefix and typo queries
+  for lexical-only search. Inside the hybrid they cost natural-language
+  quality, because the vector leg already absorbs typos (vector typo nDCG
+  0.931; probably because the WordPiece tokenizer splits a misspelling
+  into known pieces, though that was not tested).
+- **`unaccent`** only matters for accent-free queries for accented names
+  (1 of 48 queries). It is free at query time (same GIN), but it needs a
+  custom text-search config in the migration. It is optional for v1.
+- **Trigram over the article body** gives the best score of all (0.947), but
+  costs about 1 s per query, even with a GIN trigram index, on only 490
+  articles. Rejected. **Trigram over title + description** is cheap (0.6 ms)
+  and carries the prefix and typo gains, so it becomes the third leg.
+
+### Scrape-failure fallback: index what exists
+
+When the article fetch fails, the bookmark is indexed by its metadata,
+title + description + URL + tags, in **both** legs:
+
+- **lexical:** the `search` vector holds only the A/B/C weights;
+- **vector:** one chunk embeds `title\ndescription\nurl`, the same
+  `meta_text` as `embed_variant.py --mode metadata`.
+
+Tags are part of the design but not measured, since the corpus has none.
+
+How much of the gap it closes (nDCG@10, `eval.py` "Fallback gap"):
+
+| method | real failed links, 10 queries: none → fallback | simulated 33% failure, 18 queries: none → fallback (full text = ceiling) | share of the simulated gap closed |
+|---|---|---|---|
+| fts AND weighted | 0.000 → 0.000 | 0.051 → 0.154 (0.473) | 24% |
+| vector (chunks) | 0.061 → **0.992** | 0.178 → 0.725 (0.934) | 72% |
+| hybrid fts AND + vector | 0.061 → **0.918** | 0.175 → 0.688 (0.935) | **68%** |
+| hybrid fts AND+ + vector | 0.061 → 0.926 | 0.175 → 0.665 (0.910) | 67% |
+
+- **Without the fallback, a failed link cannot be found at all.** The
+  0.061 comes from one query whose second relevant page, a New Yorker
+  profile, was scraped.
+- **Most of the recovery comes from the metadata vector.** The real
+  failed-link queries are paraphrases ("Microsoft buying GitHub" for
+  "Microsoft Is Said to Have Agreed to Acquire GitHub"), so the AND leg
+  finds nothing. The metadata vector finds them.
+- **What the fallback cannot recover is the body:** deep queries whose
+  answer is below the description. That remaining third of the gap is the
+  case for better fetching (a headless browser via the existing screenshot
+  service, or the iframely/opengraph.io fallbacks), not for better ranking.
 
 ### What the numbers say
 
 1. **Full article text is the biggest single win.** Indexing the body with
-   the same Postgres FTS takes nDCG from 0.106 to 0.635–0.722 and cuts
-   zero-result queries from 83% to 0–25%. That gain needs no embeddings, so
-   the `disabled` setting is still a big upgrade.
-2. **Embeddings carry the natural-language and deep queries** (natural nDCG
-   0.814 vs 0.490 for the full-text AND query). These are the "I remember what
-   it was about" searches a bookmark app is for.
-3. **Hybrid beats either leg alone**, mainly on keyword queries (0.990 vs
-   0.960 for vector alone). Exact identifiers (`sscanf`, `SHA-1`, `Laki`) and
-   rare names favour the lexical leg; vectors blur them.
-4. **The lexical leg must be precise, not high-recall.** The OR query and
-   BM25 have better recall on their own, but they flood the fusion with weak
-   matches and *lower* the hybrid score (0.858 and 0.912 vs 0.936). The AND
-   leg contributes only when every term matches, which is exactly when it is
-   trustworthy.
-5. **BM25 vs `ts_rank`:** pg_search BM25 is clearly better than `ts_rank` as
-   a standalone ranker (0.848 vs 0.635/0.722). Once fused with vectors, that
-   advantage disappears on this set. Together with its unavailability on MPG
-   (below), this rules out Option B for v1.
-6. **Caveats.** 24 queries is small: one query moves nDCG by about 0.04, so
-   0.936 vs 0.918 is a direction, not proof. The corpus favours vectors,
-   because its topics are distinct; a collection of very similar items (50
-   Rust blog posts) leans more on the lexical leg. Wikipedia text is cleaner
-   than extracted HTML. The labels are hand-made by one judge.
-
----
-
-## Platform constraint: what Fly Managed Postgres allows
-
-These facts were checked on 2026-11-01:
-
-- MPG supports exactly two third-party extensions: **`vector` (pgvector) and
-  PostGIS** ([docs.fly.io/mpg/extensions](https://docs.fly.io/mpg/extensions)).
-- They are enabled from the dashboard's Extensions page. The app role is not
-  a superuser, so `CREATE EXTENSION vector` fails until the toggle is on
-  ([community thread, 2026-03](https://community.fly.io/t/enabling-pgvector-extension-on-managed-postgres-cluster/27387)).
-  Clusters created before 2025-07-23 need a role-system upgrade first
-  ([announcement](https://community.fly.io/t/mpg-extensions-management-is-here/25551)).
-- `pg_trgm`, `unaccent`, `btree_gin` and `fuzzystrmatch` are available as
-  built-in contrib extensions.
-- **None of the BM25 extensions are listed:** ParadeDB pg_search, Tiger's
-  pg_textsearch, and vchord_bm25. All of them need
-  `shared_preload_libraries`, which MPG does not expose.
-- Plans: Basic, 1 GB RAM, $38/mo; Starter, 2 GB, $72/mo. Storage is
-  $0.28/GB-month.
+   the same Postgres FTS takes the original-24 nDCG from 0.106 to 0.637
+   (AND) and 0.789 (AND, else OR). That gain needs no embeddings, so the
+   `disabled` setting is still a big upgrade.
+2. **Embeddings carry the natural-language, deep, typo and failed-link
+   queries.**
+3. **The hybrid beats either leg on keywords** (0.990 vs 0.960 for vector
+   alone): exact identifiers favour the lexical leg. The trigram leg adds
+   prefixes (0.820 → 0.904) at no measured cost elsewhere.
+4. **The three-leg hybrid and the two-leg "trgm + vector" are within
+   noise** (0.926 vs 0.931). The three-leg version keeps keyword nDCG at
+   0.990 instead of 0.960. Identifiers in tech bookmarks are common, so it
+   is the recommendation.
+5. **Caveats.**
+   - 48 queries is still small: one query moves nDCG by about 0.02.
+   - The corpus favours vectors, because its topics are distinct.
+   - Wikipedia text is cleaner than extracted HTML.
+   - The labels come from one judge.
+   - The new query types were written after seeing the corpus, though
+     before running the new methods.
 
 ---
 
 ## Proposals
 
-### Option A — Postgres-native hybrid (pgvector + tsvector + RRF) ⭐ recommended
+### Option A — Postgres-native hybrid (pgvector + tsvector + pg_trgm + RRF) ⭐ recommended
 
-- **Lexical leg:** a weighted `tsvector` over title (A), description (B),
-  URL (C) and article body (D), stored in a new `bookmark_contents` table with
-  a GIN index. The query is `websearch_to_tsquery('english', $q)`, ranked by
-  `ts_rank(search, q, 1)` (this is what the measured hybrid used; the
-  standalone "full-text AND" row used `ts_rank_cd`). Users also get quotes and `-exclusion` for
-  free.
-- **Vector leg:** `bookmark_chunks(embedding vector(N))` with an HNSW cosine
-  index. Each bookmark scores its best chunk (`min(distance)`).
+- **Full-text leg:** a weighted `tsvector` over title (A), description (B),
+  URL (C) and article body (D), stored in a new `bookmark_contents` table
+  with a GIN index. The query is `websearch_to_tsquery('english', $q)`,
+  ranked by `ts_rank(search, q, 1)`. Users also get quotes and `-exclusion`
+  for free.
+- **Trigram leg:** `word_similarity($q, meta_text)` over title +
+  description, with a GIN `gin_trgm_ops` index. It catches prefixes and
+  typos in the words people actually remember: the title.
+- **Vector leg:** `bookmark_chunks(embedding halfvec(N))` with an HNSW
+  cosine index. Each bookmark scores its best chunk (`min(distance)`). A
+  failed fetch contributes one metadata chunk.
 - **Fusion:** RRF with k=60 over the top 50 of each leg, in one SQL
   statement (below). There are no score weights to tune.
+- **Without embeddings:** the full-text leg becomes "AND, else OR", fused
+  with the trigram leg (measured 0.791).
 - **Pros:**
-  - Runs on MPG today.
+  - Runs on Fly MPG and Neon today, with `vector` + `pg_trgm` only.
   - One datastore, transactional with the bookmark row, so delete is a
     cascade.
   - SQLx-friendly; no new service.
-  - Measured best.
+  - Measured best among the options that can run.
 - **Cons:**
   - `ts_rank` is not BM25. Measured, it doesn't matter once fused.
   - The vector index adds RAM pressure on the 1 GB MPG plan at scale (see
     Cost).
-- **Variant A2: one vector per bookmark.** Embed only title + description +
-  URL, and keep the full article in the lexical leg. Measured hybrid nDCG is
-  0.915 vs 0.936, with about 10× fewer vectors and no chunk table. Keep it in
-  reserve for very large libraries; it is not the default, because the
-  article chunks also supply the snippets for semantic hits.
+- **Variant A2: one vector per bookmark.** Embed only the metadata, and keep
+  the full article in the lexical leg. It scores 0.855 for the vector alone
+  vs 0.923, with about 10× fewer vectors. Keep it in reserve for very large
+  libraries.
 
 ### Option B — Postgres + ParadeDB pg_search (BM25) + pgvector
 
-- Real BM25 (Tantivy) in Postgres, best for lexical-only search.
-- **Not available on Fly MPG.** It would need one of:
-  - self-managed Postgres on a Fly Machine with a volume, giving up MPG's
-    HA, backups and pooling;
+- Real BM25 (Tantivy) in Postgres, the best lexical-only ranker on natural
+  and deep queries.
+- **Available on neither Fly MPG nor Neon.** Neon marks it unavailable and
+  deprecated. It would need one of:
+  - self-managed Postgres on a Fly Machine with a volume, giving up MPG's HA,
+    backups and pooling;
   - ParadeDB Cloud as a logical-replication read target (eventually
-    consistent, an extra bill, and data leaves Fly);
-  - or a move off MPG.
-- The licence is AGPL-3.0. That is fine for this AGPL-compatible open-source
-  app, but it is a consideration for anyone redistributing modified builds.
-- Measured: fused with vectors, it is *not* better than Option A (0.912 vs
-  0.936).
-- **Verdict:** reject for v1. If a future MPG release adds pg_search, swap in
-  the lexical leg behind the same repository method, with no other changes.
+    consistent, an extra bill, and data leaves Fly).
+- The licence is AGPL-3.0.
+- Measured: fused with vectors, it is *worse* than Option A (0.874 vs
+  0.926).
+- **Verdict:** reject. If a provider ever offers it, the full-text leg is
+  one CTE behind the same repository method.
 
 ### Option C — External search index (Meilisearch / Typesense / Qdrant / Elasticsearch)
 
@@ -276,32 +495,29 @@ These facts were checked on 2026-11-01:
   - deletions and user scoping enforced in two places;
   - backups and an upgrade path for a second stateful service;
   - self-hosters must run it too.
-- Not measured. At this app's scale (thousands, not hundreds of millions, of
-  chunks) it brings operational cost with no measured quality gain.
-- **Verdict:** reject. Revisit only if per-query latency at production scale
-  exceeds about 200 ms on MPG.
+- Not measured. Option A already covers typos via `pg_trgm` and the vector
+  leg. At this app's scale (thousands, not hundreds of millions, of
+  chunks), Option C brings operational cost with no measured quality gain.
+- **Verdict:** reject. Revisit only if per-query latency at production
+  scale exceeds about 200 ms.
 
 ### Embedding model — sub-options
 
 | option | quality (this eval) | ingest cost / 1k bookmarks | query cost | ops | verdict |
 |---|---|---|---|---|---|
-| **E1. Operator-paid hosted, `text-embedding-3-small`** | not measured (no key, see Open questions) | 2.7M tok × $0.02/M = **$0.054** | ~12 tok/query: $0.24 per 1M queries | API key in Fly secrets; network call per query | ⭐ **production default** |
-| E1'. Hosted, Voyage `voyage-4-lite` | not measured | $0.054 (200M free tokens) | same | same | Equivalent alternative; 32k context |
-| **E2. Local fastembed (`bge-small-en-v1.5`, ONNX)** | vector 0.918 / hybrid 0.936 | $0 API cost; measured **9.6 chunks/s** (≈1 bookmark/s) on 4 shared vCPUs | ≈5 ms CPU (measured) | about 130 MB model + ONNX runtime; does **not** fit next to the app in the current 512 MB `shared-cpu-1x` VM; needs ≥1 GB | ⭐ **self-host option** |
+| **E1. Operator-paid hosted, `text-embedding-3-small`** | pending ([Hosted measurement](#hosted-measurement)) | 2.7M tok × $0.02/M = **$0.054** | ~12 tok/query: $0.24 per 1M queries | API key in Fly secrets; network call per query | ⭐ **production default** |
+| E1'. Hosted, `text-embedding-3-large` | pending | $0.35 | $1.56 per 1M queries | same | Only if it measures clearly better |
+| E1''. Hosted, Voyage `voyage-4-lite` | not measured | $0.054 | same as E1 | same; another adapter behind the same port | Equivalent alternative |
+| **E2. Local fastembed (`bge-small-en-v1.5`, ONNX)** | vector 0.923 / hybrid 0.926 | $0 API cost; measured **9.6 chunks/s** (≈1 bookmark/s) on 4 shared vCPUs | ≈5 ms CPU | about 130 MB model + ONNX Runtime; does **not** fit next to the app in the current 512 MB `shared-cpu-1x` VM; needs ≥1 GB | ⭐ **self-host option** |
 | E3. Per-user BYO key (like `user_llm_settings`) | — | user pays | user pays; needs the user's key on every search | Anthropic, the default text provider, has no embeddings API, so most users get nothing. Index coverage differs per user. A key rotation or removal breaks query embedding, and a model switch means a full re-embed per user. | reject for v1 |
-| E4. `disabled` (full-text only) | full-text AND 0.635 | $0 | $0 | none | ⭐ fallback / default when unconfigured |
+| E4. `disabled` (no vectors) | lexical-only fusion 0.791 | $0 | $0 | none | ⭐ fallback / default when unconfigured |
 
-Why **operator-paid** over BYO, given that BYO matches today's LLM settings:
+Why **operator-paid** over BYO, even though BYO matches today's LLM settings:
 
-- **Embeddings cost very little.** Embedding tokens are priced at $0.02/M,
-  against about $1/M input for the cheapest enrichment chat models, and an
-  embedding call has no output tokens (not measured end to end). Ingesting 1k
-  bookmarks costs about $0.05, and a heavy user's searches cost
-  fractions of a cent per month.
-- **The index must be one consistent vector space.** A per-user key breaks
-  that: users without an OpenAI key (the default provider is Anthropic, which
-  has no embeddings) would silently get a worse search, and query embedding
-  would depend on a user secret at read time.
+- **Embeddings cost very little.** Ingesting 1k bookmarks costs about $0.05,
+  and a heavy user's searches cost fractions of a cent per month.
+- **The index must be one consistent vector space.** That is also why the
+  `Embedder` port carries no per-request API key, unlike `LlmClient`.
 
 Self-hosters choose the backend the same way they choose `STORAGE_BACKEND`,
 `SCREENSHOT_BACKEND` or `METADATA_FALLBACK_BACKEND`.
@@ -317,20 +533,26 @@ EMBEDDING_BACKEND=disabled | openai | fastembed     # default: disabled
 EMBEDDING_MODEL=text-embedding-3-small              # or BAAI/bge-small-en-v1.5
 EMBEDDING_DIMENSIONS=512                            # must match the migration's column (see Storage)
 OPENAI_EMBEDDING_API_KEY=...                        # operator key; separate from users' BYO keys
+ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so           # fastembed only
 ARTICLE_INGEST_CONCURRENCY=4
 ARTICLE_INGEST_ENABLED=1                            # 0 = metadata-only (today's behaviour + ranking)
 ```
 
 `fastembed` sits behind a cargo feature, `local-embeddings`, so the default
-build and binary don't carry ONNX Runtime. The `ort` crate is still at
-2.0.0-rc.
+build and binary don't carry ONNX Runtime. The prototype enables fastembed
+7.5 with `ort-load-dynamic` (ONNX Runtime is loaded at run time from
+`ORT_DYLIB_PATH`, so the build downloads no native binaries) and
+`hf-hub-rustls-tls` (the model download uses rustls, like the rest of the
+app).
 
 ### Schema (migration `015_bookmark_content_search.sql`)
 
-The prototype version is in `scripts/search-eval/sql/prototype_schema.sql`.
+The prototype version is in `scripts/search-eval/sql/prototype_schema.sql`,
+plus `eval.py`'s setup for the trigram column.
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS vector;  -- on MPG: enable in the dashboard first
+CREATE EXTENSION IF NOT EXISTS vector;   -- Fly MPG: enable in the dashboard first
+CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- (Neon: these statements enable them)
 
 CREATE TABLE bookmark_contents (
     bookmark_id UUID PRIMARY KEY REFERENCES bookmarks(id) ON DELETE CASCADE,
@@ -342,20 +564,22 @@ CREATE TABLE bookmark_contents (
     text        TEXT,              -- extracted article text, ≤ 200k chars
     text_chars  INT NOT NULL DEFAULT 0,
     content_hash TEXT,             -- sha256(text): skip re-embedding unchanged text
-    search      tsvector,          -- A title, B description, C url, D body
-    embedded_model TEXT,           -- model the chunks were built with
+    search      tsvector,          -- A title, B description, C url + tags, D body
+    meta_text   TEXT NOT NULL DEFAULT '',  -- title || ' ' || description, for the trigram leg
+    embedded_model TEXT,           -- Embedder::model_id() the chunks were built with
     fetched_at  TIMESTAMPTZ,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_bookmark_contents_user ON bookmark_contents(user_id);
 CREATE INDEX idx_bookmark_contents_search ON bookmark_contents USING GIN(search);
+CREATE INDEX idx_bookmark_contents_meta_trgm ON bookmark_contents USING GIN(meta_text gin_trgm_ops);
 CREATE INDEX idx_bookmark_contents_queue ON bookmark_contents(next_attempt_at)
     WHERE status = 'pending';
 
 CREATE TABLE bookmark_chunks (
     bookmark_id UUID NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
     user_id     UUID NOT NULL,
-    ord         INT  NOT NULL,
+    ord         INT  NOT NULL,     -- a failed fetch has one chunk, ord 0, made of the metadata
     text        TEXT NOT NULL,     -- the passage, shown as a snippet
     embedding   halfvec(512) NOT NULL,
     PRIMARY KEY (bookmark_id, ord)
@@ -364,41 +588,155 @@ CREATE INDEX idx_bookmark_chunks_user ON bookmark_chunks(user_id);
 CREATE INDEX idx_bookmark_chunks_hnsw ON bookmark_chunks
     USING hnsw (embedding halfvec_cosine_ops);
 
--- Backfill queue: every existing bookmark starts pending.
-INSERT INTO bookmark_contents (bookmark_id, user_id, search)
+-- Backfill queue: every existing bookmark starts pending, already searchable
+-- by its metadata in the lexical legs.
+INSERT INTO bookmark_contents (bookmark_id, user_id, search, meta_text)
 SELECT id, user_id,
        setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
        setweight(to_tsvector('english', coalesce(description, '')), 'B') ||
-       setweight(to_tsvector('english', url), 'C')
+       setweight(to_tsvector('english', url || ' ' || array_to_string(tags, ' ')), 'C'),
+       coalesce(title, '') || ' ' || coalesce(description, '')
 FROM bookmarks;
 ```
 
 - **Why a separate table.** The `bookmarks` row stays narrow; the list page
-  never reads the article text. Delete cascades. A failed fetch still has a
-  metadata-only `search` vector, so the bookmark stays findable.
-- **Why `search` is maintained by the app** and not a generated column: it
-  combines `bookmarks.title/description/url` with the body. A generated
-  column can't read another table. The repository rebuilds it whenever the
-  title, description, URL or text changes, in the same transaction as the
-  bookmark update.
+  never reads the article text. Delete cascades. A failed fetch keeps its
+  metadata-only `search`, `meta_text` and metadata chunk.
+- **Why `search` and `meta_text` are maintained by the app**, not generated
+  columns: they combine `bookmarks` fields with the body, and a generated
+  column can't read another table. The repository rebuilds them whenever
+  the title, description, URL, tags or text change, in the same transaction
+  as the bookmark update. (`eval.py` stores `unaccent(meta_text)`; that is
+  optional.)
 - **Why `halfvec(512)`.** `text-embedding-3-small` supports shortened
-  Matryoshka output (`dimensions: 512`). Combined with half-precision storage
-  (pgvector ≥ 0.7), that is 1 KB per chunk instead of 6 KB at 1536-d
-  float32, which keeps the HNSW index in RAM on the 1 GB plan. The local
-  `bge-small` (384-d) uses `halfvec(384)`. Because the dimension lives in the
-  migration, **changing models is a migration plus a re-embed backfill**. The
-  `embedded_model` column lets the worker find stale rows. (Not measured:
-  quality loss from 512-d truncation; published Matryoshka results put it at
-  about 1–2% nDCG.)
+  Matryoshka output (`dimensions: 512`). Combined with half-precision
+  storage (pgvector ≥ 0.7), that is 1 KB per chunk instead of 6 KB at
+  1536-d float32, which keeps the HNSW index in RAM on the 1 GB plan.
+  - The local `bge-small` (384-d) uses `halfvec(384)`.
+  - Because the dimension lives in the migration, **changing models is a
+    migration plus a re-embed backfill**. `embedded_model`
+    (`Embedder::model_id()`, which includes the dimension) lets the worker
+    find stale rows.
+  - The hosted harness measures the 512-d truncation directly, from the
+    same API call.
 - **Self-hosting / dev / CI** need a Postgres with pgvector:
-  - `docker-compose.yml`: `postgres:16-alpine` → `pgvector/pgvector:pg16`;
+  - `docker-compose.yml`: `postgres:16-alpine` → `pgvector/pgvector:pg16`
+    (it includes contrib, so `pg_trgm` too);
   - the CI `postgres:16` service → `pgvector/pgvector:pg16`;
-  - (`scripts/e2e/start-server.sh` reuses the compose `db`, so the compose change covers E2E);
-  - the self-hosting docs.
-  (A CI change is an implementation step for the owner, not part of this
-  spec PR.)
+  - `scripts/e2e/start-server.sh` reuses the compose `db`, so the compose
+    change covers E2E;
+  - the self-hosting docs: `fly mpg` toggles for `vector` and `pg_trgm`.
+
+  A CI change is an implementation step for the owner, not part of this
+  spec PR.
 
 ### Ports and adapters
+
+**Every embedding and LLM call sits behind a port with vendor adapters,
+chosen by configuration.** v1 search makes no LLM call. Any later LLM use
+in search, such as query rewriting or answers over bookmarks, goes through
+the shared `LlmClient` port defined by the tag-management spec
+(`server/src/domain/ports/llm_client.rs`, branch `spec-tag-management`):
+
+```rust
+// Owned by the tag-management spec; unchanged here.
+pub trait LlmClient: Send + Sync {
+    fn complete_structured(&self, req: StructuredRequest)
+        -> BoxFuture<'_, Result<StructuredResponse, DomainError>>;
+}
+// StructuredRequest { provider: TextProvider, api_key, model, system, user, json_schema, max_output_tokens }
+// StructuredResponse { json: serde_json::Value, usage: TokenUsage { input_tokens, output_tokens } }
+```
+
+**`Embedder` port** (implemented in this branch:
+`server/src/domain/ports/embedder.rs`):
+
+```rust
+/// Same alias as ports::llm_client::BoxFuture; import that one once both are on main.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedKind { Document, Query }
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Embeddings {
+    pub vectors: Vec<Vec<f32>>,   // one per input, input order, dims() long, L2-normalised
+    pub usage_tokens: u32,        // billable tokens from a hosted vendor; 0 for local models
+}
+
+pub trait Embedder: Send + Sync {
+    fn model_id(&self) -> &str;   // "<backend>:<model>@<dims>", e.g. "openai:text-embedding-3-small@512"
+    fn dims(&self) -> usize;      // 0 when disabled
+    fn enabled(&self) -> bool { true }
+    fn embed(&self, inputs: Vec<String>, kind: EmbedKind)
+        -> BoxFuture<'_, Result<Embeddings, DomainError>>;
+}
+```
+
+**Contract:**
+
+- **Batching.** Callers pass any number of inputs; the worker sends one
+  bookmark's chunks, at most 64. Adapters split them into vendor-sized
+  requests (OpenAI: 256 inputs or 400k characters per request, against API
+  limits of 2,048 inputs and 300k tokens) and keep the order.
+- **`EmbedKind`** selects the query or document form (the BGE query prefix,
+  Voyage's `input_type`) and the timeout: 1.5 s for a query, which is on the
+  request path, and 30 s for documents.
+- **Errors use `DomainError`, like `LlmClient`:**
+  - `InvalidInput` means the vendor will never accept the request (an empty
+    input, an unknown model, HTTP 400, or the backend is disabled). The
+    caller must not retry.
+  - `Internal` covers everything else: network, timeout, 429, 5xx, or a
+    rejected key. The ingest worker retries with backoff; search drops the
+    vector leg and logs at `warn`.
+  - Error messages carry the HTTP status, never the response body.
+
+**What changed from the interface in the review brief:**
+
+1. **Added `fn enabled(&self) -> bool { true }`, with a default.** The
+   disabled backend returns false, so search skips the vector leg without
+   calling `embed` and matching on an error. Existing adapters need no
+   code for it.
+2. **Defined the `model_id()` format** as `<backend>:<model>@<dims>`. The
+   signature is unchanged. Two vector spaces are comparable only if
+   backend, model *and* dimension match, and the string is stored per
+   bookmark.
+3. **`BoxFuture` is defined locally**, with the same definition as
+   `llm_client.rs`, until both land; then the local one becomes a
+   re-export. The `futures` crate is not added.
+4. **No `api_key` in the request.** This is deliberate, unlike
+   `StructuredRequest`: the key is the operator's and lives in the adapter
+   (E1 over E3, above).
+
+**Adapters** (`server/src/adapters/embedder.rs`, mirroring
+`adapters/llm_client.rs`):
+
+- **`OpenAiEmbedder`.** `/v1/embeddings` with `dimensions` (only for
+  `text-embedding-3-*`, and only when shortened). It validates the count
+  and length of every returned vector and re-normalises.
+- **`FastembedEmbedder`**, behind `#[cfg(feature = "local-embeddings")]`.
+  It runs on `spawn_blocking` behind a `Mutex`, because fastembed 7's
+  `embed` takes `&mut self`. It accepts the upstream model names
+  (`BAAI/bge-small-en-v1.5`), and adds the BGE query prefix for `Query`.
+- **`DisabledEmbedder`.** `enabled() == false`, `dims() == 0`, and `embed`
+  returns `InvalidInput`.
+- **`EmbedderRouter::from_settings(&EmbeddingSettings::from_env())`.** It
+  builds the backend named by `EMBEDDING_BACKEND` and delegates to it. It
+  refuses `openai` without a key, and `fastembed` in a build without the
+  feature.
+- **Tests:**
+  - 6 unit tests: settings parsing; the router; impossible dimensions;
+    batching, order, usage and the `dimensions` parameter against a local
+    axum fake vendor; error mapping without leaking the body; a wrong
+    vector size.
+  - 1 ignored fastembed test: it downloads the model and needs
+    `ORT_DYLIB_PATH`. It passed locally with ONNX Runtime 1.31.1.
+  - `cargo clippy -D warnings` passes with and without the feature.
+- The prototype is not wired into `main.rs`. The optional `fastembed`
+  dependency adds about 670 lines to `Cargo.lock` but nothing to the
+  default build.
+
+**Other ports:**
 
 ```rust
 // domain/ports/article_fetcher.rs
@@ -406,41 +744,24 @@ pub struct FetchedArticle { pub text: String, pub final_url: String, pub html_by
 pub trait ArticleFetcher: Send + Sync {
     fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedArticle, DomainError>>;
 }
-
-// domain/ports/embedder.rs
-pub trait Embedder: Send + Sync {
-    fn model_id(&self) -> &str;               // stored in embedded_model
-    fn dimensions(&self) -> usize;
-    fn embed_documents(&self, texts: &[String]) -> BoxFuture<'_, Result<Vec<Vec<f32>>, DomainError>>;
-    fn embed_query(&self, text: &str) -> BoxFuture<'_, Result<Vec<f32>, DomainError>>;
-}
 ```
-
-The query and document methods are separate because models such as BGE,
-Voyage and Nomic use different prefixes or `input_type` for each.
-
-**Adapters:**
 
 - `adapters/article/readability.rs`: `HtmlArticleFetcher`, using reqwest and
   `dom_smoothie` (a Readability.js port; MIT; active, 0.19 in 2026-10).
-- `adapters/embedding/openai.rs`: batches of up to 96 inputs, `dimensions`
-  set from config, timeout 20 s for documents and 1.5 s for queries.
-- `adapters/embedding/fastembed.rs`: behind the `local-embeddings` feature;
-  runs on the blocking pool (`spawn_blocking`).
-- `adapters/embedding/disabled.rs`: returns `Err(Unavailable)`, and the
-  search service skips the vector leg.
 
-**Repository** (`BookmarkRepository` grows, or a new `SearchRepository` port
-does; prefer the new port to keep the trait from growing):
+**Repository** (a new `SearchRepository` port, to keep
+`BookmarkRepository` from growing):
 
 - `search(user_id, query, query_vec: Option<Vec<f32>>, tags, limit, offset)
   -> Vec<SearchHit { bookmark, snippet, matched: Lexical|Semantic|Both }>`
 - `claim_ingest_batch(n) -> Vec<(bookmark_id, url)>`, using `FOR UPDATE SKIP
   LOCKED` and moving `next_attempt_at` forward as a lease
-- `store_article(bookmark_id, text, hash, chunks: Vec<(String, Vec<f32>)>, model)`
+- `store_article(bookmark_id, text, hash, chunks: Vec<(String, Vec<f32>)>, model_id)`
   in one transaction: replace the chunks, rebuild `search`, set
   `status='fetched'`
-- `mark_ingest_failed(bookmark_id, error, retry_at: Option<DateTime>)`
+- `mark_ingest_failed(bookmark_id, error, retry_at: Option<DateTime>,
+  meta_chunk: Option<(String, Vec<f32>)>)`: on the final failure, store the
+  metadata chunk
 
 ### Ingestion
 
@@ -456,14 +777,16 @@ the metadata: the `og:*` tags, falling back to `<title>` and
 `meta name=description`, plus a resolved image URL. Neither should get slower. So:
 
 1. **Enqueue on save.** `create` / `create_claimed` / `import_batch` insert the
-   `bookmark_contents` row (`status='pending'`, metadata-only `search`) in the
-   same transaction as the bookmark. A URL change on `update` resets it to
-   `pending`; a title or description edit only rebuilds `search`.
+   `bookmark_contents` row (`status='pending'`, metadata-only `search` and
+   `meta_text`) in the same transaction as the bookmark. A URL change on
+   `update` resets it to `pending`; a title, description or tag edit only
+   rebuilds `search`, `meta_text` and, for failed fetches, the metadata
+   chunk.
 2. **Worker.** `IngestWorker` is a long-lived tokio task spawned in
    `main.rs`. It would be the first one there; the image-fix and
-   tag-consolidation jobs are spawned from request handlers. It runs with its own one-connection budget
-   so it can't starve the request pool (`max_connections(5)` today). Each
-   loop:
+   tag-consolidation jobs are spawned from request handlers. It runs with
+   its own one-connection budget, so it can't starve the request pool
+   (`max_connections(5)` today). Each loop:
    - claims up to `ARTICLE_INGEST_CONCURRENCY` rows;
    - fetches with **at most one request per host per second** (imports are
      often many links to one site);
@@ -489,7 +812,8 @@ the metadata: the `og:*` tags, falling back to `<title>` and
    - Extracted text: ≤ 200,000 chars. The measured max was 99k; p90 was 22k
      for Wikipedia and 32k for HN.
    - Text under 300 chars is stored, but not chunked or embedded; the
-     lexical leg still sees it.
+     lexical leg still sees it, and the metadata chunk covers the vector
+     leg.
    - At most 64 chunks embedded per bookmark (6 of the 490 hit the cap). The
      whole capped text stays in the lexical index.
 5. **Failures.**
@@ -497,12 +821,14 @@ the metadata: the `og:*` tags, falling back to `<title>` and
      after 1 min, then 1 h, then 24 h, then marked `failed`.
    - Permanent errors (401/403/404/410, non-HTML, a Cloudflare challenge)
      are marked `failed` straight away.
+   - **On `failed` or `skipped`, embed the metadata
+     (`title\ndescription\nurl\ntags`) as chunk 0.** That is the measured
+     fallback: it takes failed-link queries from 0.061 to 0.918.
    - If the embedder fails (provider outage), keep the text, set
      `status='fetched'` with `embedded_model = NULL`, and retry embedding
      later. Full-text search works immediately.
-   - A failed bookmark is still searchable by its metadata. Expect **about a
-     third of real-world links to fail**, as measured. They are listed in
-     Settings → Search index with a "Retry" button.
+   - Expect **about a third of real-world links to fail**, as measured. They
+     are listed in Settings → Search index with a "Retry" button.
 6. **Chunking** (prototype: `scripts/search-eval/chunking.py`; the Rust
    version mirrors it):
    - Paragraph-aware windows of about 200 words with a 30-word overlap,
@@ -514,14 +840,24 @@ the metadata: the `og:*` tags, falling back to `<title>` and
      about 1k for hosted models. One sampled chunk in code-heavy text
      reached 962 tokens, which BGE silently truncates.
 
-### Search query (`SQL_HYBRID_AND` in `eval.py`, minus its eval-only `model` filter)
+### Search query (three legs)
+
+The two-leg core is `SQL_HYBRID` in `eval.py`, which `eval.py` checks
+against the Python fusion on every run. The `trg` CTE is the measured
+trigram leg (`TRGM` in `eval.py`, on plain columns).
 
 ```sql
 WITH lex AS (
-    SELECT bookmark_id, row_number() OVER (ORDER BY ts_rank(search, q, 1) DESC) AS r
+    SELECT bookmark_id, row_number() OVER (ORDER BY ts_rank(search, q, 1) DESC, bookmark_id) AS r
     FROM bookmark_contents, websearch_to_tsquery('english', $2) q
     WHERE user_id = $1 AND search @@ q
-    ORDER BY ts_rank(search, q, 1) DESC LIMIT 50
+    ORDER BY ts_rank(search, q, 1) DESC, bookmark_id LIMIT 50
+),
+trg AS (
+    SELECT bookmark_id, row_number() OVER (ORDER BY word_similarity($2, meta_text) DESC, bookmark_id) AS r
+    FROM bookmark_contents
+    WHERE user_id = $1 AND $2 <% meta_text          -- pg_trgm.word_similarity_threshold, default 0.6
+    ORDER BY word_similarity($2, meta_text) DESC, bookmark_id LIMIT 50
 ),
 nn AS (
     SELECT bookmark_id, embedding <=> $3 AS dist
@@ -530,27 +866,29 @@ nn AS (
     ORDER BY embedding <=> $3 LIMIT 200
 ),
 vec AS (
-    SELECT bookmark_id, row_number() OVER (ORDER BY min(dist)) AS r
-    FROM nn GROUP BY bookmark_id ORDER BY min(dist) LIMIT 50
+    SELECT bookmark_id, row_number() OVER (ORDER BY min(dist), bookmark_id) AS r
+    FROM nn GROUP BY bookmark_id ORDER BY min(dist), bookmark_id LIMIT 50
 )
 SELECT bookmark_id, sum(1.0 / (60 + r)) AS score
-FROM (SELECT * FROM lex UNION ALL SELECT * FROM vec) u
+FROM (SELECT * FROM lex UNION ALL SELECT * FROM trg UNION ALL SELECT * FROM vec) u
 GROUP BY bookmark_id
-ORDER BY score DESC
+ORDER BY score DESC, bookmark_id
 LIMIT $4 OFFSET $5;
 ```
 
-- **Tags filter.** Join `bookmarks` in both legs with `AND b.tags && $tags`.
+- **Tags filter.** Join `bookmarks` in each leg with `AND b.tags && $tags`.
   This is not measured, but it is cheap: GIN on `tags`, applied after the
   user scope.
-- **No query embedding** (backend disabled, a timeout over 1.5 s, or a
-  provider error): drop the `nn`/`vec` CTEs and run the lexical leg alone.
-  This is the measured "full-text AND" row.
+- **No query embedding** (`enabled() == false`, a timeout over 1.5 s, or a
+  provider error): drop `nn`/`vec`, and make `lex` "AND, else OR". Use the
+  AND query, and if it returns no rows, rerun the CTE with the OR query
+  (`replace(plainto_tsquery(...)::text, ' & ', ' | ')`). This is the
+  measured 0.791 lexical-only row.
 - **Index use.** With `SET LOCAL hnsw.iterative_scan = relaxed_order` and
   `hnsw.ef_search = 100`, the user filter doesn't starve the HNSW scan as
-  the table grows. pgvector ≥ 0.8 is required; MPG's version wasn't
-  published, so check on the cluster before rollout.
-- **Short and empty queries.** A one-word query still runs both legs.
+  the table grows. pgvector ≥ 0.8 is required: Neon has 0.8.0/0.8.6, and
+  MPG's version is to be checked on the cluster.
+- **Short and empty queries.** A one-word query still runs every leg.
   Vectors always return *something*, which is why results are capped (UI,
   below). An empty query keeps today's list behaviour.
 
@@ -572,7 +910,8 @@ The search input in `templates/components/header.html` keeps its
   It's rendered in a small `<p class="text-gray-400 text-sm">` under the
   description, with the matched terms in `<mark>`. A subtle "semantic match"
   label appears when only the vector leg found the bookmark, so a result
-  with no keyword overlap doesn't look like a bug.
+  with no keyword overlap doesn't look like a bug. A failed-fetch bookmark
+  shows no snippet.
 - **Status.** Settings gets a **Search index** panel: "Indexed 1,204 of 1,290
   articles · 86 couldn't be fetched (Retry all)", with the failing domains
   listed. The bookmark card menu gains **"Refetch article"**.
@@ -590,18 +929,21 @@ The search input in `templates/components/header.html` keeps its
 ### Backfill
 
 - Migration 015 enqueues every existing bookmark (the `INSERT … SELECT`
-  above). Metadata search keeps working throughout, now ranked.
+  above). Metadata search keeps working throughout, now ranked and
+  typo-tolerant.
 - The worker drains the queue at `ARTICLE_INGEST_CONCURRENCY` with
   per-host throttling.
 - Throughput, measured:
   - fetch + extract: median 0.77 s per page, so about 5 pages/s at
     concurrency 4, or **about 3–4 minutes per 1,000 bookmarks**;
-  - hosted embedding (96 inputs per request) is not the bottleneck;
+  - hosted embedding is not the bottleneck;
   - local bge-small at about 1 bookmark/s (9.6 chunks/s) is: **about 17
     minutes per 1,000 bookmarks** on 4 vCPUs, and slower on
     `shared-cpu-1x`.
+- Production had 334 bookmarks at the move (PR #33). The full backfill is
+  minutes, and costs about $0.02 with E1.
 - Old bookmarks suffer link rot. Expect a higher failure rate than the 33%
-  measured on popular HN links.
+  measured on popular HN links; the metadata fallback covers them.
 - Changing the embedding model later means a migration for the new dimension
   plus `UPDATE bookmark_contents SET embedded_model = NULL`. The worker then
   re-embeds from the stored text, with **no refetch**. The text is kept for
@@ -610,31 +952,72 @@ The search input in `templates/components/header.html` keeps its
 ### Cost
 
 **Per 1,000 bookmarks.** Measured basis: 2,696 embedding-input tokens and
-10.3 chunks per bookmark. Storage is scaled from the prototype's 490
+10.3 chunks per scraped bookmark. Storage is scaled from the prototype's 490
 bookmarks.
 
 | item | E1 hosted (te3-small, 512-d halfvec) | E2 local (bge-small, 384-d halfvec) | E4 disabled |
 |---|---|---|---|
 | ingest: embedding API | 2.7M tok × $0.02/M = **$0.054** (te3-large: $0.35) | $0 | $0 |
 | ingest: compute | negligible | ≈17 min of CPU (4 vCPU) | negligible |
-| storage: article text + tsvector + GIN | ≈27 MB | ≈27 MB | ≈27 MB |
+| storage: article text + tsvector + GIN + trigram on metadata² | ≈28 MB | ≈28 MB | ≈28 MB |
 | storage: chunks + HNSW | ≈35 MB¹ | ≈30 MB¹ | 0 |
-| storage $ on MPG ($0.28/GB-mo) | ≈$0.017/mo | ≈$0.016/mo | ≈$0.008/mo |
-| query | ≈12 tok → **$0.00000024**/query ($0.24 per 1M) + ~100–300 ms RTT | ≈5 ms CPU per query (measured p50 4.1–6.5 ms) | $0 |
+| storage $ on MPG ($0.28/GB-mo) | ≈$0.018/mo | ≈$0.016/mo | ≈$0.008/mo |
+| query | ≈12 tok → **$0.00000024**/query ($0.24 per 1M) + one HTTPS round trip | ≈5 ms CPU per query (measured p50 4.1–6.5 ms) | $0 |
 | fixed | none | VM 512 MB → ≥1 GB (about +$5/mo on Fly) | none |
 
 ¹ Measured: the 490-bookmark prototype at 384-d float32 used 24 MB for
-chunks in total, of which 10 MB was the HNSW index; the rest is the vectors, the chunk text and TOAST. `halfvec` halves the
-vector part.
+chunks in total, of which 10 MB was the HNSW index; the rest is the vectors,
+the chunk text and TOAST. `halfvec` halves the vector part.
+
+² The GIN trigram index on `meta_text` measured 752 kB for 562 bookmarks,
+about 1.3 MB per 1,000.
 
 At 50k bookmarks across all users, the chunk index is about 1.5–1.8 GB.
 That stays manageable on Starter (2 GB RAM, $72/mo). On Basic (1 GB),
 queries fall back to a mostly exact scan of the *user's* rows (fine per
 user), and the shared HNSW won't stay cached. Revisit the plan at that size.
 
-**Hosted spend while prototyping:** $0.00. No hosted API was called, because no embedding key was available in this worker's environment. The hosted path is implemented and ready (`embedders.py`, which logs every call to `spend.jsonl`). A full `text-embedding-3-small` run is estimated at 1.32M corpus tokens plus about 300 query tokens, roughly **$0.03**.
+**Hosted spend while prototyping (this worker):** $0.00. No hosted API was
+called, because no key was available here. The helper's run logs its
+actual spend (model, calls, tokens, USD) in its result file; it is folded in
+below when it arrives.
 
 ---
+
+## Hosted measurement
+
+The hosted comparison runs on a helper's Mac with the real key, not in this
+worker. `scripts/search-eval/README.md` section A has the exact commands.
+In short:
+
+1. `brew install uv`, then clone and check out `spec-hybrid-search`.
+2. `fetch_corpus.py --from-manifest` rebuilds the pinned corpus. It is free
+   and takes about 3 minutes.
+3. Run `hosted_eval.py` with `OPENAI_API_KEY` in the environment. It needs
+   no Postgres: it ranks with exact cosine in numpy, and fuses with the
+   committed lexical rankings (`results/lexical_runs.json`). `ts_rank` and
+   `word_similarity` score each document on its own, so those lists stay
+   valid without the database.
+4. It writes `scripts/search-eval/results/hosted-<date>.json`.
+
+Safeguards and checks:
+
+- **Spend guard.** Before any call, it projects the spend with tiktoken and
+  aborts above `--max-usd 3`. While it runs, it stops at the cap from the
+  API's reported usage. It prints only metrics and HTTP status codes.
+- **Expected cost:** about $0.21, for `text-embedding-3-small` (≈$0.03)
+  and `text-embedding-3-large` (≈$0.18).
+- **What it measures:** each model at its native size and truncated (512
+  for small; 1024 and 512 for large), next to the local bge-small baseline
+  on the same rebuilt text.
+- **Validated without paying:**
+  - With the local model only, on a fresh rebuild (489 of 490 documents),
+    it reproduced the Postgres numbers to within 0.002 nDCG.
+  - The paid path was exercised against a fake local endpoint: the
+    pre-flight abort, the missing-key exit, the runtime guard, and the
+    spend logged even when the guard trips.
+
+**Results:** pending the helper's run.
 
 ## Errors and edge cases
 
@@ -648,26 +1031,34 @@ user), and the shared HNSW won't stay cached. Revisit the plan at that size.
 - **Huge single-page apps / docs sites.** Hitting the body cap or the chunk
   cap is fine: the lexical leg keeps everything up to 200k chars.
 - **Non-English pages.** The `english` FTS config stems them badly. Both
-  hosted models are multilingual, so the vector leg still works. `simple`
-  config detection is deferred.
+  hosted models are multilingual, so the vector leg still works, and the
+  trigram leg is language-agnostic. `simple` config detection is deferred.
+- **Accented names typed without accents** (`Grimsvotn`). The vector and
+  trigram legs find them (typo nDCG 0.931). An `unaccent` text-search
+  config would make the full-text leg match too. It is optional, and it
+  needs `CREATE EXTENSION unaccent` (available on both providers).
 - **Deleted bookmark mid-ingest.** The `FOR UPDATE` row lock plus the FK
   cascade mean the worker's store hits a missing row: treat 0 rows updated
   as done.
-- **Hosted embedder outage at query time.** Fall back to lexical-only after
-  1.5 s, and log at `warn` with a rate limit.
+- **Hosted embedder outage at query time.** Fall back to the lexical legs
+  after 1.5 s, and log at `warn` with a rate limit.
 
 ## Testing
 
 - **Unit:**
   - chunker: windows, overlap, header, chunk cap, token cap;
-  - RRF fusion order, with a pure function mirrored in SQL;
-  - status transitions and retry schedule;
+  - RRF fusion order, with a pure function mirrored in SQL (`common.rrf` is
+    the reference);
+  - status transitions, the retry schedule, and the metadata chunk on
+    failure;
   - SSRF: redirect to a private IP, and a DNS name resolving to 10.x;
   - content-type and size caps, using a local axum fixture server, as the
-    existing metadata tests do.
+    existing metadata tests do;
+  - `Embedder` adapters: already written, see above.
 - **Repository (Postgres + pgvector, like the `idempotency-postgres` CI
   job):**
   - `search` with and without `query_vec`;
+  - prefix and typo queries hitting the trigram leg;
   - user isolation (user B's chunks never appear);
   - tag filter;
   - cascade delete;
@@ -677,43 +1068,46 @@ user), and the shared HNSW won't stay cached. Revisit the plan at that size.
 - **E2E (Playwright):** save a bookmark served by the fixture server, wait
   for "indexed", search for a phrase that appears only in its body, and see
   the card with a `<mark>` snippet.
-- **Quality regression:** keep `scripts/search-eval` as an opt-in benchmark
-  (it needs network access to rebuild the corpus). Re-run before changing
-  the model, chunking or fusion, and record nDCG@10 in the PR.
+- **Quality regression:** keep `scripts/search-eval` as an opt-in benchmark.
+  Re-run `eval.py` before changing the model, chunking or fusion, and record
+  nDCG@10 in the PR.
 
 ## Build sequence (suggested)
 
 1. **Infrastructure.**
-   - Enable `vector` on the MPG cluster (dashboard).
+   - Enable `vector` and `pg_trgm` on the MPG database (dashboard toggles).
+   - Run the pg_available_extensions check above.
    - Switch the compose, CI and E2E Postgres images to pgvector (owner
      approval needed for the CI change).
    - Migration 015.
 2. **Full-text body search** with no embeddings: the `ArticleFetcher`
-   adapter, worker and queue, weighted `search`, relevance sort and
-   snippets. This alone is the measured 0.106 → 0.635 nDCG step, with
-   `EMBEDDING_BACKEND=disabled`.
-3. **`Embedder` port + OpenAI adapter**, chunks, and the hybrid query. This
-   is the measured step to 0.936.
+   adapter, worker and queue, weighted `search`, the trigram leg, relevance
+   sort and snippets. This is the measured lexical-only step (0.053 →
+   0.791), with `EMBEDDING_BACKEND=disabled`.
+3. **Wire the `Embedder` port** (already on this branch) into `main.rs`,
+   along with chunks, the metadata fallback chunk, and the three-leg query.
+   This is the measured step to 0.926.
 4. **Settings → Search index panel**, retry and refetch, plus the backfill
    rollout.
-5. **`local-embeddings` feature** (fastembed adapter) and the self-hosting
-   docs.
+5. **`local-embeddings` build and docs** for self-hosters (ONNX Runtime in
+   the image, `ORT_DYLIB_PATH`).
 
 ## Open questions
 
-1. **Hosted vs local quality.** This is still unmeasured, because no embedding key was available. To close it, run
-   `embed_variant.py --variant oai-small --embedder openai:text-embedding-3-small`, then
-   `eval.py --variants oai-small=openai:text-embedding-3-small` (about $0.03), and fill the
-   pending row. Published MTEB retrieval scores put `text-embedding-3-small` and
-   `bge-small-en-v1.5` close together. The recommendation does not depend on the result:
-   E1 is the production default for operational reasons (RAM on the 512 MB VM, no ONNX in
-   the default build), and every local model already reaches 0.926–0.941 hybrid nDCG.
-2. **pgvector version on MPG.** It isn't published. `iterative_scan` needs
-   ≥ 0.8.0 and `halfvec` needs ≥ 0.7.0. Check with `SELECT extversion FROM
-   pg_extension` once it's enabled.
-3. **Re-crawl policy.** Should articles be refetched periodically (for
-   example yearly) to pick up edits, or only when the user asks? v1 refetches
-   only on request.
-4. **Embedding model choice on the 1 GB vs 2 GB MPG plan**, once the real
-   bookmark count is known. A query against production (`SELECT count(*)
-   FROM bookmarks`) decides whether 512-d is needed or 1536-d fits.
+1. **Hosted vs local quality.** The helper runs `hosted_eval.py`. The
+   recommendation does not depend on the result: E1 is the production
+   default for operational reasons (RAM on the 512 MB VM, no ONNX in the
+   default build), and the local model already reaches 0.926. A clearly
+   better `-large` would change only `EMBEDDING_MODEL` and the column size.
+2. **The Neon leftovers.** Does the "Boopmark - Prod - Neon" project still
+   hold data? If so, decide whether to delete it. AGENTS.md:68 should say
+   Fly Managed Postgres.
+3. **pgvector version on MPG.** It isn't published. `iterative_scan` needs
+   ≥ 0.8.0 and `halfvec` needs ≥ 0.7.0. Check with the query above.
+4. **Re-crawl policy.** Should articles be refetched periodically (for
+   example yearly) to pick up edits, or only when the user asks? v1
+   refetches only on request.
+5. **Better fetching for the failed third.** The metadata fallback closes
+   about two thirds of the gap. The rest needs the body: retry 403s and
+   JS-only pages through the existing screenshot service (headless Chrome)
+   or the iframely/opengraph.io fallbacks. This is not measured.
