@@ -1,4 +1,5 @@
 pub mod bookmark;
+pub mod chunking;
 pub mod error;
 pub mod invite;
 pub mod llm_settings;
