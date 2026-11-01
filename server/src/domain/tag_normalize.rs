@@ -227,7 +227,10 @@ mod tests {
             group_of(&groups, "coding-agent").members,
             ["coding agents", "coding-agent"]
         );
-        assert_eq!(group_of(&groups, "libraries").members, ["libraries", "library"]);
+        assert_eq!(
+            group_of(&groups, "libraries").members,
+            ["libraries", "library"]
+        );
         assert_eq!(group_of(&groups, "kubernetes").members, ["kubernetes"]);
         assert_eq!(group_of(&groups, "news").members, ["news"]);
         assert_eq!(group_of(&groups, "ios").members, ["ios"]);

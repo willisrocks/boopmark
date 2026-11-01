@@ -9,8 +9,8 @@ mod tag_normalize;
 use tag_normalize::{Level, group_tags};
 
 fn main() {
-    let tags: Vec<(String, i64)> =
-        serde_json::from_reader(std::io::stdin()).expect("stdin must be a JSON array of [tag, count]");
+    let tags: Vec<(String, i64)> = serde_json::from_reader(std::io::stdin())
+        .expect("stdin must be a JSON array of [tag, count]");
     let mut out = serde_json::Map::new();
     for (name, level) in [
         ("case", Level::Case),
