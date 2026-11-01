@@ -26,6 +26,7 @@ CREATE TABLE bookmark_contents (
                     CHECK (status IN ('pending', 'fetched', 'failed', 'skipped')),
     attempts        INT NOT NULL DEFAULT 0,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    claim_token     UUID,                       -- set by each claim; a stale worker cannot write
     error           TEXT,
     text            TEXT,                       -- extracted article text, capped by the worker
     text_chars      INT NOT NULL DEFAULT 0,
@@ -55,7 +56,7 @@ BEGIN
                 bookmark_search_document(NEW.title, NEW.description, NEW.url, NEW.tags, NULL),
                 concat_ws(' ', NEW.title, NEW.description))
         ON CONFLICT (bookmark_id) DO UPDATE SET
-            status = 'pending', attempts = 0, next_attempt_at = now(), error = NULL,
+            status = 'pending', attempts = 0, next_attempt_at = now(), claim_token = NULL, error = NULL,
             text = NULL, text_chars = 0, content_hash = NULL, fetched_at = NULL,
             search = EXCLUDED.search, meta_text = EXCLUDED.meta_text, updated_at = now();
         PERFORM pg_notify('bookmark_ingest', '');

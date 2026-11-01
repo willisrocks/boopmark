@@ -11,6 +11,14 @@ pub const MAX_SEARCH_RESULTS: i64 = 50;
 /// Extracted article text is truncated to this many characters before it is
 /// stored. The measured maximum was 99k; the lexical leg keeps all of it.
 pub const ARTICLE_TEXT_CAP_CHARS: usize = 200_000;
+/// ... and to this many bytes, which keeps its tsvector well under
+/// Postgres's 1 MB limit even for text in a multibyte script.
+pub const ARTICLE_TEXT_CAP_BYTES: usize = 512 * 1024;
+
+/// A queue row is given up (`failed`) once it has been claimed this many
+/// times. The retry schedule ends after 4 attempts; the margin covers leases
+/// that ran out because a worker died mid-job.
+pub const MAX_INGEST_ATTEMPTS: i32 = 6;
 
 /// The database wraps each highlighted term of a snippet in these control
 /// characters. They never occur in extracted text, and they keep the markup
@@ -49,14 +57,16 @@ pub fn retry_delay(attempts: i32) -> Option<Duration> {
     }
 }
 
-/// One claimed row of the ingest queue. `url` is the URL at claim time; the
-/// result is only stored while the bookmark still has it.
+/// One claimed row of the ingest queue. The result is only stored while the
+/// bookmark still has `url` and the row still carries `claim_token`: a URL
+/// edit or a later claim (after the lease ran out) makes this job stale.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct IngestJob {
     pub bookmark_id: Uuid,
     pub url: String,
     /// Attempts including this one.
     pub attempts: i32,
+    pub claim_token: Uuid,
 }
 
 /// How an ingest attempt ended when no article was stored. A `Pending`
@@ -73,38 +83,94 @@ pub struct IngestFailure {
 /// result, whichever leg found it: quoted phrases and `-exclusions`, as a
 /// websearch string of their own (`coffee "cold brew" -tea` gives
 /// `"cold brew" -tea`). `None` when the query has neither.
+///
+/// `or` keeps its meaning. websearch binds AND tighter than OR, so the query
+/// is a disjunction of groups; the constraint keeps the operators of every
+/// group, joined by `or`. A group without operators constrains nothing, and
+/// then neither does the whole query (`"cold brew" or espresso`).
 pub fn websearch_constraints(text: &str) -> Option<String> {
+    let mut groups: Vec<Vec<String>> = vec![Vec::new()];
+    let mut group_has_terms = vec![false];
+    for token in websearch_tokens(text) {
+        match token {
+            WebsearchToken::Or => {
+                groups.push(Vec::new());
+                group_has_terms.push(false);
+            }
+            WebsearchToken::Operator(op) => {
+                groups.last_mut().unwrap().push(op);
+                *group_has_terms.last_mut().unwrap() = true;
+            }
+            WebsearchToken::Word => *group_has_terms.last_mut().unwrap() = true,
+        }
+    }
+    let groups: Vec<Vec<String>> = groups
+        .into_iter()
+        .zip(group_has_terms)
+        .filter(|(_, has_terms)| *has_terms)
+        .map(|(ops, _)| ops)
+        .collect();
+    if groups.is_empty() || groups.iter().any(Vec::is_empty) {
+        return None;
+    }
+    Some(
+        groups
+            .iter()
+            .map(|ops| ops.join(" "))
+            .collect::<Vec<_>>()
+            .join(" or "),
+    )
+}
+
+enum WebsearchToken {
+    /// A quoted phrase or an `-exclusion`, as written.
+    Operator(String),
+    /// The `or` keyword.
+    Or,
+    /// Any other term.
+    Word,
+}
+
+fn websearch_tokens(text: &str) -> Vec<WebsearchToken> {
     let chars: Vec<char> = text.chars().collect();
-    let mut parts = Vec::new();
+    let mut tokens = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        let at_word_start = i == 0 || chars[i - 1].is_whitespace();
-        let negated = chars[i] == '-' && at_word_start;
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let negated = chars[i] == '-';
         let body = if negated { i + 1 } else { i };
-        if chars.get(body) == Some(&'"') && (negated || at_word_start) {
+        if chars.get(body) == Some(&'"') {
             let close = chars[body + 1..].iter().position(|c| *c == '"');
             let end = close.map_or(chars.len(), |p| body + 1 + p);
             let phrase: String = chars[body + 1..end].iter().collect();
             if !phrase.trim().is_empty() {
-                parts.push(format!(
-                    "{}\"{}\"",
-                    if negated { "-" } else { "" },
+                let sign = if negated { "-" } else { "" };
+                tokens.push(WebsearchToken::Operator(format!(
+                    "{sign}\"{}\"",
                     phrase.trim()
-                ));
+                )));
             }
             i = end + 1;
-        } else if negated && chars.get(body).is_some_and(|c| !c.is_whitespace()) {
-            let end = chars[body..]
-                .iter()
-                .position(|c| c.is_whitespace())
-                .map_or(chars.len(), |p| body + p);
-            parts.push(chars[i..end].iter().collect());
-            i = end;
-        } else {
-            i += 1;
+            continue;
         }
+        let end = chars[i..]
+            .iter()
+            .position(|c| c.is_whitespace())
+            .map_or(chars.len(), |p| i + p);
+        let word: String = chars[i..end].iter().collect();
+        if negated && word.len() > 1 {
+            tokens.push(WebsearchToken::Operator(word));
+        } else if word.eq_ignore_ascii_case("or") {
+            tokens.push(WebsearchToken::Or);
+        } else if word != "-" {
+            tokens.push(WebsearchToken::Word);
+        }
+        i = end;
     }
-    (!parts.is_empty()).then(|| parts.join(" "))
+    tokens
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +256,15 @@ mod tests {
         assert_eq!(websearch_constraints("well-known rust"), None);
         assert_eq!(websearch_constraints("plain words"), None);
         assert_eq!(websearch_constraints("dangling - \"\""), None);
+        assert_eq!(
+            websearch_constraints("\"cold brew\" OR \"grind size\" -tea").as_deref(),
+            Some("\"cold brew\" or \"grind size\" -tea")
+        );
+        assert_eq!(websearch_constraints("\"cold brew\" or espresso"), None);
+        assert_eq!(
+            websearch_constraints("or coffee -tea or").as_deref(),
+            Some("-tea")
+        );
     }
 
     #[test]

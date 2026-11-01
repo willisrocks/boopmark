@@ -891,6 +891,7 @@ dependencies = [
  "csv",
  "dom_smoothie",
  "dotenvy",
+ "encoding_rs",
  "fastembed",
  "image",
  "rand 0.9.2",

@@ -194,3 +194,24 @@ Modified (small, additive): `domain/mod.rs`, `domain/ports/mod.rs`,
       server's `/api/v1/bookmarks?search=`, report nDCG@10 per type against
       0.791. Optionally `--ingest` to let the worker fetch with dom_smoothie.
 - [ ] Push, PR, report.
+
+## Changes after review (PR #42)
+
+- The guard judges IPv6 forms that carry an IPv4 address (NAT64
+  `64:ff9b::/96`, 6to4 `2002::/16`) by that address, refuses Teredo and the
+  local-use NAT64 prefix, and allows only ports 80, 443, 8080 and 8443.
+- `HtmlMetadataExtractor` uses the same guarded client (resolver, checked
+  redirects, no proxy) as the article fetcher.
+- The article fetcher follows redirects itself, so every hop is checked by
+  the guard and waits for its host's slot (the per-host throttle moved from
+  the worker into the fetcher). It decodes the declared charset (BOM,
+  `Content-Type`, `<meta>`, then UTF-8) and gives extraction 20 s.
+- The worker keeps up to `concurrency` jobs in flight and claims as slots
+  free up; each job has a 2-minute deadline.
+- Claims pick round-robin by user, then host, from a window of due rows,
+  stamp a fresh `claim_token`, and give up on rows claimed 6 times. Results
+  are written in a transaction that share-locks the bookmark, checks its URL,
+  and requires the claim token. Text is also capped at 512 KB.
+- Phrase and exclusion constraints apply inside each leg as well as on the
+  fused union, and keep `or` between groups.
+- CI runs `cargo test -p boopmark-server adapters::postgres::search_repo::search_tests -- --ignored`.

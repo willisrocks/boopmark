@@ -3,9 +3,10 @@ use crate::domain::bookmark::{Bookmark, BookmarkSort};
 use crate::domain::error::DomainError;
 use crate::domain::ports::search_repo::SearchRepository;
 use crate::domain::search::{
-    IngestFailure, IngestJob, MAX_SEARCH_RESULTS, SearchHit, SearchQuery, Snippet,
-    websearch_constraints,
+    IngestFailure, IngestJob, MAX_INGEST_ATTEMPTS, MAX_SEARCH_RESULTS, SearchHit, SearchQuery,
+    Snippet, websearch_constraints,
 };
+use sqlx::{Postgres, Transaction};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -13,6 +14,9 @@ use uuid::Uuid;
 /// rank `r` as `1 / (RRF_K + r)` (the measured configuration).
 const LEG_DEPTH: i64 = 50;
 const RRF_K: i64 = 60;
+/// How many due queue rows a claim looks at when it picks its jobs round-robin
+/// by user and host.
+const CLAIM_WINDOW: i64 = 500;
 
 /// `ts_headline` options: one fragment of about 20 words, with matches wrapped
 /// in the `SNIPPET_START`/`SNIPPET_STOP` control characters.
@@ -43,9 +47,11 @@ struct SearchSql {
 ///
 /// `fused` combines the legs with Reciprocal Rank Fusion and keeps the top
 /// `MAX_SEARCH_RESULTS`. A further leg (the vector leg) is one more CTE that
-/// returns `(bookmark_id, r)`, and one more arm in `legs`. Quoted phrases and
-/// `-exclusions` filter the fused union, so no leg can bring back a bookmark
-/// the query excludes.
+/// returns `(bookmark_id, r)`, and one more arm in `legs`.
+///
+/// Quoted phrases and `-exclusions` (`cq`) filter inside each lexical leg,
+/// so excluded bookmarks do not use up a leg's top 50, and again on the
+/// fused union, so no leg can bring back a bookmark the query excludes.
 fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> SearchSql {
     // $1 user, $2 query text, then the optional tags and constraints, then
     // limit and offset.
@@ -64,15 +70,17 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Sear
     } else {
         (String::new(), String::new())
     };
-    let constraint_filter = if has_constraints {
+    let (constraint_column, leg_constraint, fused_constraint) = if has_constraints {
         let constraints = param();
-        format!(
-            " WHERE EXISTS (SELECT 1 FROM bookmark_contents fc, \
-                  websearch_to_tsquery('english', {constraints}) cq \
-              WHERE fc.bookmark_id = u.bookmark_id AND (numnode(cq) = 0 OR fc.search @@ cq))"
+        (
+            format!(",\n                    websearch_to_tsquery('english', {constraints}) AS cq"),
+            " AND (numnode(q.cq) = 0 OR c.search @@ q.cq)",
+            " WHERE EXISTS (SELECT 1 FROM bookmark_contents fc CROSS JOIN q
+                     WHERE fc.bookmark_id = u.bookmark_id
+                       AND (numnode(q.cq) = 0 OR fc.search @@ q.cq))",
         )
     } else {
-        String::new()
+        (String::new(), "", "")
     };
     let limit = param();
     let offset = param();
@@ -95,12 +103,12 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Sear
         "WITH q AS (
              SELECT websearch_to_tsquery('english', $2) AS and_q,
                     to_tsquery('english',
-                        replace(plainto_tsquery('english', $2)::text, ' & ', ' | ')) AS or_q
+                        replace(plainto_tsquery('english', $2)::text, ' & ', ' | ')) AS or_q{constraint_column}
          ),
          lex_and AS (
              SELECT c.bookmark_id, ts_rank(c.search, q.and_q, 1) AS rank
              FROM bookmark_contents c CROSS JOIN q{scope_join}
-             WHERE c.user_id = $1 AND c.search @@ q.and_q{scope_filter}
+             WHERE c.user_id = $1 AND c.search @@ q.and_q{scope_filter}{leg_constraint}
              ORDER BY rank DESC, c.bookmark_id
              LIMIT {LEG_DEPTH}
          ),
@@ -108,7 +116,7 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Sear
              SELECT c.bookmark_id, ts_rank(c.search, q.or_q, 1) AS rank
              FROM bookmark_contents c CROSS JOIN q{scope_join}
              WHERE NOT EXISTS (SELECT 1 FROM lex_and)
-               AND c.user_id = $1 AND c.search @@ q.or_q{scope_filter}
+               AND c.user_id = $1 AND c.search @@ q.or_q{scope_filter}{leg_constraint}
              ORDER BY rank DESC, c.bookmark_id
              LIMIT {LEG_DEPTH}
          ),
@@ -124,15 +132,15 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Sear
              SELECT c.bookmark_id,
                     row_number() OVER (ORDER BY word_similarity($2, c.meta_text) DESC,
                                                 c.bookmark_id) AS r
-             FROM bookmark_contents c{scope_join}
-             WHERE c.user_id = $1 AND $2 <% c.meta_text{scope_filter}
+             FROM bookmark_contents c CROSS JOIN q{scope_join}
+             WHERE c.user_id = $1 AND $2 <% c.meta_text{scope_filter}{leg_constraint}
              ORDER BY word_similarity($2, c.meta_text) DESC, c.bookmark_id
              LIMIT {LEG_DEPTH}
          ),
          fused AS (
              SELECT u.bookmark_id, sum(1.0 / ({RRF_K} + u.r)) AS score,
                     bool_or(u.lexical) AS lexical
-             FROM ({legs}) u{constraint_filter}
+             FROM ({legs}) u{fused_constraint}
              GROUP BY u.bookmark_id
              ORDER BY score DESC, u.bookmark_id
              LIMIT {MAX_SEARCH_RESULTS}
@@ -197,26 +205,57 @@ impl SearchRepository for PostgresPool {
         limit: i64,
         lease: Duration,
     ) -> Result<Vec<IngestJob>, DomainError> {
-        sqlx::query_as::<_, IngestJob>(
-            "UPDATE bookmark_contents c
+        // `swept` gives up on rows claimed MAX_INGEST_ATTEMPTS times without a
+        // result (leases that ran out, results that could never be stored).
+        // `due` locks a window of due rows; `picked` takes them round-robin,
+        // each user's next row first and then each host's, so one user's big
+        // import does not hold up everyone else. Every claim gets a fresh
+        // token, so a worker whose lease ran out can no longer write.
+        let sql = format!(
+            "WITH swept AS (
+                 UPDATE bookmark_contents
+                 SET status = 'failed', claim_token = NULL, updated_at = now(),
+                     error = 'gave up after ' || attempts || ' attempts'
+                 WHERE status = 'pending' AND attempts >= $3 AND next_attempt_at <= now()
+                 RETURNING bookmark_id
+             ),
+             due AS (
+                 SELECT c.bookmark_id, c.user_id, c.next_attempt_at,
+                        lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)')) AS host
+                 FROM bookmark_contents c JOIN bookmarks b ON b.id = c.bookmark_id
+                 WHERE c.status = 'pending' AND c.next_attempt_at <= now() AND c.attempts < $3
+                 ORDER BY c.next_attempt_at, c.bookmark_id
+                 LIMIT {CLAIM_WINDOW}
+                 FOR UPDATE OF c SKIP LOCKED
+             ),
+             picked AS (
+                 SELECT bookmark_id FROM (
+                     SELECT bookmark_id, next_attempt_at,
+                            row_number() OVER (PARTITION BY user_id
+                                               ORDER BY next_attempt_at, bookmark_id) AS user_turn,
+                            row_number() OVER (PARTITION BY host
+                                               ORDER BY next_attempt_at, bookmark_id) AS host_turn
+                     FROM due
+                 ) d
+                 ORDER BY user_turn, host_turn, next_attempt_at, bookmark_id
+                 LIMIT $1
+             )
+             UPDATE bookmark_contents c
              SET attempts = c.attempts + 1,
                  next_attempt_at = now() + make_interval(secs => $2),
+                 claim_token = gen_random_uuid(),
                  updated_at = now()
              FROM bookmarks b
-             WHERE b.id = c.bookmark_id
-               AND c.bookmark_id IN (
-                   SELECT bookmark_id FROM bookmark_contents
-                   WHERE status = 'pending' AND next_attempt_at <= now()
-                   ORDER BY next_attempt_at, bookmark_id
-                   LIMIT $1
-                   FOR UPDATE SKIP LOCKED)
-             RETURNING c.bookmark_id, b.url, c.attempts",
-        )
-        .bind(limit)
-        .bind(lease.as_secs_f64())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DomainError::Internal(e.to_string()))
+             WHERE b.id = c.bookmark_id AND c.bookmark_id IN (SELECT bookmark_id FROM picked)
+             RETURNING c.bookmark_id, b.url, c.attempts, c.claim_token"
+        );
+        sqlx::query_as::<_, IngestJob>(&sql)
+            .bind(limit)
+            .bind(lease.as_secs_f64())
+            .bind(MAX_INGEST_ATTEMPTS)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))
     }
 
     async fn store_article(
@@ -225,23 +264,29 @@ impl SearchRepository for PostgresPool {
         text: &str,
         content_hash: &str,
     ) -> Result<bool, DomainError> {
+        let Some(mut tx) = self.lock_claimed(job).await? else {
+            return Ok(false);
+        };
         let result = sqlx::query(
             "UPDATE bookmark_contents c
-             SET status = 'fetched', error = NULL, text = $3, text_chars = char_length($3),
-                 content_hash = $4,
+             SET status = 'fetched', error = NULL, claim_token = NULL,
+                 text = $3, text_chars = char_length($3), content_hash = $4,
                  search = bookmark_search_document(b.title, b.description, b.url, b.tags, $3),
                  fetched_at = now(), updated_at = now()
              FROM bookmarks b
-             WHERE c.bookmark_id = $1 AND b.id = c.bookmark_id AND b.url = $2
-               AND c.status = 'pending'",
+             WHERE c.bookmark_id = $1 AND b.id = c.bookmark_id
+               AND c.claim_token = $2 AND c.status = 'pending'",
         )
         .bind(job.bookmark_id)
-        .bind(&job.url)
+        .bind(job.claim_token)
         .bind(text)
         .bind(content_hash)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| DomainError::Internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -250,22 +295,51 @@ impl SearchRepository for PostgresPool {
         job: &IngestJob,
         failure: &IngestFailure,
     ) -> Result<bool, DomainError> {
+        let Some(mut tx) = self.lock_claimed(job).await? else {
+            return Ok(false);
+        };
         let result = sqlx::query(
-            "UPDATE bookmark_contents c
-             SET status = $3, error = $4, next_attempt_at = coalesce($5, now()), updated_at = now()
-             FROM bookmarks b
-             WHERE c.bookmark_id = $1 AND b.id = c.bookmark_id AND b.url = $2
-               AND c.status = 'pending'",
+            "UPDATE bookmark_contents
+             SET status = $3, error = $4, next_attempt_at = coalesce($5, now()),
+                 claim_token = NULL, updated_at = now()
+             WHERE bookmark_id = $1 AND claim_token = $2 AND status = 'pending'",
         )
         .bind(job.bookmark_id)
-        .bind(&job.url)
+        .bind(job.claim_token)
         .bind(failure.status.as_str())
         .bind(&failure.error)
         .bind(failure.retry_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| DomainError::Internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
         Ok(result.rows_affected() > 0)
+    }
+}
+
+impl PostgresPool {
+    /// Start the transaction that writes an ingest result: share-lock the
+    /// bookmark so its URL cannot change until the write commits, and check
+    /// that it still has the claimed URL. `None` when it was deleted or moved.
+    /// The write itself then checks the claim token.
+    async fn lock_claimed(
+        &self,
+        job: &IngestJob,
+    ) -> Result<Option<Transaction<'static, Postgres>>, DomainError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DomainError::Internal(e.to_string()))?;
+        let url: Option<String> =
+            sqlx::query_scalar("SELECT url FROM bookmarks WHERE id = $1 FOR SHARE")
+                .bind(job.bookmark_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| DomainError::Internal(e.to_string()))?;
+        Ok((url.as_deref() == Some(job.url.as_str())).then_some(tx))
     }
 }
 
@@ -277,6 +351,7 @@ mod search_tests {
     use crate::domain::search::IngestStatus;
     use sqlx::PgPool;
     use sqlx::postgres::PgPoolOptions;
+    use std::collections::HashMap;
 
     async fn pool() -> PgPool {
         let database_url = std::env::var("DATABASE_URL")
@@ -322,16 +397,55 @@ mod search_tests {
         .expect("create bookmark")
     }
 
-    fn job(b: &Bookmark) -> IngestJob {
-        IngestJob {
-            bookmark_id: b.id,
-            url: b.url.clone(),
-            attempts: 1,
-        }
+    /// The tests claim from the shared queue, so they must not interleave.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    const LEASE: Duration = Duration::from_secs(600);
+
+    /// Release claims that belong to rows outside these tests, as if they
+    /// had never been claimed.
+    async fn release_others(pool: &PgPool, jobs: &[IngestJob], mine: &[Uuid]) {
+        let others: Vec<Uuid> = jobs
+            .iter()
+            .map(|j| j.bookmark_id)
+            .filter(|id| !mine.contains(id))
+            .collect();
+        sqlx::query(
+            "UPDATE bookmark_contents
+             SET next_attempt_at = now(), attempts = attempts - 1, claim_token = NULL
+             WHERE bookmark_id = ANY($1)",
+        )
+        .bind(&others)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
-    async fn store(repo: &PostgresPool, b: &Bookmark, text: &str) {
-        assert!(repo.store_article(&job(b), text, "hash").await.unwrap());
+    /// Move these users' pending rows to the head of the queue (ahead of
+    /// anything else in a shared database), claim them, and release whatever
+    /// else the claim took.
+    async fn claim_mine(
+        pool: &PgPool,
+        repo: &PostgresPool,
+        users: &[Uuid],
+    ) -> HashMap<Uuid, IngestJob> {
+        let mine: Vec<Uuid> = sqlx::query_scalar(
+            "UPDATE bookmark_contents SET next_attempt_at = '1970-01-01'
+             WHERE user_id = ANY($1) AND status = 'pending' RETURNING bookmark_id",
+        )
+        .bind(users)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let jobs = repo.claim_ingest_batch(1000, LEASE).await.unwrap();
+        release_others(pool, &jobs, &mine).await;
+        jobs.into_iter()
+            .filter(|j| mine.contains(&j.bookmark_id))
+            .map(|j| (j.bookmark_id, j))
+            .collect()
+    }
+
+    async fn store(repo: &PostgresPool, job: &IngestJob, text: &str) {
+        assert!(repo.store_article(job, text, "hash").await.unwrap());
     }
 
     async fn search(repo: &PostgresPool, user_id: Uuid, text: &str) -> Vec<SearchHit> {
@@ -372,10 +486,11 @@ mod search_tests {
     }
 
     /// Run with a migrated database:
-    /// `DATABASE_URL=... cargo test -p boopmark-server search_tests -- --ignored`.
+    /// `DATABASE_URL=... cargo test -p boopmark-server adapters::postgres::search_repo::search_tests -- --ignored`.
     #[tokio::test]
     #[ignore = "requires a migrated Postgres database (DATABASE_URL)"]
     async fn hybrid_search_ranks_falls_back_filters_and_isolates_users() {
+        let _serial = SERIAL.lock().await;
         let pool = pool().await;
         let repo = PostgresPool::new(pool.clone());
         let alice = user(&pool).await;
@@ -446,40 +561,41 @@ mod search_tests {
         )
         .await;
 
+        let jobs = claim_mine(&pool, &repo, &[alice]).await;
         store(
             &repo,
-            &book,
+            &jobs[&book.id],
             "Ownership is Rust's most unique feature. The borrow checker enforces the rules.",
         )
         .await;
         store(
             &repo,
-            &runtime,
+            &jobs[&runtime.id],
             "A runtime schedules tasks. Holding a mutex across an await point needs care with \
              ownership of the guard. <img src=x onerror=alert(1)> Spawned tasks must be 'static.",
         )
         .await;
         store(
             &repo,
-            &garden,
+            &jobs[&garden.id],
             "Mix greens and browns. Turning the pile adds oxygen and speeds decomposition.",
         )
         .await;
         store(
             &repo,
-            &cafe,
+            &jobs[&cafe.id],
             "Rinse the filter, bloom the grounds, then pour slowly. Steep the tea for three minutes.",
         )
         .await;
         store(
             &repo,
-            &espresso,
+            &jobs[&espresso.id],
             "Grind finer when the shot runs fast. Coffee extraction depends on grind size.",
         )
         .await;
         assert!(
             repo.record_ingest_failure(
-                &job(&failed),
+                &jobs[&failed.id],
                 &IngestFailure {
                     status: IngestStatus::Failed,
                     error: "HTTP 403".into(),
@@ -540,6 +656,9 @@ mod search_tests {
             ids(&search(&repo, alice, "coffee \"grind size\"").await),
             [espresso.id]
         );
+        // `or` between phrases keeps its meaning in the filter.
+        let either = ids(&search(&repo, alice, "\"grind size\" or \"loose-leaf tea\"").await);
+        assert!(either.contains(&espresso.id) && either.contains(&cafe.id));
 
         // Tag filter.
         let hits = search_with(
@@ -605,7 +724,7 @@ mod search_tests {
         );
         assert!(
             !repo
-                .store_article(&job(&garden), "stale", "h")
+                .store_article(&jobs[&garden.id], "stale", "h")
                 .await
                 .unwrap()
         );
@@ -626,73 +745,126 @@ mod search_tests {
 
     #[tokio::test]
     #[ignore = "requires a migrated Postgres database (DATABASE_URL)"]
-    async fn concurrent_claims_never_share_a_job_and_leases_hide_claimed_rows() {
+    async fn claims_are_exclusive_fair_tokened_and_bounded() {
+        let _serial = SERIAL.lock().await;
         let pool = pool().await;
         let repo = PostgresPool::new(pool.clone());
-        let owner = user(&pool).await;
-        let mut mine = Vec::new();
+        let importer = user(&pool).await;
+        let other = user(&pool).await;
+        let mut big_import = Vec::new();
         for i in 0..6 {
             let b = bookmark(
                 &repo,
-                owner,
-                &format!("https://example.net/claim-{i}"),
+                importer,
+                &format!("https://import.example.net/claim-{i}"),
                 "claim",
                 None,
                 &[],
             )
             .await;
-            mine.push(b.id);
+            big_import.push(b.id);
         }
-        // Put this test's rows at the head of the queue, ahead of any other
-        // pending rows in a shared database.
-        sqlx::query(
-            "UPDATE bookmark_contents SET next_attempt_at = '1970-01-01' WHERE user_id = $1",
+        let single = bookmark(
+            &repo,
+            other,
+            "https://elsewhere.example.org/one",
+            "claim",
+            None,
+            &[],
         )
-        .bind(owner)
+        .await;
+        let mut mine = big_import.clone();
+        mine.push(single.id);
+        let to_head = |ids: Vec<Uuid>, at: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "UPDATE bookmark_contents SET next_attempt_at = $2::timestamptz
+                     WHERE bookmark_id = ANY($1)",
+                )
+                .bind(ids)
+                .bind(at)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+
+        // Fairness: the importer's rows are older, but a claim of two takes
+        // one row from each user.
+        to_head(big_import.clone(), "1970-01-01").await;
+        to_head(vec![single.id], "1970-01-02").await;
+        let two = repo.claim_ingest_batch(2, LEASE).await.unwrap();
+        assert_eq!(two.len(), 2);
+        assert!(two.iter().any(|j| j.bookmark_id == single.id));
+        assert!(two.iter().any(|j| big_import.contains(&j.bookmark_id)));
+        release_others(&pool, &two, &[]).await;
+
+        // Two concurrent claimers never share a row.
+        to_head(mine.clone(), "1970-01-01").await;
+        let (a, b) = tokio::join!(
+            repo.claim_ingest_batch(100, LEASE),
+            repo.claim_ingest_batch(100, LEASE)
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(
+            a.iter()
+                .all(|j| b.iter().all(|k| k.bookmark_id != j.bookmark_id))
+        );
+        let all: Vec<IngestJob> = a.into_iter().chain(b).collect();
+        let mut claimed: Vec<Uuid> = all
+            .iter()
+            .map(|j| j.bookmark_id)
+            .filter(|id| mine.contains(id))
+            .collect();
+        claimed.sort();
+        let mut sorted_mine = mine.clone();
+        sorted_mine.sort();
+        assert_eq!(claimed, sorted_mine, "each row claimed exactly once");
+        release_others(&pool, &all, &mine).await;
+
+        // Leased rows are not handed out again.
+        let again = repo.claim_ingest_batch(1000, LEASE).await.unwrap();
+        assert!(again.iter().all(|j| !mine.contains(&j.bookmark_id)));
+        release_others(&pool, &again, &mine).await;
+
+        // After the lease runs out, a new claim takes the row over and the
+        // first worker can no longer write to it.
+        let stale = all.iter().find(|j| j.bookmark_id == single.id).unwrap();
+        to_head(vec![single.id], "1970-01-01").await;
+        let fresh = claim_mine(&pool, &repo, &[other]).await;
+        let fresh = &fresh[&single.id];
+        assert_ne!(fresh.claim_token, stale.claim_token);
+        assert_eq!(fresh.attempts, stale.attempts + 1);
+        assert!(!repo.store_article(stale, "late", "h").await.unwrap());
+        assert!(repo.store_article(fresh, "on time", "h").await.unwrap());
+
+        // A row claimed MAX_INGEST_ATTEMPTS times is given up.
+        let worn = big_import[1];
+        sqlx::query(
+            "UPDATE bookmark_contents SET attempts = $2, next_attempt_at = '1970-01-01'
+             WHERE bookmark_id = $1",
+        )
+        .bind(worn)
+        .bind(MAX_INGEST_ATTEMPTS)
         .execute(&pool)
         .await
         .unwrap();
-
-        let lease = Duration::from_secs(600);
-        let (a, b) = tokio::join!(
-            repo.claim_ingest_batch(3, lease),
-            repo.claim_ingest_batch(3, lease)
-        );
-        let mut claimed: Vec<Uuid> = a
-            .unwrap()
-            .into_iter()
-            .chain(b.unwrap())
-            .map(|j| j.bookmark_id)
-            .collect();
-        claimed.sort();
-        let mut expected = mine.clone();
-        expected.sort();
-        assert_eq!(claimed, expected, "each row claimed exactly once");
-
-        // Leased rows are not handed out again, and the attempt was counted.
-        let again = repo.claim_ingest_batch(100, lease).await.unwrap();
-        assert!(again.iter().all(|j| !mine.contains(&j.bookmark_id)));
-        let attempts: Vec<i32> =
-            sqlx::query_scalar("SELECT attempts FROM bookmark_contents WHERE user_id = $1")
-                .bind(owner)
-                .fetch_all(&pool)
+        let swept = repo.claim_ingest_batch(1, LEASE).await.unwrap();
+        assert!(swept.iter().all(|j| j.bookmark_id != worn));
+        release_others(&pool, &swept, &[]).await;
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error FROM bookmark_contents WHERE bookmark_id = $1")
+                .bind(worn)
+                .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(attempts.iter().all(|a| *a == 1));
-        // Release whatever the sweep above claimed from other tests' rows.
-        for j in again {
-            sqlx::query(
-                "UPDATE bookmark_contents SET next_attempt_at = now(), attempts = attempts - 1
-                 WHERE bookmark_id = $1",
-            )
-            .bind(j.bookmark_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
+        assert_eq!(status, "failed");
+        assert_eq!(error.as_deref(), Some("gave up after 6 attempts"));
 
-        sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(owner)
+        sqlx::query("DELETE FROM users WHERE id IN ($1, $2)")
+            .bind(importer)
+            .bind(other)
             .execute(&pool)
             .await
             .unwrap();

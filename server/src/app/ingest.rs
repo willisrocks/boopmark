@@ -1,50 +1,24 @@
+use crate::domain::error::DomainError;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher};
 use crate::domain::ports::search_repo::SearchRepository;
 use crate::domain::search::{IngestFailure, IngestJob, IngestStatus, retry_delay};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
-use tokio::time::Instant;
 
-/// A claimed job is invisible to other claims for this long. It covers the
-/// per-host wait plus the 15 s fetch, with a wide margin.
+/// A claimed job is invisible to other claims for this long, well past
+/// `JOB_TIMEOUT`.
 const CLAIM_LEASE: Duration = Duration::from_secs(10 * 60);
+/// One job (per-host waits, every redirect hop, extraction) gives up after
+/// this long, so a hostile or stuck page cannot hold a slot.
+const JOB_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 /// How long the worker sleeps on an empty queue, unless it is woken by a
-/// `NOTIFY bookmark_ingest`.
+/// `NOTIFY bookmark_ingest` or a job finishes.
 const IDLE_POLL: Duration = Duration::from_secs(2);
-/// At most one request per host per interval: imports are often many links
-/// to one site.
-const PER_HOST_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_ERROR_CHARS: usize = 500;
-
-/// Hands out request slots per host, `interval` apart.
-pub struct HostThrottle {
-    interval: Duration,
-    next_free: Mutex<HashMap<String, Instant>>,
-}
-
-impl HostThrottle {
-    pub fn new(interval: Duration) -> Self {
-        Self {
-            interval,
-            next_free: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Reserve the next slot for `host` and return when it starts.
-    pub fn reserve(&self, host: &str) -> Instant {
-        let now = Instant::now();
-        let mut next_free = self.next_free.lock().unwrap();
-        next_free.retain(|_, free_at| *free_at > now);
-        let slot = next_free.get(host).copied().unwrap_or(now).max(now);
-        next_free.insert(host.to_string(), slot + self.interval);
-        slot
-    }
-}
 
 /// What to record for a fetch that produced no article.
 fn failure_for(job: &IngestJob, err: &ArticleFetchError, now: DateTime<Utc>) -> IngestFailure {
@@ -64,20 +38,13 @@ fn failure_for(job: &IngestJob, err: &ArticleFetchError, now: DateTime<Utc>) -> 
     }
 }
 
-fn host_of(url: &str) -> String {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        .unwrap_or_default()
-}
-
-/// Drains the article ingest queue: claims due bookmarks, fetches and
-/// extracts their articles, and stores the text or the outcome of the
-/// failure. A failed fetch leaves the bookmark searchable by its metadata.
+/// Drains the article ingest queue: keeps up to `concurrency` jobs in
+/// flight, each claimed as a slot frees up, and stores the extracted text or
+/// the outcome of the failure. A failed fetch leaves the bookmark searchable
+/// by its metadata. Per-host pacing is the fetcher's job.
 pub struct IngestWorker<R, F> {
     repo: Arc<R>,
     fetcher: Arc<F>,
-    throttle: HostThrottle,
     concurrency: usize,
 }
 
@@ -90,7 +57,6 @@ where
         Self {
             repo,
             fetcher,
-            throttle: HostThrottle::new(PER_HOST_INTERVAL),
             concurrency: concurrency.max(1),
         }
     }
@@ -106,46 +72,47 @@ where
             concurrency = self.concurrency,
             "article ingest worker started"
         );
+        let mut in_flight = JoinSet::new();
         loop {
-            match self.clone().run_once().await {
-                Ok(0) => {
-                    tokio::select! {
-                        _ = wake.notified() => {}
-                        _ = tokio::time::sleep(IDLE_POLL) => {}
+            if let Err(e) = self.clone().fill(&mut in_flight).await {
+                tracing::warn!(error = %e, "article ingest: claiming jobs failed");
+            }
+            // Wait for a free slot (a job finishing), new work, or the poll.
+            tokio::select! {
+                Some(result) = in_flight.join_next() => {
+                    if let Err(e) = result {
+                        tracing::warn!(error = %e, "article ingest task panicked");
                     }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "article ingest: claiming jobs failed");
-                    tokio::time::sleep(IDLE_POLL).await;
-                }
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep(IDLE_POLL) => {}
             }
         }
     }
 
-    /// Claim one batch and process it to the end. Returns the batch size.
-    pub async fn run_once(self: Arc<Self>) -> Result<usize, crate::domain::error::DomainError> {
+    /// Claim jobs for the free slots and start them. Returns how many started.
+    async fn fill(self: Arc<Self>, in_flight: &mut JoinSet<()>) -> Result<usize, DomainError> {
+        let free = self.concurrency.saturating_sub(in_flight.len());
+        if free == 0 {
+            return Ok(0);
+        }
         let jobs = self
             .repo
-            .claim_ingest_batch(self.concurrency as i64, CLAIM_LEASE)
+            .claim_ingest_batch(free as i64, CLAIM_LEASE)
             .await?;
-        let claimed = jobs.len();
-        let mut tasks = JoinSet::new();
+        let started = jobs.len();
         for job in jobs {
             let worker = self.clone();
-            tasks.spawn(async move { worker.process(job).await });
+            in_flight.spawn(async move { worker.process(job).await });
         }
-        while let Some(result) = tasks.join_next().await {
-            if let Err(e) = result {
-                tracing::warn!(error = %e, "article ingest task panicked");
-            }
-        }
-        Ok(claimed)
+        Ok(started)
     }
 
     async fn process(&self, job: IngestJob) {
-        tokio::time::sleep_until(self.throttle.reserve(&host_of(&job.url))).await;
-        let stored = match self.fetcher.fetch(&job.url).await {
+        let fetched = tokio::time::timeout(JOB_TIMEOUT, self.fetcher.fetch(&job.url))
+            .await
+            .unwrap_or_else(|_| Err(ArticleFetchError::Transient("timed out".to_string())));
+        let stored = match fetched {
             Ok(article) => {
                 let hash = format!("{:x}", Sha256::digest(article.text.as_bytes()));
                 self.repo.store_article(&job, &article.text, &hash).await
@@ -164,7 +131,7 @@ where
         };
         match stored {
             Ok(true) => {}
-            // Deleted, or its URL changed and it was queued again.
+            // Deleted, its URL changed, or another claim took it over.
             Ok(false) => tracing::debug!(bookmark_id = %job.bookmark_id, "ingest result dropped"),
             Err(e) => {
                 tracing::warn!(bookmark_id = %job.bookmark_id, error = %e, "storing ingest result failed")
@@ -176,16 +143,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::error::DomainError;
     use crate::domain::ports::article_fetcher::FetchedArticle;
     use crate::domain::search::{SearchHit, SearchQuery};
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Mutex;
     use uuid::Uuid;
 
     #[derive(Default)]
     struct FakeRepo {
         queue: Mutex<Vec<IngestJob>>,
+        claims: Mutex<Vec<i64>>,
         stored: Mutex<Vec<(IngestJob, String, String)>>,
         failures: Mutex<Vec<(IngestJob, IngestFailure)>>,
     }
@@ -204,6 +172,7 @@ mod tests {
             limit: i64,
             _lease: Duration,
         ) -> Result<Vec<IngestJob>, DomainError> {
+            self.claims.lock().unwrap().push(limit);
             let mut queue = self.queue.lock().unwrap();
             let n = queue.len().min(limit as usize);
             Ok(queue.drain(..n).collect())
@@ -236,11 +205,9 @@ mod tests {
         }
     }
 
-    /// Answers by URL path, and records when each request started.
-    #[derive(Default)]
-    struct FakeFetcher {
-        started: Mutex<Vec<(String, Instant)>>,
-    }
+    /// Answers by the last URL path segment; `slow` takes 10 minutes and
+    /// `hang` never answers.
+    struct FakeFetcher;
 
     impl ArticleFetcher for FakeFetcher {
         fn fetch(
@@ -248,23 +215,26 @@ mod tests {
             url: &str,
         ) -> Pin<Box<dyn Future<Output = Result<FetchedArticle, ArticleFetchError>> + Send + '_>>
         {
-            self.started
-                .lock()
-                .unwrap()
-                .push((url.to_string(), Instant::now()));
-            let result = match url.rsplit('/').next().unwrap() {
-                "ok" => Ok(FetchedArticle {
-                    text: "article body".into(),
-                    final_url: url.to_string(),
-                    html_bytes: 100,
-                }),
-                "flaky" => Err(ArticleFetchError::Transient("HTTP 503".into())),
-                "gone" => Err(ArticleFetchError::Permanent("HTTP 404".into())),
-                _ => Err(ArticleFetchError::Skipped(
-                    "not an HTML page: application/pdf".into(),
-                )),
-            };
-            Box::pin(async move { result })
+            let url = url.to_string();
+            Box::pin(async move {
+                match url.rsplit('/').next().unwrap() {
+                    "ok" => Ok(FetchedArticle {
+                        text: "article body".into(),
+                        final_url: url,
+                        html_bytes: 100,
+                    }),
+                    "slow" => {
+                        tokio::time::sleep(Duration::from_secs(600)).await;
+                        Err(ArticleFetchError::Permanent("too slow to matter".into()))
+                    }
+                    "hang" => std::future::pending().await,
+                    "flaky" => Err(ArticleFetchError::Transient("HTTP 503".into())),
+                    "gone" => Err(ArticleFetchError::Permanent("HTTP 404".into())),
+                    _ => Err(ArticleFetchError::Skipped(
+                        "not an HTML page: application/pdf".into(),
+                    )),
+                }
+            })
         }
     }
 
@@ -273,20 +243,16 @@ mod tests {
             bookmark_id: Uuid::new_v4(),
             url: url.to_string(),
             attempts,
+            claim_token: Uuid::new_v4(),
         }
     }
 
-    fn worker(
-        jobs: Vec<IngestJob>,
-        concurrency: usize,
-    ) -> Arc<IngestWorker<FakeRepo, FakeFetcher>> {
-        let repo = FakeRepo::default();
+    fn worker(jobs: Vec<IngestJob>, concurrency: usize) -> (Arc<FakeRepo>, Arc<Notify>) {
+        let repo = Arc::new(FakeRepo::default());
         *repo.queue.lock().unwrap() = jobs;
-        Arc::new(IngestWorker::new(
-            Arc::new(repo),
-            Arc::new(FakeFetcher::default()),
-            concurrency,
-        ))
+        let wake = Arc::new(Notify::new());
+        IngestWorker::new(repo.clone(), Arc::new(FakeFetcher), concurrency).spawn(wake.clone());
+        (repo, wake)
     }
 
     #[test]
@@ -327,32 +293,20 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn throttle_spaces_requests_per_host() {
-        let throttle = HostThrottle::new(Duration::from_secs(1));
-        let t0 = Instant::now();
-        assert_eq!(throttle.reserve("a.test"), t0);
-        assert_eq!(throttle.reserve("a.test"), t0 + Duration::from_secs(1));
-        assert_eq!(throttle.reserve("b.test"), t0);
-        assert_eq!(throttle.reserve("a.test"), t0 + Duration::from_secs(2));
-        tokio::time::advance(Duration::from_secs(10)).await;
-        assert_eq!(throttle.reserve("a.test"), Instant::now());
-    }
+    async fn stores_articles_and_records_failures() {
+        let (repo, _wake) = worker(
+            vec![
+                job("https://a.test/ok", 1),
+                job("https://b.test/flaky", 2),
+                job("https://c.test/gone", 1),
+                job("https://d.test/report.pdf", 1),
+                job("https://e.test/ok", 1),
+            ],
+            4,
+        );
+        tokio::time::sleep(Duration::from_secs(10)).await;
 
-    #[tokio::test(start_paused = true)]
-    async fn run_once_stores_articles_and_records_failures() {
-        let jobs = vec![
-            job("https://a.test/ok", 1),
-            job("https://b.test/flaky", 2),
-            job("https://c.test/gone", 1),
-            job("https://d.test/report.pdf", 1),
-            job("https://e.test/ok", 1),
-        ];
-        let w = worker(jobs.clone(), 4);
-        assert_eq!(w.clone().run_once().await.unwrap(), 4);
-        assert_eq!(w.clone().run_once().await.unwrap(), 1);
-        assert_eq!(w.clone().run_once().await.unwrap(), 0);
-
-        let stored = w.repo.stored.lock().unwrap();
+        let stored = repo.stored.lock().unwrap();
         assert_eq!(stored.len(), 2);
         assert_eq!(stored[0].1, "article body");
         assert_eq!(
@@ -360,7 +314,7 @@ mod tests {
             format!("{:x}", Sha256::digest("article body".as_bytes()))
         );
 
-        let failures = w.repo.failures.lock().unwrap();
+        let failures = repo.failures.lock().unwrap();
         let by_url = |url: &str| {
             failures
                 .iter()
@@ -379,26 +333,25 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn one_batch_on_one_host_is_spread_one_second_apart() {
-        let jobs = (0..3)
-            .map(|i| job(&format!("https://same.test/{i}/ok"), 1))
-            .collect();
-        let w = worker(jobs, 4);
-        let t0 = Instant::now();
-        w.clone().run_once().await.unwrap();
-        let mut starts: Vec<Duration> = w
-            .fetcher
-            .started
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(_, at)| *at - t0)
-            .collect();
-        starts.sort();
-        assert_eq!(
-            starts,
-            [0, 1, 2].map(Duration::from_secs).to_vec(),
-            "requests to one host start a second apart"
-        );
+    async fn a_slow_job_does_not_hold_up_the_others() {
+        let mut jobs = vec![job("https://slow.test/slow", 1)];
+        jobs.extend((0..6).map(|i| job(&format!("https://fast{i}.test/ok"), 1)));
+        let (repo, _wake) = worker(jobs, 2);
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        // One slot is held by the slow job; the other drained the rest.
+        assert_eq!(repo.stored.lock().unwrap().len(), 6);
+        assert!(repo.failures.lock().unwrap().is_empty());
+        // Claims ask only for the free slots.
+        assert!(repo.claims.lock().unwrap().iter().all(|n| *n <= 2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_job_times_out_as_transient() {
+        let (repo, _wake) = worker(vec![job("https://hang.test/hang", 1)], 1);
+        tokio::time::sleep(JOB_TIMEOUT + Duration::from_secs(5)).await;
+        let failures = repo.failures.lock().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].1.status, IngestStatus::Pending);
+        assert_eq!(failures[0].1.error, "timed out");
     }
 }

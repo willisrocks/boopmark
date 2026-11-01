@@ -1,67 +1,100 @@
 use crate::adapters::metadata::html::is_cloudflare_challenge;
 use crate::adapters::net::{
-    Blocked, Lookup, PublicOnlyResolver, SystemLookup, UrlGuard, guarded_redirect_policy,
+    Blocked, HostThrottle, Lookup, SystemLookup, UrlGuard, guarded_client_builder,
 };
 use crate::domain::error::CF_CHALLENGE_MSG;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher, FetchedArticle};
-use crate::domain::search::{ARTICLE_TEXT_CAP_CHARS, SNIPPET_START, SNIPPET_STOP};
+use crate::domain::search::{
+    ARTICLE_TEXT_CAP_BYTES, ARTICLE_TEXT_CAP_CHARS, SNIPPET_START, SNIPPET_STOP,
+};
+use encoding_rs::{Encoding, UTF_8};
 use reqwest::StatusCode;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
 /// Larger responses are skipped. The measured p90 page was 437 KB, the
 /// largest 1.9 MB.
 const MAX_HTML_BYTES: usize = 5 * 1024 * 1024;
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per request, so per redirect hop.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Readability on a hostile page has no natural bound. The blocking thread
+/// cannot be cancelled, but the fetch gives up on it and moves on.
+const EXTRACT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_REDIRECTS: usize = 5;
+/// At most one request per host per interval, redirect hops included:
+/// imports are often many links to one site.
+const PER_HOST_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Fetches a page and extracts its readable text with `dom_smoothie`, a
 /// port of Mozilla's Readability.js.
 ///
-/// Every request is guarded against SSRF: only public http(s) URLs, names
-/// are resolved through `PublicOnlyResolver`, each redirect hop is checked
-/// again, and proxies are disabled because a proxy would resolve names
-/// itself.
+/// Every request is guarded against SSRF: only public http(s) URLs on web
+/// ports, names are resolved through `PublicOnlyResolver`, and proxies are
+/// disabled. Redirects are followed here rather than by reqwest, so that
+/// each hop is checked by the guard and waits for its host's slot.
 pub struct HtmlArticleFetcher {
     client: reqwest::Client,
     guard: UrlGuard,
+    throttle: HostThrottle,
 }
 
 impl HtmlArticleFetcher {
     pub fn new() -> Self {
-        Self::with_lookup(UrlGuard::public(), SystemLookup)
+        Self::with_lookup(UrlGuard::public(), SystemLookup, PER_HOST_INTERVAL)
     }
 
-    fn with_lookup(guard: UrlGuard, lookup: impl Lookup) -> Self {
-        let client = reqwest::Client::builder()
+    fn with_lookup(guard: UrlGuard, lookup: impl Lookup, per_host_interval: Duration) -> Self {
+        let client = guarded_client_builder(guard, lookup, reqwest::redirect::Policy::none())
             .user_agent("Boopmark/1.0 (+https://boopmark.app)")
-            .timeout(TOTAL_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
-            .no_proxy()
-            .dns_resolver(Arc::new(PublicOnlyResolver::new(lookup, guard)))
-            .redirect(guarded_redirect_policy(guard, MAX_REDIRECTS))
             .build()
             .expect("failed to build article HTTP client");
-        Self { client, guard }
+        Self {
+            client,
+            guard,
+            throttle: HostThrottle::new(per_host_interval),
+        }
+    }
+
+    /// GET `url`, following up to `MAX_REDIRECTS` redirects.
+    async fn get(&self, mut url: Url) -> Result<reqwest::Response, ArticleFetchError> {
+        for _ in 0..=MAX_REDIRECTS {
+            self.guard
+                .check(&url)
+                .map_err(|e| ArticleFetchError::Permanent(e.to_string()))?;
+            self.throttle.wait_for(&url).await;
+            let resp = self
+                .client
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(request_error)?;
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok());
+            match location {
+                Some(location) if resp.status().is_redirection() => {
+                    url = url.join(location).map_err(|e| {
+                        ArticleFetchError::Permanent(format!("invalid redirect: {e}"))
+                    })?;
+                }
+                _ => return Ok(resp),
+            }
+        }
+        Err(ArticleFetchError::Permanent(
+            "too many redirects".to_string(),
+        ))
     }
 
     async fn fetch_article(&self, url: &str) -> Result<FetchedArticle, ArticleFetchError> {
         let parsed = Url::parse(url)
             .map_err(|e| ArticleFetchError::Permanent(format!("invalid URL: {e}")))?;
-        self.guard
-            .check(&parsed)
-            .map_err(|e| ArticleFetchError::Permanent(e.to_string()))?;
-
-        let mut resp = self
-            .client
-            .get(parsed)
-            .send()
-            .await
-            .map_err(request_error)?;
+        let mut resp = self.get(parsed).await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -75,10 +108,12 @@ impl HtmlArticleFetcher {
         {
             return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
         }
-        if let Some(content_type) = resp
+        let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        if let Some(content_type) = &content_type
             && !is_html(content_type)
         {
             return Err(ArticleFetchError::Skipped(format!(
@@ -101,14 +136,16 @@ impl HtmlArticleFetcher {
             body.extend_from_slice(&chunk);
         }
         let html_bytes = body.len();
-        let html = String::from_utf8_lossy(&body).into_owned();
+        let html = decode_html(&body, content_type.as_deref());
         if is_cloudflare_challenge(&html) {
             return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
         }
 
         let url_for_parse = final_url.clone();
-        let text = tokio::task::spawn_blocking(move || extract_text(&html, &url_for_parse))
+        let extraction = tokio::task::spawn_blocking(move || extract_text(&html, &url_for_parse));
+        let text = tokio::time::timeout(EXTRACT_TIMEOUT, extraction)
             .await
+            .map_err(|_| ArticleFetchError::Transient("extraction timed out".to_string()))?
             .map_err(|e| ArticleFetchError::Transient(format!("extraction task failed: {e}")))??;
 
         Ok(FetchedArticle {
@@ -139,6 +176,32 @@ fn is_html(content_type: &str) -> bool {
     mime == "text/html" || mime == "application/xhtml+xml"
 }
 
+/// Decode an HTML body: a byte-order mark wins, then the `Content-Type`
+/// charset, then a `charset=` declaration in the first 1 KB (a `<meta>`
+/// tag), then UTF-8. Undecodable bytes become U+FFFD.
+fn decode_html(body: &[u8], content_type: Option<&str>) -> String {
+    let declared = content_type
+        .and_then(charset_label)
+        .or_else(|| charset_label(&String::from_utf8_lossy(&body[..body.len().min(1024)])));
+    let encoding = declared
+        .and_then(|label| Encoding::for_label(label.as_bytes()))
+        .unwrap_or(UTF_8);
+    // `decode` sniffs the BOM itself and lets it override the label.
+    encoding.decode(body).0.into_owned()
+}
+
+/// The value after the first `charset=` in `text`, unquoted.
+fn charset_label(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let start = lower.find("charset=")? + "charset=".len();
+    let label: String = lower[start..]
+        .trim_start_matches(['"', '\''])
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+        .collect();
+    (!label.is_empty()).then_some(label)
+}
+
 fn too_big() -> ArticleFetchError {
     ArticleFetchError::Skipped(format!(
         "page is larger than {} MB",
@@ -161,9 +224,6 @@ fn request_error(err: reqwest::Error) -> ArticleFetchError {
     if let Some(blocked) = Blocked::in_chain(&err) {
         return ArticleFetchError::Permanent(blocked.to_string());
     }
-    if err.is_redirect() {
-        return ArticleFetchError::Permanent("too many redirects".to_string());
-    }
     let kind = if err.is_timeout() {
         "timed out"
     } else if err.is_connect() {
@@ -177,7 +237,7 @@ fn request_error(err: reqwest::Error) -> ArticleFetchError {
 }
 
 /// The readable text of an HTML document, paragraphs separated by blank
-/// lines, capped at `ARTICLE_TEXT_CAP_CHARS`.
+/// lines, capped at `ARTICLE_TEXT_CAP_CHARS` and `ARTICLE_TEXT_CAP_BYTES`.
 pub(crate) fn extract_text(html: &str, url: &str) -> Result<String, ArticleFetchError> {
     let config = dom_smoothie::Config {
         text_mode: dom_smoothie::TextMode::Formatted,
@@ -199,10 +259,13 @@ pub(crate) fn extract_text(html: &str, url: &str) -> Result<String, ArticleFetch
             "no readable article: empty text".to_string(),
         ));
     }
-    let end = text
-        .char_indices()
-        .nth(ARTICLE_TEXT_CAP_CHARS)
-        .map_or(text.len(), |(i, _)| i);
+    let mut end = text.len().min(ARTICLE_TEXT_CAP_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if let Some((i, _)) = text[..end].char_indices().nth(ARTICLE_TEXT_CAP_CHARS) {
+        end = i;
+    }
     Ok(text[..end].trim_end().to_string())
 }
 
@@ -231,6 +294,15 @@ mod tests {
           </article>
           <footer>Copyright footer text that should not matter</footer>
         </body></html>"#;
+
+    /// The fixture article with an accented paragraph, encoded as Latin-1.
+    fn latin1_article() -> Vec<u8> {
+        let html = ARTICLE.replace(
+            "<p>Lifetimes",
+            "<p>Caf\u{e9} cr\u{e8}me na\u{ef}ve r\u{e9}sum\u{e9}, a paragraph about accents. </p><p>Lifetimes",
+        );
+        encoding_rs::WINDOWS_1252.encode(&html).0.into_owned()
+    }
 
     /// Maps fixture host names to addresses; unknown names do not resolve.
     struct FixtureLookup(Vec<(&'static str, SocketAddr)>);
@@ -316,6 +388,23 @@ mod tests {
                 "/to-article",
                 get(|| async { Redirect::temporary("/article") }),
             )
+            .route(
+                "/latin1",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "text/html; charset=ISO-8859-1")],
+                        latin1_article(),
+                    )
+                }),
+            )
+            .route(
+                "/meta-charset",
+                get(|| async {
+                    let mut body = b"<html><head><meta charset=\"windows-1252\"></head>".to_vec();
+                    body.extend(latin1_article());
+                    ([(header::CONTENT_TYPE, "text/html")], body)
+                }),
+            )
             .route("/loop", get(|| async { Redirect::temporary("/loop") }));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -327,7 +416,7 @@ mod tests {
             ),
         ]);
         (
-            HtmlArticleFetcher::with_lookup(UrlGuard::allowing_loopback(), lookup),
+            HtmlArticleFetcher::with_lookup(UrlGuard::allowing_loopback(), lookup, Duration::ZERO),
             base,
         )
     }
@@ -396,10 +485,11 @@ mod tests {
                 "{path}: {result:?}"
             );
         }
-        // reqwest never follows a redirect to a non-http scheme; the 3xx is final.
         assert_eq!(
             fetcher.fetch(&format!("{base}/to-file")).await,
-            Err(ArticleFetchError::Permanent("HTTP 307".into()))
+            Err(ArticleFetchError::Permanent(
+                "unsupported scheme: file".into()
+            ))
         );
         assert_eq!(
             fetcher.fetch(&format!("{base}/loop")).await,
@@ -446,6 +536,72 @@ mod tests {
         let text = extract_text(&html, "https://example.com/").unwrap();
         assert!(text.chars().count() <= ARTICLE_TEXT_CAP_CHARS);
         assert!(text.chars().count() > ARTICLE_TEXT_CAP_CHARS - 100);
+    }
+
+    #[test]
+    fn extraction_caps_multibyte_text_by_bytes() {
+        let paragraph = format!("<p>{}</p>", "\u{20ac}".repeat(1000));
+        let html = format!(
+            "<html><body><article>{}</article></body></html>",
+            paragraph.repeat(ARTICLE_TEXT_CAP_CHARS / 1000)
+        );
+        let text = extract_text(&html, "https://example.com/").unwrap();
+        assert!(text.len() <= ARTICLE_TEXT_CAP_BYTES);
+        assert!(text.len() > ARTICLE_TEXT_CAP_BYTES - 4096);
+    }
+
+    #[tokio::test]
+    async fn decodes_the_declared_charset() {
+        let (fetcher, base) = fixture().await;
+        for path in ["/latin1", "/meta-charset"] {
+            let article = fetcher.fetch(&format!("{base}{path}")).await.unwrap();
+            assert!(
+                article
+                    .text
+                    .contains("Caf\u{e9} cr\u{e8}me na\u{ef}ve r\u{e9}sum\u{e9}"),
+                "{path}: {}",
+                article.text
+            );
+        }
+    }
+
+    #[test]
+    fn charset_comes_from_bom_header_meta_then_utf8() {
+        let latin1 = [b'c', b'a', b'f', 0xe9];
+        assert_eq!(
+            decode_html(&latin1, Some("text/html; charset=latin1")),
+            "caf\u{e9}"
+        );
+        assert_eq!(decode_html(&latin1, Some("text/html")), "caf\u{fffd}");
+        let bom = [0xef, 0xbb, 0xbf, b'h', b'i'];
+        assert_eq!(decode_html(&bom, Some("text/html; charset=latin1")), "hi");
+        assert_eq!(
+            charset_label(
+                "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=Shift_JIS\">"
+            ),
+            Some("shift_jis".into())
+        );
+        assert_eq!(
+            charset_label("<meta charset='utf-8'>"),
+            Some("utf-8".into())
+        );
+        assert_eq!(charset_label("<html>"), None);
+    }
+
+    #[tokio::test]
+    async fn redirect_hops_wait_for_their_host_slot() {
+        let (_, base) = fixture().await;
+        let port = Url::parse(&base).unwrap().port().unwrap();
+        let lookup = FixtureLookup(vec![(
+            "fixture.test",
+            SocketAddr::new("127.0.0.1".parse().unwrap(), port),
+        )]);
+        let interval = Duration::from_millis(300);
+        let fetcher =
+            HtmlArticleFetcher::with_lookup(UrlGuard::allowing_loopback(), lookup, interval);
+        let started = std::time::Instant::now();
+        fetcher.fetch(&format!("{base}/to-article")).await.unwrap();
+        assert!(started.elapsed() >= interval, "the hop to /article waited");
     }
 
     #[test]

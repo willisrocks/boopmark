@@ -1,3 +1,6 @@
+use crate::adapters::net::{
+    Blocked, Lookup, SystemLookup, UrlGuard, guarded_client_builder, guarded_redirect_policy,
+};
 use crate::domain::bookmark::UrlMetadata;
 use crate::domain::error::{CF_CHALLENGE_MSG, DomainError};
 use crate::domain::ports::metadata::MetadataExtractor;
@@ -11,14 +14,25 @@ pub struct HtmlMetadataExtractor {
     client: reqwest::Client,
 }
 
+/// The guard's DNS and redirect checks apply to every hop (see `adapters::net`).
+const MAX_REDIRECTS: usize = 10;
+
 impl HtmlMetadataExtractor {
     pub fn new() -> Self {
+        Self::with_lookup(UrlGuard::public(), SystemLookup)
+    }
+
+    fn with_lookup(guard: UrlGuard, lookup: impl Lookup) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .user_agent("Boopmark/1.0 (+https://boopmark.app)")
-                .build()
-                .unwrap(),
+            client: guarded_client_builder(
+                guard,
+                lookup,
+                guarded_redirect_policy(guard, MAX_REDIRECTS),
+            )
+            .timeout(std::time::Duration::from_secs(10))
+            .user_agent("Boopmark/1.0 (+https://boopmark.app)")
+            .build()
+            .unwrap(),
         }
     }
 }
@@ -36,12 +50,13 @@ impl MetadataExtractor for HtmlMetadataExtractor {
 
             let domain = parsed_url.host_str().map(|h| h.to_string());
 
-            let resp = self
-                .client
-                .get(&safe_url)
-                .send()
-                .await
-                .map_err(|e| DomainError::Internal(format!("fetch error: {e}")))?;
+            let resp =
+                self.client.get(&safe_url).send().await.map_err(|e| {
+                    match Blocked::in_chain(&e) {
+                        Some(blocked) => DomainError::InvalidInput(blocked.to_string()),
+                        None => DomainError::Internal(format!("fetch error: {e}")),
+                    }
+                })?;
 
             // Check the CF-Mitigated header before consuming the body
             if resp
@@ -135,6 +150,34 @@ fn resolve_url(base: &str, relative: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every name resolves to one fixed address.
+    struct ResolvesTo(&'static str);
+
+    impl Lookup for ResolvesTo {
+        fn lookup(
+            &self,
+            _host: String,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<std::net::SocketAddr>>> + Send>>
+        {
+            let addr = std::net::SocketAddr::new(self.0.parse().unwrap(), 80);
+            Box::pin(async move { Ok(vec![addr]) })
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_names_that_resolve_to_private_addresses() {
+        let extractor =
+            HtmlMetadataExtractor::with_lookup(UrlGuard::public(), ResolvesTo("10.0.0.7"));
+        let err = extractor
+            .extract("http://intranet.example.com/admin")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, DomainError::InvalidInput(msg) if msg.contains("private address (10.0.0.7)")),
+            "{err}"
+        );
+    }
 
     #[test]
     fn extracts_og_image_from_property() {

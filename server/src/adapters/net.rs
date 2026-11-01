@@ -2,10 +2,12 @@
 //! URL or forwards it to a third party.
 
 use crate::domain::error::DomainError;
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tokio::time::Instant;
 use url::Url;
 
 /// Reject URLs that should not be forwarded to third-party metadata APIs.
@@ -25,15 +27,36 @@ pub fn validate_public_url(url: &str) -> Result<String, DomainError> {
 
 /// True for addresses on the public internet. Private, loopback, link-local,
 /// shared (CGNAT), documentation, benchmarking, multicast, broadcast,
-/// unspecified and reserved ranges are all refused, and IPv4-mapped or
-/// IPv4-compatible IPv6 addresses are judged by their IPv4 address.
+/// unspecified and reserved ranges are all refused. IPv6 addresses that
+/// carry an IPv4 address (mapped, compatible, NAT64 64:ff9b::/96, 6to4
+/// 2002::/16) are judged by that IPv4 address; Teredo 2001::/32 and the
+/// local-use NAT64 prefix 64:ff9b:1::/48, whose IPv4 cannot be trusted, are
+/// refused.
 pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_public_ipv4(ip),
-        IpAddr::V6(ip) => match ip.to_ipv4() {
-            Some(v4) if !ip.is_loopback() && !ip.is_unspecified() => is_public_ipv4(v4),
-            _ => is_public_ipv6(ip),
+        IpAddr::V6(ip) => match embedded_ipv4(ip) {
+            Some(v4) => is_public_ipv4(v4),
+            None => is_public_ipv6(ip),
         },
+    }
+}
+
+/// The IPv4 address an IPv6 address stands for, if it is one of the
+/// translation or tunnelling forms that carry it in plain sight.
+fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = ip.segments();
+    let from = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+    if ip.is_loopback() || ip.is_unspecified() {
+        None
+    } else if let Some(v4) = ip.to_ipv4() {
+        Some(v4) // ::ffff:a.b.c.d and ::a.b.c.d
+    } else if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        Some(from(s[6], s[7])) // NAT64 well-known prefix 64:ff9b::/96
+    } else if s[0] == 0x2002 {
+        Some(from(s[1], s[2])) // 6to4 2002:AABB:CCDD::/48
+    } else {
+        None
     }
 }
 
@@ -61,6 +84,8 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
         || (first & 0xfe00) == 0xfc00 // unique-local fc00::/7
         || (first & 0xffc0) == 0xfe80 // link-local fe80::/10
         || (first & 0xffc0) == 0xfec0 // deprecated site-local fec0::/10
+        || (first == 0x0064 && ip.segments()[1] == 0xff9b && ip.segments()[2] == 0x0001) // local-use NAT64 64:ff9b:1::/48
+        || (first == 0x2001 && ip.segments()[1] == 0) // Teredo 2001::/32
         || (first == 0x2001 && ip.segments()[1] == 0x0db8)) // documentation 2001:db8::/32
 }
 
@@ -84,24 +109,31 @@ impl Blocked {
     }
 }
 
+/// Ports a fetched URL may name explicitly; the scheme's default is always fine.
+const ALLOWED_PORTS: [u16; 4] = [80, 443, 8080, 8443];
+
 /// The rules for which URLs and addresses may be fetched.
 #[derive(Clone, Copy)]
 pub struct UrlGuard {
     allow_ip: fn(IpAddr) -> bool,
+    any_port: bool,
 }
 
 impl UrlGuard {
     pub fn public() -> Self {
         Self {
             allow_ip: is_public_ip,
+            any_port: false,
         }
     }
 
-    /// Also allows loopback, so tests can fetch from a local fixture server.
+    /// Also allows loopback and any port, so tests can fetch from a local
+    /// fixture server.
     #[cfg(test)]
     pub fn allowing_loopback() -> Self {
         Self {
             allow_ip: |ip| ip.is_loopback() || is_public_ip(ip),
+            any_port: true,
         }
     }
 
@@ -110,12 +142,21 @@ impl UrlGuard {
     }
 
     /// Check the parts of a URL that need no DNS lookup: scheme,
-    /// credentials, local host names and literal IP addresses. Host names
+    /// credentials, port, local host names and literal IP addresses. Host names
     /// are checked again after resolution by `PublicOnlyResolver`.
     pub fn check(&self, url: &Url) -> Result<(), Blocked> {
         match url.scheme() {
             "http" | "https" => {}
             other => return Err(Blocked(format!("unsupported scheme: {other}"))),
+        }
+
+        if let Some(port) = url.port()
+            && !self.any_port
+            && !ALLOWED_PORTS.contains(&port)
+        {
+            return Err(Blocked(format!(
+                "port {port} is not allowed; refusing to fetch it"
+            )));
         }
 
         if !url.username().is_empty() || url.password().is_some() {
@@ -225,10 +266,56 @@ pub fn guarded_redirect_policy(guard: UrlGuard, max_hops: usize) -> reqwest::red
     })
 }
 
+/// A reqwest client builder for fetching user-supplied URLs: DNS through
+/// `PublicOnlyResolver`, the given redirect policy, and no proxy (a proxy
+/// would resolve names itself and bypass the resolver). Callers add their
+/// timeouts and user agent.
+pub fn guarded_client_builder(
+    guard: UrlGuard,
+    lookup: impl Lookup,
+    redirect: reqwest::redirect::Policy,
+) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicOnlyResolver::new(lookup, guard)))
+        .redirect(redirect)
+}
+
+/// Hands out request slots per host, `interval` apart, so a batch of links
+/// to one site (an import, a redirect chain) does not hammer it.
+pub struct HostThrottle {
+    interval: std::time::Duration,
+    next_free: Mutex<HashMap<String, Instant>>,
+}
+
+impl HostThrottle {
+    pub fn new(interval: std::time::Duration) -> Self {
+        Self {
+            interval,
+            next_free: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Reserve the next slot for `host` and return when it starts.
+    pub fn reserve(&self, host: &str) -> Instant {
+        let now = Instant::now();
+        let mut next_free = self.next_free.lock().unwrap();
+        next_free.retain(|_, free_at| *free_at > now);
+        let slot = next_free.get(host).copied().unwrap_or(now).max(now);
+        next_free.insert(host.to_string(), slot + self.interval);
+        slot
+    }
+
+    /// Wait for the next slot for `url`'s host.
+    pub async fn wait_for(&self, url: &Url) {
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        tokio::time::sleep_until(self.reserve(&host)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn accepts_public_https_url() {
@@ -405,5 +492,56 @@ mod tests {
         .await
         .unwrap_err();
         assert!(Blocked::in_chain(err.as_ref()).is_some());
+    }
+    #[test]
+    fn ipv6_forms_that_carry_ipv4_are_judged_by_it() {
+        for ip in [
+            "64:ff9b::a00:1",                       // NAT64 of 10.0.0.1
+            "64:ff9b::7f00:1",                      // NAT64 of 127.0.0.1
+            "64:ff9b::a9fe:a9fe",                   // NAT64 of 169.254.169.254
+            "64:ff9b:1::808:808",                   // local-use NAT64: never trusted
+            "2002:a00:1::1",                        // 6to4 of 10.0.0.1
+            "2002:c0a8:101::",                      // 6to4 of 192.168.1.1
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2", // Teredo
+        ] {
+            assert!(!is_public_ip(ip.parse().unwrap()), "{ip} is not public");
+        }
+        for ip in ["64:ff9b::808:808", "2002:808:808::1"] {
+            assert!(is_public_ip(ip.parse().unwrap()), "{ip} wraps 8.8.8.8");
+        }
+        assert!(validate_public_url("http://[64:ff9b::a00:1]/").is_err());
+    }
+
+    #[test]
+    fn only_web_ports_are_allowed() {
+        for url in [
+            "https://example.com/",
+            "https://example.com:443/",
+            "http://example.com:80/",
+            "http://example.com:8080/",
+            "https://example.com:8443/",
+        ] {
+            assert!(validate_public_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "http://example.com:22/",
+            "http://example.com:6379/",
+            "https://example.com:9200/",
+        ] {
+            assert!(validate_public_url(url).is_err(), "{url}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn throttle_spaces_requests_per_host() {
+        let throttle = HostThrottle::new(std::time::Duration::from_secs(1));
+        let second = std::time::Duration::from_secs(1);
+        let t0 = Instant::now();
+        assert_eq!(throttle.reserve("a.test"), t0);
+        assert_eq!(throttle.reserve("a.test"), t0 + second);
+        assert_eq!(throttle.reserve("b.test"), t0);
+        assert_eq!(throttle.reserve("a.test"), t0 + 2 * second);
+        tokio::time::advance(10 * second).await;
+        assert_eq!(throttle.reserve("a.test"), Instant::now());
     }
 }
