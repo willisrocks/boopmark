@@ -6,22 +6,18 @@ const assert = require('node:assert');
 const http = require('http');
 const { createGuard } = require('../guard');
 const { createServer, launchBrowser } = require('../index');
+const { listen, stubLookup } = require('./helpers');
 
 const guard = createGuard({
   allowLoopback: true,
   // Both names point at the fixture; intranet.test also has a private
   // answer, so the fixture sees a request for it only if the guard fails.
-  lookup: async host => ({
-    'public.test': [{ address: '127.0.0.1', family: 4 }],
-    'intranet.test': [{ address: '127.0.0.1', family: 4 }, { address: '10.0.0.5', family: 4 }],
-    'dead.test': [{ address: '127.0.0.1', family: 4 }],
-  })[host] || [],
+  lookup: stubLookup({
+    'public.test': ['127.0.0.1'],
+    'intranet.test': ['127.0.0.1', '10.0.0.5'],
+    'dead.test': ['127.0.0.1'],
+  }),
 });
-
-async function listen(server) {
-  await new Promise(r => server.listen(0, '127.0.0.1', r));
-  return server.address().port;
-}
 
 function post(port, url) {
   return new Promise((resolve, reject) => {

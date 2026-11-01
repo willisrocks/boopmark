@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { Blocked, createGuard, isPublicIp } = require('../guard');
+const { Blocked, InvalidUrl, createGuard, isPublicIp } = require('../guard');
+const { stubLookup } = require('./helpers');
 
 test('public addresses are allowed', () => {
   for (const ip of ['8.8.8.8', '1.1.1.1', '93.184.216.34', '2606:4700:4700::1111', '::ffff:8.8.8.8']) {
@@ -76,11 +77,9 @@ test('check refuses bad schemes, ports, credentials and local hosts', () => {
   ]) {
     assert.throws(() => guard.check(url), Blocked, url);
   }
+  assert.throws(() => guard.check('not a url'), InvalidUrl);
+  assert.strictEqual(guard.check('https://example.com/a').pathname, '/a');
 });
-
-function stubLookup(table) {
-  return async host => (table[host] || []).map(address => ({ address, family: address.includes(':') ? 6 : 4 }));
-}
 
 test('resolve refuses a name when any of its addresses is private', async () => {
   const guard = createGuard({

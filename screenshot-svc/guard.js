@@ -15,6 +15,19 @@ class Blocked extends Error {
   }
 }
 
+/** A URL that does not parse: bad input rather than a refusal. */
+class InvalidUrl extends Blocked {
+  constructor() {
+    super('invalid url');
+    this.name = 'InvalidUrl';
+  }
+}
+
+/** A URL's hostname without IPv6 brackets: `[::1]` becomes `::1`. */
+function bareHost(hostname) {
+  return hostname.replace(/^\[|\]$/g, '');
+}
+
 function parseIpv4(ip) {
   return ip.split('.').map(Number);
 }
@@ -127,32 +140,29 @@ function createGuard({ lookup = systemLookup, allowLoopback = false } = {}) {
 
   /**
    * Check the parts of a URL that need no DNS lookup: scheme, credentials,
-   * port, local host names and literal IP addresses. Throws `Blocked`.
+   * port, local host names and literal IP addresses. Returns the parsed URL;
+   * throws `Blocked` (`InvalidUrl` when it does not parse).
    */
   function check(url) {
     if (typeof url === 'string') {
-      try { url = new URL(url); } catch { throw new Blocked('invalid url'); }
+      try { url = new URL(url); } catch { throw new InvalidUrl(); }
     }
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
       throw new Blocked(`unsupported scheme: ${url.protocol.replace(/:$/, '')}`);
     }
-    checkHostPort(url.hostname, url.port);
+    if (url.port && !allowLoopback && !ALLOWED_PORTS.includes(Number(url.port))) {
+      throw new Blocked(`port ${url.port} is not allowed; refusing to fetch it`);
+    }
     if (url.username || url.password) {
       throw new Blocked('URL contains credentials; refusing to fetch it');
     }
-  }
-
-  /** The host and port part of `check`, shared with CONNECT requests. */
-  function checkHostPort(hostname, port) {
-    if (port && !allowLoopback && !ALLOWED_PORTS.includes(Number(port))) {
-      throw new Blocked(`port ${port} is not allowed; refusing to fetch it`);
-    }
-    const host = hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+    const host = bareHost(url.hostname).replace(/\.$/, '').toLowerCase();
     const localName = host === 'localhost' || host.endsWith('.localhost') ||
       host.endsWith('.local') || host.endsWith('.internal');
-    if (localName || (net.isIP(host.replace(/%.*$/, '')) && !allowsIp(host))) {
+    if (localName || (net.isIP(host) && !allowsIp(host))) {
       throw new Blocked('private/local URL; refusing to fetch it');
     }
+    return url;
   }
 
   /**
@@ -160,7 +170,7 @@ function createGuard({ lookup = systemLookup, allowLoopback = false } = {}) {
    * address is refused: one private answer poisons the whole name.
    */
   async function resolve(hostname) {
-    const host = hostname.replace(/^\[|\]$/g, '');
+    const host = bareHost(hostname);
     const addrs = await lookup(host);
     if (!addrs.length) throw new Error(`${host} did not resolve`);
     const bad = addrs.find(a => !allowsIp(a.address));
@@ -172,14 +182,10 @@ function createGuard({ lookup = systemLookup, allowLoopback = false } = {}) {
 
   /** `check` then `resolve`: the full verdict on one URL. */
   async function checkUrl(url) {
-    if (typeof url === 'string') {
-      try { url = new URL(url); } catch { throw new Blocked('invalid url'); }
-    }
-    check(url);
-    return resolve(url.hostname);
+    return resolve(check(url).hostname);
   }
 
-  return { check, checkHostPort, resolve, checkUrl, allowsIp };
+  return { check, resolve, checkUrl };
 }
 
-module.exports = { ALLOWED_PORTS, Blocked, createGuard, isPublicIp, systemLookup };
+module.exports = { Blocked, InvalidUrl, bareHost, createGuard, isPublicIp };

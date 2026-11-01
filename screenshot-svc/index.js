@@ -1,5 +1,5 @@
 const http = require('http');
-const { Blocked, createGuard } = require('./guard');
+const { Blocked, InvalidUrl, createGuard } = require('./guard');
 const { PROXY_ERROR_HEADER, startGuardProxy } = require('./proxy');
 
 const PORT = process.env.PORT || 3001;
@@ -7,15 +7,15 @@ const PORT = process.env.PORT || 3001;
 // SSRF guard, in two layers:
 //
 // 1. page.route('**/*') checks every request the page makes (the navigation
-//    and its subresources) and aborts refused ones early, with a clear log.
+//    and its subresources) without DNS, and aborts refused ones early: bad
+//    schemes, ports and credentials, local names and private literal IPs.
 // 2. Chromium is forced through a loopback proxy (proxy.js) that checks
 //    every request again, including redirect hops and service-worker
 //    fetches that page.route never sees, and connects to the exact address it
 //    checked. The browser never resolves a destination name itself, so a
 //    name cannot be rebound to a private address between check and connect.
 //
-// The route check in layer 1 does its own DNS lookup; a rebinding answer
-// there only decides whether to abort early. Layer 2 is the enforcement point.
+// Host names are resolved and judged in layer 2 only, the enforcement point.
 
 /**
  * Launch Chromium with all traffic sent through a guard proxy.
@@ -48,12 +48,12 @@ async function launchBrowser(guard, { executablePath } = {}) {
   }
 }
 
-/** Abort every request of `page` that the guard refuses. */
+/** Abort every request of `page` that the guard refuses without a lookup. */
 async function guardPage(page, guard, log = console) {
   await page.route('**/*', async route => {
     const url = route.request().url();
     try {
-      await guard.checkUrl(url);
+      guard.check(url);
     } catch (err) {
       log.warn('Refused %s: %s', url, err.message);
       await route.abort('blockedbyclient');
@@ -94,23 +94,17 @@ function createServer({ browser, guard, settleMs = 2000 }) {
       }
 
       try {
-        new URL(url);
-      } catch {
-        sendJson(res, 400, { error: 'invalid url' });
-        return;
-      }
-      try {
         await guard.checkUrl(url);
       } catch (err) {
-        sendJson(res, err instanceof Blocked ? 403 : 400, { error: err.message });
+        const status = err instanceof Blocked && !(err instanceof InvalidUrl) ? 403 : 400;
+        sendJson(res, status, { error: err.message });
         return;
       }
 
       let page;
       try {
-        page = await browser.newPage({ serviceWorkers: 'block' });
+        page = await browser.newPage({ serviceWorkers: 'block', viewport: { width: 1200, height: 630 } });
         await guardPage(page, guard);
-        await page.setViewportSize({ width: 1200, height: 630 });
         const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
         // The proxy made this response up: a redirect led somewhere it
         // refused, or the fetch failed. Never capture its error text.

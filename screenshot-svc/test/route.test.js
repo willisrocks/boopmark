@@ -3,24 +3,16 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
-const net = require('net');
 const { createGuard } = require('../guard');
 const { guardPage } = require('../index');
 const { PROXY_ERROR_HEADER, startGuardProxy } = require('../proxy');
-
-function stubLookup(table) {
-  return async host => (table[host] || []).map(address => ({ address, family: net.isIPv6(address) ? 6 : 4 }));
-}
+const { listen, stubLookup } = require('./helpers');
 
 const quiet = { warn() {} };
 
 test('the route handler aborts refused requests and continues the rest', async () => {
   const guard = createGuard({
-    lookup: stubLookup({
-      'public.example': ['93.184.216.34'],
-      'intranet.example': ['10.0.0.5'],
-      'fly.example': ['93.184.216.34', 'fdaa:0:1::3'],
-    }),
+    lookup: async () => { throw new Error('the route handler must not resolve names'); },
   });
   let handler;
   await guardPage({ route: async (pattern, fn) => { assert.strictEqual(pattern, '**/*'); handler = fn; } }, guard, quiet);
@@ -37,14 +29,15 @@ test('the route handler aborts refused requests and continues the rest', async (
 
   assert.strictEqual(await verdict('https://public.example/style.css'), 'continue');
   assert.strictEqual(await verdict('http://public.example:8080/'), 'continue');
+  // Names are judged by the proxy, after it resolves them.
+  assert.strictEqual(await verdict('http://intranet.example/'), 'continue');
   for (const url of [
-    'http://intranet.example/',
-    'http://fly.example/',
     'http://169.254.169.254/latest/meta-data/',
+    'http://localhost/',
     'http://[::ffff:10.0.0.1]/',
     'http://public.example:6379/',
     'https://user:pw@public.example/',
-    'http://unknown.example/',
+    'ftp://public.example/',
   ]) {
     assert.strictEqual(await verdict(url), 'abort:blockedbyclient', url);
   }
@@ -66,11 +59,10 @@ async function fixture() {
     }
     res.end(`hello ${req.headers.host}`);
   });
-  await new Promise(r => server.listen(0, '127.0.0.1', r));
   return {
     hits,
     dropped,
-    port: server.address().port,
+    port: await listen(server),
     close: () => new Promise(r => { server.closeAllConnections(); server.close(r); }),
   };
 }
@@ -85,13 +77,21 @@ function viaProxy(proxyPort, url) {
   });
 }
 
-function connectVia(proxyPort, target) {
+/** Open a CONNECT tunnel; resolves to `{ status, socket }`. */
+function tunnelVia(proxyPort, target) {
   return new Promise((resolve, reject) => {
     http.request({ host: '127.0.0.1', port: proxyPort, method: 'CONNECT', path: target })
-      .on('connect', (res, socket) => { socket.destroy(); resolve(res.statusCode); })
+      .on('connect', (res, socket) => resolve({ status: res.statusCode, socket }))
       .on('error', reject)
       .end();
   });
+}
+
+/** The status of a CONNECT, with the tunnel closed again. */
+async function connectVia(proxyPort, target) {
+  const { status, socket } = await tunnelVia(proxyPort, target);
+  socket.destroy();
+  return status;
 }
 
 test('the proxy forwards public hosts to the checked address and refuses the rest', async t => {
@@ -176,12 +176,7 @@ test('the proxy drops connections beyond its cap, tunnels included', async t => 
   const proxy = await startGuardProxy(guard, { maxConnections: 1 });
   t.after(proxy.close);
 
-  const open = await new Promise((resolve, reject) => {
-    http.request({ host: '127.0.0.1', port: proxy.port, method: 'CONNECT', path: `public.test:${site.port}` })
-      .on('connect', (res, socket) => resolve(socket))
-      .on('error', reject)
-      .end();
-  });
+  const { socket: open } = await tunnelVia(proxy.port, `public.test:${site.port}`);
   t.after(() => open.destroy());
   await assert.rejects(viaProxy(proxy.port, `http://public.test:${site.port}/`));
   assert.deepStrictEqual(site.hits, []);

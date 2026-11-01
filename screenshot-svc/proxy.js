@@ -9,7 +9,7 @@
 
 const http = require('http');
 const net = require('net');
-const { Blocked } = require('./guard');
+const { Blocked, bareHost } = require('./guard');
 
 /**
  * Header on every response the proxy makes up itself, `blocked` or `failed`,
@@ -34,32 +34,35 @@ function withoutHopByHop(headers) {
  */
 function pinnedTo(hostname, addrs) {
   return {
-    host: hostname.replace(/^\[|\]$/g, ''),
+    host: bareHost(hostname),
     autoSelectFamily: true,
     lookup: (_host, opts, cb) => (opts.all ? cb(null, addrs) : cb(null, addrs[0].address, addrs[0].family)),
   };
 }
 
+/** How the proxy answers an error: a refusal, or a failed fetch. */
+function verdict(err) {
+  return err instanceof Blocked
+    ? { status: 403, reason: 'Forbidden', kind: 'blocked' }
+    : { status: 502, reason: 'Bad Gateway', kind: 'failed' };
+}
+
 function refuse(res, err) {
-  const blocked = err instanceof Blocked;
   if (res.headersSent || res.destroyed) {
     res.destroy();
     return;
   }
-  res.writeHead(blocked ? 403 : 502, {
-    'content-type': 'text/plain',
-    [PROXY_ERROR_HEADER]: blocked ? 'blocked' : 'failed',
-  });
+  const { status, kind } = verdict(err);
+  res.writeHead(status, { 'content-type': 'text/plain', [PROXY_ERROR_HEADER]: kind });
   res.end(err.message);
 }
 
 /** Plain HTTP: the request line carries the absolute URL. */
 async function forward(guard, req, res) {
-  let target;
   try {
-    target = new URL(req.url);
+    const target = guard.check(req.url);
     if (target.protocol !== 'http:') throw new Blocked('the proxy forwards only http');
-    const addrs = await guard.checkUrl(target);
+    const addrs = await guard.resolve(target.hostname);
     const upstream = http.request({
       ...pinnedTo(target.hostname, addrs),
       port: target.port || 80,
@@ -79,7 +82,6 @@ async function forward(guard, req, res) {
     });
     req.pipe(upstream);
   } catch (err) {
-    if (!(err instanceof Blocked) && !target) err = new Blocked('invalid url');
     refuse(res, err);
   }
 }
@@ -89,9 +91,8 @@ async function tunnel(guard, req, socket, head) {
   socket.on('error', () => {});
   try {
     const target = new URL(`https://${req.url}`);
-    if (target.pathname !== '/' || target.search || target.username) throw new Blocked('invalid CONNECT target');
-    guard.checkHostPort(target.hostname, target.port);
-    const addrs = await guard.resolve(target.hostname);
+    if (target.pathname !== '/' || target.search) throw new Blocked('invalid CONNECT target');
+    const addrs = await guard.checkUrl(target);
     const upstream = net.connect({ ...pinnedTo(target.hostname, addrs), port: Number(target.port || 443), timeout: UPSTREAM_TIMEOUT_MS });
     upstream.on('timeout', () => upstream.destroy());
     upstream.on('error', () => {});
@@ -104,9 +105,10 @@ async function tunnel(guard, req, socket, head) {
       socket.pipe(upstream);
     });
   } catch (err) {
-    const status = err instanceof Blocked ? '403 Forbidden' : '502 Bad Gateway';
-    const kind = err instanceof Blocked ? 'blocked' : 'failed';
-    socket.end(`HTTP/1.1 ${status}\r\n${PROXY_ERROR_HEADER}: ${kind}\r\n\r\n`);
+    // Chromium reports any failed CONNECT as a network error, so the status
+    // is all it needs.
+    const { status, reason } = verdict(err);
+    socket.end(`HTTP/1.1 ${status} ${reason}\r\n\r\n`);
   }
 }
 
