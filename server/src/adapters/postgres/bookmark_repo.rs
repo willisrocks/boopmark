@@ -218,7 +218,7 @@ impl BookmarkRepository for PostgresPool {
         );
         let mut param_idx = 2;
 
-        if filter.search.is_some() {
+        if filter.search_text().is_some() {
             sql.push_str(&format!(
                 " AND to_tsvector('english', coalesce(title, '') || ' ' || coalesce(description, '') || ' ' || url) @@ plainto_tsquery('english', ${param_idx})"
             ));
@@ -237,7 +237,7 @@ impl BookmarkRepository for PostgresPool {
 
         let mut query = sqlx::query_as::<_, Bookmark>(&sql).bind(user_id);
 
-        if let Some(ref search) = filter.search {
+        if let Some(search) = filter.search_text() {
             query = query.bind(search);
         }
         if let Some(ref tags) = filter.tags {

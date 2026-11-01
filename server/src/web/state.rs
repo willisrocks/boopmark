@@ -11,7 +11,7 @@ use crate::app::settings::SettingsService;
 use crate::app::tag_alias::TagAliasService;
 use crate::app::tag_consolidation::TagConsolidationService;
 use crate::config::Config;
-use crate::domain::bookmark::{BookmarkFilter, BookmarkSort};
+use crate::domain::bookmark::BookmarkFilter;
 use crate::domain::error::DomainError;
 use crate::domain::ports::embedder::Embedder;
 use crate::domain::ports::llm_client::LlmClient;
@@ -104,11 +104,10 @@ impl AppState {
     pub async fn find_bookmarks(
         &self,
         user_id: Uuid,
-        mut filter: BookmarkFilter,
+        filter: BookmarkFilter,
     ) -> Result<Vec<SearchHit>, DomainError> {
-        let searching = filter.search_text().is_some();
-        filter.sort = Some(BookmarkSort::resolve(filter.sort, searching));
-        if searching {
+        let filter = filter.normalized();
+        if filter.search.is_some() {
             return self.search.search(user_id, filter).await;
         }
         let bookmarks = match &self.bookmarks {

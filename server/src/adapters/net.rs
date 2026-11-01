@@ -284,7 +284,18 @@ pub async fn guarded_get(
     client: &reqwest::Client,
     guard: UrlGuard,
     throttle: Option<&HostThrottle>,
+    url: Url,
+) -> Result<reqwest::Response, GuardedGetError> {
+    guarded_request(client, guard, throttle, url, |client, url| client.get(url)).await
+}
+
+/// `guarded_get` for any request: `build` makes the request for each hop.
+pub async fn guarded_request(
+    client: &reqwest::Client,
+    guard: UrlGuard,
+    throttle: Option<&HostThrottle>,
     mut url: Url,
+    build: impl Fn(&reqwest::Client, Url) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, GuardedGetError> {
     for _ in 0..=MAX_REDIRECTS {
         guard.check(&url).map_err(GuardedGetError::Blocked)?;
@@ -292,8 +303,7 @@ pub async fn guarded_get(
             throttle.wait_for(&url).await;
         }
         let resp =
-            client
-                .get(url.clone())
+            build(client, url.clone())
                 .send()
                 .await
                 .map_err(|e| match Blocked::in_chain(&e) {

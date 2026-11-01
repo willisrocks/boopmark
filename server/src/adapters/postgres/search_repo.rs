@@ -13,10 +13,9 @@ use uuid::Uuid;
 /// rank `r` as `1 / (RRF_K + r)` (the measured configuration).
 const LEG_DEPTH: i64 = 50;
 const RRF_K: i64 = 60;
-/// A claim looks at this many due queue rows per job it hands out (at least
-/// `MIN_CLAIM_WINDOW`) when it picks its jobs round-robin by user and host.
-const CLAIM_WINDOW_PER_JOB: i64 = 20;
-const MIN_CLAIM_WINDOW: i64 = 100;
+/// A claim considers the next rows of at most this many users (those
+/// waiting longest) when it picks its jobs round-robin by user and host.
+const MAX_CLAIM_USERS: i64 = 100;
 /// The start of an ingest result write ($1 bookmark, $2 claimed URL): it
 /// share-locks the bookmark, so its URL cannot change until the write
 /// commits, and matches nothing once the bookmark was deleted or moved. The
@@ -211,9 +210,10 @@ impl SearchRepository for PostgresPool {
     ) -> Result<Vec<IngestJob>, DomainError> {
         // `swept` gives up on rows claimed MAX_INGEST_ATTEMPTS times without a
         // result (leases that ran out, results that could never be stored).
-        // `due` locks a window of due rows; `picked` takes them round-robin,
-        // each user's next row first and then each host's, so one user's big
-        // import does not hold up everyone else. Every claim gets a fresh
+        // `waiting` lists the users with due rows, and `due` locks up to
+        // `limit` next rows of each, so however big one user's import is,
+        // every other waiting user is a candidate. `picked` then takes them
+        // round-robin, each user's next row first and then each host's. Every claim gets a fresh
         // token, so a worker whose lease ran out can no longer write.
         let sql = format!(
             "WITH swept AS (
@@ -223,14 +223,24 @@ impl SearchRepository for PostgresPool {
                  WHERE status = 'pending' AND attempts >= $3 AND next_attempt_at <= now()
                  RETURNING bookmark_id
              ),
+             waiting AS (
+                 SELECT user_id FROM bookmark_contents
+                 WHERE status = 'pending' AND next_attempt_at <= now() AND attempts < $3
+                 GROUP BY user_id
+                 ORDER BY min(next_attempt_at), user_id
+                 LIMIT {MAX_CLAIM_USERS}
+             ),
              due AS (
-                 SELECT c.bookmark_id, c.user_id, c.next_attempt_at,
-                        lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)')) AS host
-                 FROM bookmark_contents c JOIN bookmarks b ON b.id = c.bookmark_id
-                 WHERE c.status = 'pending' AND c.next_attempt_at <= now() AND c.attempts < $3
-                 ORDER BY c.next_attempt_at, c.bookmark_id
-                 LIMIT greatest($1 * {CLAIM_WINDOW_PER_JOB}, {MIN_CLAIM_WINDOW})
-                 FOR UPDATE OF c SKIP LOCKED
+                 SELECT d.* FROM waiting w CROSS JOIN LATERAL (
+                     SELECT c.bookmark_id, c.user_id, c.next_attempt_at,
+                            lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)')) AS host
+                     FROM bookmark_contents c JOIN bookmarks b ON b.id = c.bookmark_id
+                     WHERE c.user_id = w.user_id AND c.status = 'pending'
+                       AND c.next_attempt_at <= now() AND c.attempts < $3
+                     ORDER BY c.next_attempt_at, c.bookmark_id
+                     LIMIT $1
+                     FOR UPDATE OF c SKIP LOCKED
+                 ) d
              ),
              picked AS (
                  SELECT bookmark_id FROM (
@@ -702,6 +712,19 @@ mod search_tests {
         );
         assert!(search(&repo, alice, "decomposition").await.is_empty());
 
+        // A blank search box lists the whole library, newest first.
+        let blank = BookmarkRepository::list(
+            &repo,
+            alice,
+            crate::domain::bookmark::BookmarkFilter {
+                search: Some("   ".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(blank.len(), 6, "every one of alice's bookmarks");
+
         // Deleting the bookmark removes its contents row.
         repo.delete(cafe.id, alice).await.unwrap();
         assert_eq!(status(&pool, cafe.id).await, None);
@@ -762,15 +785,37 @@ mod search_tests {
             }
         };
 
-        // Fairness: the importer's rows are older, but a claim of two takes
-        // one row from each user.
+        // Fairness: the importer has a backlog of hundreds of older rows, but a
+        // claim of two takes one row from each user.
+        let mut backlog = Vec::new();
+        for i in 0..300 {
+            let b = bookmark(
+                &repo,
+                importer,
+                &format!("https://import.example.net/backlog-{i}"),
+                "backlog",
+                None,
+                &[],
+            )
+            .await;
+            backlog.push(b.id);
+        }
+        to_head(backlog.clone(), "1970-01-01").await;
         to_head(big_import.clone(), "1970-01-01").await;
         to_head(vec![single.id], "1970-01-02").await;
         let two = repo.claim_ingest_batch(2, LEASE).await.unwrap();
         assert_eq!(two.len(), 2);
         assert!(two.iter().any(|j| j.bookmark_id == single.id));
-        assert!(two.iter().any(|j| big_import.contains(&j.bookmark_id)));
+        assert!(
+            two.iter()
+                .any(|j| big_import.contains(&j.bookmark_id) || backlog.contains(&j.bookmark_id))
+        );
         release_others(&pool, &two, &[]).await;
+        sqlx::query("DELETE FROM bookmarks WHERE id = ANY($1)")
+            .bind(&backlog)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // Two concurrent claimers never share a row.
         to_head(mine.clone(), "1970-01-01").await;

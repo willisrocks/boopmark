@@ -117,6 +117,8 @@ async fn main() {
     let image_settings: Arc<dyn ImageAiSettingsProvider> = Arc::new(
         ConfiguredImageAiSettingsProvider::new(settings_service.clone(), prompt_assistant),
     );
+    let image_fetcher: Arc<dyn domain::ports::image_fetcher::ImageFetcher> =
+        Arc::new(adapters::image_fetch::GuardedImageFetcher::new());
     let image_generator: Arc<dyn ImageGenerator> =
         Arc::new(OpenAiImageGenerator::new(image_settings));
 
@@ -133,6 +135,7 @@ async fn main() {
             (
                 Bookmarks::Local(Arc::new(
                     BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
+                        .with_image_fetcher(image_fetcher.clone())
                         .with_image_generator(image_generator.clone())
                         .with_tag_resolver(tag_resolver.clone()),
                 )),
@@ -172,6 +175,7 @@ async fn main() {
             (
                 Bookmarks::S3(Arc::new(
                     BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
+                        .with_image_fetcher(image_fetcher.clone())
                         .with_image_generator(image_generator.clone())
                         .with_tag_resolver(tag_resolver.clone()),
                 )),

@@ -3,6 +3,7 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::{
     BookmarkRepository, CreateIdempotency, CreateIdempotencyClaim,
 };
+use crate::domain::ports::image_fetcher::ImageFetcher;
 use crate::domain::ports::image_generator::{ImageGenerationContext, ImageGenerator};
 use crate::domain::ports::metadata::MetadataExtractor;
 use crate::domain::ports::screenshot::ScreenshotProvider;
@@ -35,7 +36,7 @@ pub struct BookmarkService<R, M, S> {
     metadata: Arc<M>,
     storage: Arc<S>,
     screenshot: Arc<dyn ScreenshotProvider>,
-    http_client: reqwest::Client,
+    image_fetcher: Option<Arc<dyn ImageFetcher>>,
     image_generator: Option<Arc<dyn ImageGenerator>>,
     tag_resolver: Option<Arc<dyn TagResolver>>,
     generated_image_processing_slots: Arc<tokio::sync::Semaphore>,
@@ -53,17 +54,12 @@ where
         storage: Arc<S>,
         screenshot: Arc<dyn ScreenshotProvider>,
     ) -> Self {
-        let http_client = reqwest::Client::builder()
-            .user_agent("Boopmark/1.0 (+https://boopmark.app)")
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("failed to build HTTP client");
         Self {
             repo,
             metadata,
             storage,
             screenshot,
-            http_client,
+            image_fetcher: None,
             image_generator: None,
             tag_resolver: None,
             generated_image_processing_slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -102,6 +98,14 @@ where
     /// Attach the configured image provider. Keeping this optional preserves
     /// the existing scrape/screenshot behavior for self-hosted installations
     /// that have not configured AI images.
+    /// Attach the image fetcher (a guarded HTTP client) that downloads and
+    /// checks card images. Without one, scraped images are kept as remote
+    /// URLs and never checked.
+    pub fn with_image_fetcher(mut self, image_fetcher: Arc<dyn ImageFetcher>) -> Self {
+        self.image_fetcher = Some(image_fetcher);
+        self
+    }
+
     pub fn with_image_generator(mut self, image_generator: Arc<dyn ImageGenerator>) -> Self {
         self.image_generator = Some(image_generator);
         self
@@ -633,38 +637,20 @@ where
         user_id: Uuid,
         image_url: &str,
     ) -> Result<String, DomainError> {
-        let resp = self
-            .http_client
-            .get(image_url)
-            .send()
-            .await
-            .map_err(|e| DomainError::Internal(format!("image fetch error: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(DomainError::Internal(format!(
-                "image fetch returned HTTP {}",
-                resp.status()
-            )));
-        }
-
-        let content_type = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("image/jpeg")
-            .to_string();
-
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| DomainError::Internal(format!("image read error: {e}")))?;
-
+        let Some(fetcher) = &self.image_fetcher else {
+            return Err(DomainError::Internal(
+                "no image fetcher configured".to_string(),
+            ));
+        };
+        let image = fetcher.fetch(image_url).await?;
         let key = format!(
             "images/base/{user_id}/{}.{}",
             Uuid::new_v4(),
-            extension_from_content_type(&content_type)
+            extension_from_content_type(&image.content_type)
         );
-        self.storage.put(&key, bytes.to_vec(), &content_type).await
+        self.storage
+            .put(&key, image.bytes, &image.content_type)
+            .await
     }
 }
 
@@ -894,42 +880,13 @@ where
         self.generate_and_store_image(user_id, context, None).await
     }
 
-    /// Check whether a stored image is still reachable.
-    ///
-    /// Some image hosts (including common CDNs) reject HEAD while serving the
-    /// same resource over GET. In that case, fall back to a bounded GET request
-    /// and inspect only its headers; the service client's 30-second timeout
-    /// bounds the fallback without downloading the response body.
+    /// Check whether a stored image is still reachable. Without a fetcher
+    /// nothing can be checked, and the image is assumed to be fine.
     async fn image_url_is_valid(&self, image_url: &str) -> bool {
-        match self.http_client.head(image_url).send().await {
-            Ok(response) if response.status().is_success() => true,
-            Ok(response) => {
-                tracing::debug!(
-                    url = %image_url,
-                    status = %response.status(),
-                    "HEAD image check failed; retrying with bounded GET"
-                );
-                self.get_image_url_status(image_url).await
-            }
-            Err(error) => {
-                tracing::debug!(
-                    url = %image_url,
-                    error = %error,
-                    "HEAD image check errored; retrying with bounded GET"
-                );
-                self.get_image_url_status(image_url).await
-            }
+        match &self.image_fetcher {
+            Some(fetcher) => fetcher.is_reachable(image_url).await,
+            None => true,
         }
-    }
-
-    async fn get_image_url_status(&self, image_url: &str) -> bool {
-        self.http_client
-            .get(image_url)
-            .header(reqwest::header::RANGE, "bytes=0-0")
-            .send()
-            .await
-            .map(|response| response.status().is_success())
-            .unwrap_or(false)
     }
 
     async fn generate_and_store_image(
@@ -2168,6 +2125,12 @@ mod tests {
     }
 
     mod fix_images_tests {
+        /// The fixture image sites run on loopback, which the production
+        /// fetcher refuses.
+        fn loopback_images() -> Arc<dyn crate::domain::ports::image_fetcher::ImageFetcher> {
+            Arc::new(crate::adapters::image_fetch::GuardedImageFetcher::allowing_loopback())
+        }
+
         use super::super::*;
         use crate::adapters::screenshot::noop::NoopScreenshot;
         use crate::adapters::screenshot::playwright::PlaywrightScreenshot;
@@ -2652,6 +2615,7 @@ mod tests {
                 storage.clone(),
                 Arc::new(NoopScreenshot),
             )
+            .with_image_fetcher(loopback_images())
             .with_image_generator(generator.clone());
 
             svc.edit_image_override(bookmark.id, user_id, Some("warmer".into()))
@@ -2687,6 +2651,7 @@ mod tests {
                 storage.clone(),
                 Arc::new(NoopScreenshot),
             )
+            .with_image_fetcher(loopback_images())
             .with_image_generator(generator.clone());
 
             svc.edit_image_override(bookmark.id, user_id, None)
@@ -2721,6 +2686,7 @@ mod tests {
                 storage.clone(),
                 Arc::new(NoopScreenshot),
             )
+            .with_image_fetcher(loopback_images())
             .with_image_generator(generator.clone());
 
             let error = svc
@@ -2873,7 +2839,8 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
-            );
+            )
+            .with_image_fetcher(loopback_images());
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
@@ -2899,7 +2866,8 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
-            );
+            )
+            .with_image_fetcher(loopback_images());
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
@@ -2920,7 +2888,8 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
-            );
+            )
+            .with_image_fetcher(loopback_images());
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
@@ -2970,7 +2939,8 @@ mod tests {
                 }),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
-            );
+            )
+            .with_image_fetcher(loopback_images());
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
@@ -2993,7 +2963,8 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(PlaywrightScreenshot::new(screenshot_url)),
-            );
+            )
+            .with_image_fetcher(loopback_images());
             let (tx, rx) = mpsc::channel(32);
             svc.fix_missing_images(user_id, tx).await;
             let events = collect_events(rx).await;
@@ -3015,7 +2986,8 @@ mod tests {
                     "http://{}",
                     screenshot_addr
                 ))),
-            );
+            )
+            .with_image_fetcher(loopback_images());
 
             let bookmark = svc
                 .create(
@@ -3059,7 +3031,8 @@ mod tests {
                     "http://{}",
                     screenshot_addr
                 ))),
-            );
+            )
+            .with_image_fetcher(loopback_images());
             let (tx, rx) = mpsc::channel(32);
 
             svc.fix_missing_images(user_id, tx).await;
@@ -3083,7 +3056,8 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
-            );
+            )
+            .with_image_fetcher(loopback_images());
             let (tx, rx) = mpsc::channel(32);
 
             svc.fix_missing_images(user_id, tx).await;
@@ -3106,7 +3080,8 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
-            );
+            )
+            .with_image_fetcher(loopback_images());
             let (tx, rx) = mpsc::channel(32);
 
             svc.fix_missing_images(user_id, tx).await;
@@ -3125,7 +3100,8 @@ mod tests {
                 Arc::new(NoopMetadata),
                 Arc::new(NoopStorage),
                 Arc::new(NoopScreenshot),
-            );
+            )
+            .with_image_fetcher(loopback_images());
             let (tx, rx) = mpsc::channel(32);
 
             svc.fix_missing_images(Uuid::new_v4(), tx).await;

@@ -175,11 +175,15 @@ fn decode_html(body: Vec<u8>, content_type: Option<&str>) -> String {
     encoding.decode(&body).0.into_owned()
 }
 
-/// The value after the first `charset=` in `text`, unquoted.
+/// The value of the first `charset = value` in `text` (whitespace around
+/// `=` allowed), unquoted.
 fn charset_label(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
-    let start = lower.find("charset=")? + "charset=".len();
-    let label: String = lower[start..]
+    let value = lower
+        .match_indices("charset")
+        .find_map(|(i, word)| lower[i + word.len()..].trim_start().strip_prefix('='))?;
+    let label: String = value
+        .trim_start()
         .trim_start_matches(['"', '\''])
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
@@ -555,6 +559,20 @@ mod tests {
             Some("utf-8".into())
         );
         assert_eq!(charset_label("<html>"), None);
+        assert_eq!(
+            charset_label(
+                "<meta http-equiv=\"Content-Type\" content=\"text/html; charset = ISO-8859-1\">"
+            ),
+            Some("iso-8859-1".into())
+        );
+        assert_eq!(
+            charset_label("text/html; charset =\"koi8-r\""),
+            Some("koi8-r".into())
+        );
+        assert_eq!(
+            charset_label("charset and more; charset=utf-8"),
+            Some("utf-8".into())
+        );
     }
 
     #[tokio::test]

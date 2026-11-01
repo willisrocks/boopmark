@@ -107,6 +107,14 @@ impl BookmarkFilter {
             .map(str::trim)
             .filter(|s| !s.is_empty())
     }
+
+    /// The filter a list view runs: the search trimmed (blank means no
+    /// search) and the sort resolved for it.
+    pub fn normalized(mut self) -> Self {
+        self.search = self.search_text().map(str::to_string);
+        self.sort = Some(BookmarkSort::resolve(self.sort, self.search.is_some()));
+        self
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +145,24 @@ mod tests {
             assert_eq!(BookmarkSort::parse(sort).unwrap().as_str(), sort);
         }
         assert_eq!(BookmarkSort::parse("bogus"), None);
+    }
+
+    #[test]
+    fn normalized_drops_a_blank_search_and_resolves_the_sort() {
+        let blank = BookmarkFilter {
+            search: Some("   ".into()),
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(blank.search, None);
+        assert_eq!(blank.sort, Some(BookmarkSort::Newest));
+        let search = BookmarkFilter {
+            search: Some(" rust ".into()),
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(search.search.as_deref(), Some("rust"));
+        assert_eq!(search.sort, Some(BookmarkSort::Relevance));
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod anthropic_tag_consolidator;
 pub mod article;
 pub mod embedder;
+pub mod image_fetch;
 pub mod llm_client;
 pub mod llm_router;
 pub mod login;
