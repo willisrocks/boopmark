@@ -174,3 +174,28 @@ On 2026-11-01, with the lexical-only search (migration 016,
 `EMBEDDING_BACKEND=disabled`), `--text corpus` scored nDCG@10 **0.791**, the
 same as `eval.py`'s "fts AND→OR + trgm title+description" row in every query
 type.
+
+With embeddings on, add `--wait-embedded SECONDS`: the script waits until the
+server's embedding worker has built the chunks of every seeded bookmark (the
+same worker that backfills a library), then queries. Local bge-small, no paid
+calls (ONNX Runtime from nixpkgs here):
+
+```bash
+cargo build --release -p boopmark-server --features local-embeddings
+DATABASE_URL=postgres://boopmark@127.0.0.1:55432/boopmark PORT=4100 \
+    EMBEDDING_BACKEND=local ORT_DYLIB_PATH=/path/to/libonnxruntime.so \
+    ARTICLE_INGEST_ENABLED=0 target/release/boopmark-server &
+
+uv run scripts/search-eval/app_eval.py --db postgres://boopmark@127.0.0.1:55432/boopmark \
+    --server http://127.0.0.1:4100 --corpus ~/search-eval-data/corpus.jsonl --wait-embedded 3600
+```
+
+On 2026-11-01 (migration 018, the three-leg query, pgvector 0.8.2, ONNX
+Runtime 1.24.4), the worker embedded 560 bookmarks into 5,086 chunks in about
+11 minutes, and `--text corpus` scored nDCG@10 **0.928** (spec: 0.925 for
+bge-small), R@10 0.954, MRR@10 0.958, API p50 87 ms
+(`results/app-bge-small-2026-11-01.json`):
+
+| deep | keyword | natural | prefix | typo | unscraped |
+|---|---|---|---|---|---|
+| 1.000 | 0.990 | 0.842 | 0.838 | 0.931 | 0.955 |
