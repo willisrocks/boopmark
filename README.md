@@ -151,6 +151,8 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `OPENAI_EMBEDDING_API_KEY` | — | Operator key, required when `EMBEDDING_BACKEND=openai` |
 | `ANTHROPIC_EFFORT` | `low` | Anthropic `effort` for models that accept it: `low`, `medium`, `high`, `xhigh`, `max` or `none` |
 | `LLM_BACKEND` | — | `llamacpp` sends every LLM request to `LLAMACPP_BASE_URL` (local development) |
+| `ARTICLE_INGEST_ENABLED` | `1` | Fetch and index the article text of saved pages for search; `0` searches metadata only |
+| `ARTICLE_INGEST_CONCURRENCY` | `4` | Article fetches in parallel (at most one per host per second) |
 | `ENABLE_E2E_AUTH` | `0` | Set to `1` for E2E test auth bypass |
 
 ## Deployment Guides
