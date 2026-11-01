@@ -11,10 +11,19 @@ module.exports = defineConfig({
     trace: "on-first-retry",
     screenshot: "only-on-failure",
   },
-  webServer: {
-    command: "bash ./scripts/e2e/start-server.sh",
-    url: "http://127.0.0.1:4010/health",
-    reuseExistingServer: false,
-    timeout: 300_000,
-  },
+  webServer: [
+    {
+      // The E2E server sends every LLM request here (no paid calls).
+      command: "node ./scripts/e2e/fake-llm.mjs",
+      url: "http://127.0.0.1:4011/health",
+      reuseExistingServer: false,
+      timeout: 30_000,
+    },
+    {
+      command: "bash ./scripts/e2e/start-server.sh",
+      url: "http://127.0.0.1:4010/health",
+      reuseExistingServer: false,
+      timeout: 300_000,
+    },
+  ],
 });

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+reset_sql="DELETE FROM invites WHERE created_by IN (SELECT id FROM users WHERE email = 'e2e@boopmark.local') OR claimed_by IN (SELECT id FROM users WHERE email = 'e2e@boopmark.local'); DELETE FROM users WHERE email = 'e2e@boopmark.local';"
+
+# Hosts without Docker can point the suite at their own migrated Postgres
+# with E2E_DATABASE_URL (psql must be on PATH); devproxy is skipped.
+if [ -n "${E2E_DATABASE_URL:-}" ]; then
+  # A fresh database has no users yet; the server migrates it on start.
+  if [ "$(psql "$E2E_DATABASE_URL" -X -A -t -c "SELECT to_regclass('public.users') IS NOT NULL")" = "t" ]; then
+    psql "$E2E_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "$reset_sql" > /dev/null
+  fi
+else
 # devproxy 0.4.x creates a new stack on every `up`. Reuse only a database
 # belonging to this checkout and accompanied by its devproxy-labelled server.
 repo_dir="$(pwd -P)"
@@ -51,8 +61,7 @@ fi
 
 reset_ready=0
 for attempt in {1..60}; do
-  if docker exec "$e2e_db" psql -U boopmark -d boopmark -v ON_ERROR_STOP=1 -c \
-    "DELETE FROM invites WHERE created_by IN (SELECT id FROM users WHERE email = 'e2e@boopmark.local') OR claimed_by IN (SELECT id FROM users WHERE email = 'e2e@boopmark.local'); DELETE FROM users WHERE email = 'e2e@boopmark.local';" \
+  if docker exec "$e2e_db" psql -U boopmark -d boopmark -v ON_ERROR_STOP=1 -c "$reset_sql" \
     > /dev/null 2>&1; then
     reset_ready=1
     break
@@ -63,8 +72,13 @@ if [ "$reset_ready" -ne 1 ]; then
   echo "Could not reset the dedicated E2E account" >&2
   exit 1
 fi
+fi
 
-export DATABASE_URL=postgres://boopmark:devpassword@127.0.0.1:5434/boopmark
+export DATABASE_URL="${E2E_DATABASE_URL:-postgres://boopmark:devpassword@127.0.0.1:5434/boopmark}"
+# Every LLM request goes to the fake model (scripts/e2e/fake-llm.mjs), so no
+# test can make a paid vendor call.
+export LLM_BACKEND=llamacpp
+export LLAMACPP_BASE_URL="http://127.0.0.1:${FAKE_LLM_PORT:-4011}"
 export ENABLE_E2E_AUTH=1
 export LOGIN_ADAPTER=local_password
 export APP_URL=http://127.0.0.1:4010

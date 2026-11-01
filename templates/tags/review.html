@@ -81,9 +81,9 @@
     </section>
     {% endif %}
 
-    <div class="sticky bottom-0 -mx-4 flex flex-col gap-3 border-t border-gray-800 bg-[#0f1117] px-4 py-4 sm:-mx-6 sm:flex-row sm:items-center sm:px-6">
-        <button type="submit" form="review-form" data-testid="review-apply" class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto">Apply <span data-apply-count>0</span> <span data-apply-noun>merges</span></button>
-        <button type="submit" form="review-form" formaction="/tags/review/dismiss" data-testid="review-dismiss" class="w-full rounded-lg border border-gray-600 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-700 sm:w-auto">Dismiss checked</button>
+    <div class="sticky bottom-0 -mx-4 flex items-center gap-3 border-t border-gray-800 bg-[#0f1117] px-4 py-3 sm:-mx-6 sm:px-6">
+        <button type="submit" form="review-form" data-testid="review-apply" class="flex-1 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none">Apply <span data-apply-count>0</span> <span data-apply-noun>merges</span></button>
+        <button type="submit" form="review-form" formaction="/tags/review/dismiss" data-testid="review-dismiss" class="flex-1 rounded-lg border border-gray-600 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-700 sm:flex-none">Dismiss checked</button>
     </div>
     {% endif %}
 
