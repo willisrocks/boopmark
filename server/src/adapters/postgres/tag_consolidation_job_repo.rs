@@ -149,7 +149,7 @@ mod tag_consolidation_postgres_tests {
     }
 
     /// The first JSON string after `marker` in a prompt line.
-    fn quoted_after<'a>(line: &'a str, marker: &str) -> String {
+    fn quoted_after(line: &str, marker: &str) -> String {
         let rest = &line[line.find(marker).expect("marker") + marker.len()..];
         serde_json::Deserializer::from_str(rest)
             .into_iter::<String>()
