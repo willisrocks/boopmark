@@ -228,15 +228,13 @@ impl SearchRepository for PostgresPool {
                  RETURNING bookmark_id
              ),
              waiting AS (
-                 SELECT q.user_id,
+                 SELECT c.user_id,
                         row_number() OVER (ORDER BY t.last_claimed_at NULLS FIRST,
-                                                    q.oldest, q.user_id) AS user_rank
-                 FROM (
-                     SELECT user_id, min(next_attempt_at) AS oldest FROM bookmark_contents
-                     WHERE status = 'pending' AND next_attempt_at <= now() AND attempts < $3
-                     GROUP BY user_id
-                 ) q
-                 LEFT JOIN bookmark_ingest_turns t ON t.user_id = q.user_id
+                                                    min(c.next_attempt_at), c.user_id) AS user_rank
+                 FROM bookmark_contents c
+                 LEFT JOIN bookmark_ingest_turns t ON t.user_id = c.user_id
+                 WHERE c.status = 'pending' AND c.next_attempt_at <= now() AND c.attempts < $3
+                 GROUP BY c.user_id, t.last_claimed_at
                  ORDER BY user_rank
                  LIMIT {MAX_CLAIM_USERS}
              ),
@@ -253,6 +251,8 @@ impl SearchRepository for PostgresPool {
                      FOR UPDATE OF c SKIP LOCKED
                  ) d
              ),
+             -- Two levels, because a user's turn order depends on its host
+             -- turns, and window functions cannot sit next to FOR UPDATE in `due`.
              picked AS (
                  SELECT bookmark_id FROM (
                      SELECT bookmark_id, user_rank,
@@ -422,6 +422,18 @@ mod search_tests {
              WHERE bookmark_id = ANY($1)",
         )
         .bind(&others)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Forget every claim of these users' rows.
+    async fn reset_claims(pool: &PgPool, users: &[Uuid]) {
+        sqlx::query(
+            "UPDATE bookmark_contents SET next_attempt_at = now(), attempts = 0, claim_token = NULL
+             WHERE user_id = ANY($1)",
+        )
+        .bind(users)
         .execute(pool)
         .await
         .unwrap();
@@ -856,11 +868,13 @@ mod search_tests {
         )
         .await;
         to_head(vec![second.id], "1970-01-02").await;
+        let mine_now: Vec<Uuid> = big_import
+            .iter()
+            .copied()
+            .chain([single.id, second.id])
+            .collect();
         let mut served = Vec::new();
         for _ in 0..50 {
-            if served.len() == 4 {
-                break;
-            }
             let one = repo.claim_ingest_batch(1, LEASE).await.unwrap();
             for job in &one {
                 if big_import.contains(&job.bookmark_id) {
@@ -870,12 +884,10 @@ mod search_tests {
                 }
             }
             // Rows of other tests are put back; this test's stay leased.
-            let mine_now: Vec<Uuid> = big_import
-                .iter()
-                .copied()
-                .chain([single.id, second.id])
-                .collect();
             release_others(&pool, &one, &mine_now).await;
+            if served.len() == 4 {
+                break;
+            }
         }
         assert_eq!(served.len(), 4);
         assert!(
@@ -888,14 +900,7 @@ mod search_tests {
             .await
             .unwrap();
         // Put this step's claims back for the steps below.
-        sqlx::query(
-            "UPDATE bookmark_contents SET next_attempt_at = now(), attempts = 0, claim_token = NULL
-             WHERE user_id = ANY($1)",
-        )
-        .bind([importer, other])
-        .execute(&pool)
-        .await
-        .unwrap();
+        reset_claims(&pool, &[importer, other]).await;
 
         // Two concurrent claimers never share a row.
         to_head(mine.clone(), "1970-01-01").await;

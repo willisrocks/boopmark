@@ -643,11 +643,11 @@ where
     }
 }
 
-/// The key of a card image in our own storage, if `url` is one. The URL is
-/// parsed (which resolves `..` and `%2e%2e` segments), must have the
-/// storage's origin and path prefix and no query, and the rest must be a
-/// plain `images/...` key.
-fn stored_object_key<S: ObjectStorage>(storage: &S, url: &str) -> Option<String> {
+/// The storage key behind a URL served by our own storage, if `url` is one.
+/// The URL is parsed (which resolves `..` and `%2e%2e` segments), must have
+/// the storage's origin and path prefix and no query, and the rest must be a
+/// plain object key. Every URL-to-key conversion goes through here.
+fn storage_key_from_url<S: ObjectStorage>(storage: &S, url: &str) -> Option<String> {
     let url = url::Url::parse(url).ok()?;
     let prefix = url::Url::parse(&storage.public_url("")).ok()?;
     if url.origin() != prefix.origin() || url.query().is_some() {
@@ -657,7 +657,12 @@ fn stored_object_key<S: ObjectStorage>(storage: &S, url: &str) -> Option<String>
         .path()
         .strip_prefix(prefix.path().trim_end_matches('/'))?
         .strip_prefix('/')?;
-    (key.starts_with("images/") && is_plain_object_key(key)).then(|| key.to_string())
+    is_plain_object_key(key).then(|| key.to_string())
+}
+
+/// The key of a card image in our own storage, if `url` is one.
+fn stored_object_key<S: ObjectStorage>(storage: &S, url: &str) -> Option<String> {
+    storage_key_from_url(storage, url).filter(|key| key.starts_with("images/"))
 }
 
 fn owned_override_storage_key<S: ObjectStorage>(
@@ -665,11 +670,7 @@ fn owned_override_storage_key<S: ObjectStorage>(
     user_id: Uuid,
     url: &str,
 ) -> Option<String> {
-    let prefix = storage.public_url("");
-    let key = url
-        .strip_prefix(prefix.trim_end_matches('/'))
-        .map(|rest| rest.trim_start_matches('/').to_string())
-        .filter(|key| !key.is_empty())?;
+    let key = storage_key_from_url(storage, url)?;
     let mut components = key.split('/');
     let image_dir = components.next()?;
     let override_dir = components.next()?;
@@ -691,12 +692,8 @@ fn owned_image_storage_key<S: ObjectStorage>(
     user_id: Uuid,
     url: &str,
 ) -> Option<String> {
-    let prefix = storage.public_url("").trim_end_matches('/').to_string();
-    let key = url.strip_prefix(&prefix)?.strip_prefix('/')?;
+    let key = storage_key_from_url(storage, url)?;
     let components: Vec<_> = key.split('/').collect();
-    if components.iter().any(|component| component.is_empty()) || components[0] != "images" {
-        return None;
-    }
 
     match components.as_slice() {
         ["images", kind, owner, filename] if matches!(*kind, "base" | "ai" | "overrides") => {

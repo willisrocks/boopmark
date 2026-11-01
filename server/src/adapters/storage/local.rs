@@ -5,14 +5,18 @@ use std::path::{Path, PathBuf};
 #[derive(Clone)]
 pub struct LocalStorage {
     base_dir: PathBuf,
+    /// `base_dir` with symlinks resolved, for the containment check.
+    canonical_base: PathBuf,
     public_url_prefix: String,
 }
 
 impl LocalStorage {
     pub fn new(base_dir: PathBuf, public_url_prefix: String) -> Self {
         std::fs::create_dir_all(&base_dir).ok();
+        let canonical_base = std::fs::canonicalize(&base_dir).unwrap_or_else(|_| base_dir.clone());
         Self {
             base_dir,
+            canonical_base,
             public_url_prefix,
         }
     }
@@ -27,21 +31,19 @@ impl LocalStorage {
             )));
         }
         let path = self.base_dir.join(key);
-        let base = tokio::fs::canonicalize(&self.base_dir)
-            .await
-            .map_err(|e| DomainError::Internal(format!("storage dir error: {e}")))?;
-        // The deepest part of the path that exists decides where it really is.
+        // The deepest part of the path that exists decides where it really
+        // is; the key is plain, so only a symlink could lead elsewhere.
         let mut existing: &Path = &path;
         let resolved = loop {
             match tokio::fs::canonicalize(existing).await {
                 Ok(resolved) => break resolved,
                 Err(_) => match existing.parent() {
                     Some(parent) => existing = parent,
-                    None => break base.clone(),
+                    None => break self.canonical_base.clone(),
                 },
             }
         };
-        if !resolved.starts_with(&base) {
+        if !resolved.starts_with(&self.canonical_base) {
             return Err(DomainError::InvalidInput(format!(
                 "storage key leaves the storage directory: {key:?}"
             )));

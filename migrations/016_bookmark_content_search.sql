@@ -51,7 +51,7 @@ CREATE TABLE bookmark_ingest_turns (
 
 -- A claim looks at each waiting user's next rows.
 CREATE INDEX idx_bookmark_contents_user_queue ON bookmark_contents(user_id, next_attempt_at, bookmark_id)
-    WHERE status = 'pending';
+    INCLUDE (attempts) WHERE status = 'pending';
 
 -- Keep bookmark_contents in step with every write to bookmarks, in the same
 -- transaction: a new bookmark or a changed URL is (re)queued for ingest,
