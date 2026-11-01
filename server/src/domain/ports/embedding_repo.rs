@@ -5,7 +5,7 @@ use std::time::Duration;
 
 /// The embed queue: bookmarks whose chunks were not built by the configured
 /// embedder (new results of the ingest worker, failed fetches, edits, the
-/// backfill after migration 017, and a model change). Its state lives in the
+/// backfill after migration 018, and a model change). Its state lives in the
 /// database, so the backfill resumes where it stopped.
 #[trait_variant::make(Send)]
 pub trait EmbeddingRepository: Send + Sync {

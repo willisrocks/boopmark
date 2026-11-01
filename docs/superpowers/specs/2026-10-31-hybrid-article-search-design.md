@@ -165,7 +165,7 @@ Neon's hosts end in `neon.tech`, which identifies the provider from the
   do this.
 - **In the migrations.** `016_bookmark_content_search.sql` starts with
   `CREATE EXTENSION IF NOT EXISTS pg_trgm;` and
-  `017_bookmark_chunks_vector.sql` with `CREATE EXTENSION IF NOT EXISTS
+  `018_bookmark_chunks_vector.sql` with `CREATE EXTENSION IF NOT EXISTS
   vector;`. These do nothing once an extension is enabled, so the same
   migrations run on both providers. On MPG, flip the toggles first.
 - **Trust.** `pg_trgm`, `unaccent` and `fuzzystrmatch` are "trusted"
@@ -623,12 +623,12 @@ build and binary don't carry ONNX Runtime. The prototype enables fastembed
 `hf-hub-rustls-tls` (the model download uses rustls, like the rest of the
 app).
 
-### Schema (migrations `016_bookmark_content_search.sql` and `017_bookmark_chunks_vector.sql`)
+### Schema (migrations `016_bookmark_content_search.sql` and `018_bookmark_chunks_vector.sql`)
 
 The prototype version is in `scripts/search-eval/sql/prototype_schema.sql`,
 plus `eval.py`'s setup for the trigram column. The schema is split in two:
 `016` holds the lexical side (`pg_trgm`, `bookmark_contents`, the fetch
-queue and its backfill), `017` the vector side (`vector`, `bookmark_chunks`).
+queue and its backfill), `018` the vector side (`vector`, `bookmark_chunks`).
 
 `016_bookmark_content_search.sql`:
 
@@ -668,7 +668,7 @@ SELECT id, user_id,
 FROM bookmarks;
 ```
 
-`017_bookmark_chunks_vector.sql`:
+`018_bookmark_chunks_vector.sql`:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;   -- Fly MPG: enable in the dashboard first (Neon: this enables it)
@@ -1260,7 +1260,7 @@ What it shows:
    - Run the pg_available_extensions check above.
    - Switch the compose, CI and E2E Postgres images to pgvector (owner
      approval needed for the CI change).
-   - Migrations 016 (lexical) and 017 (vector).
+   - Migrations 016 (lexical) and 018 (vector; 017 is the tag consolidation).
 2. **Full-text body search** with no embeddings: the `ArticleFetcher`
    adapter, worker and queue, weighted `search`, the trigram leg, relevance
    sort and snippets. This is the measured lexical-only step (0.053 →

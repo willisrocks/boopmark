@@ -297,7 +297,7 @@ mod embedding_tests {
             .join(" ")
     }
 
-    /// Run with a database migrated through 017 (pgvector):
+    /// Run with a database migrated through 018 (pgvector):
     /// `DATABASE_URL=... cargo test -p boopmark-server adapters::postgres::embedding_repo::embedding_tests -- --ignored`.
     #[tokio::test]
     #[ignore = "requires a migrated Postgres database with pgvector (DATABASE_URL)"]

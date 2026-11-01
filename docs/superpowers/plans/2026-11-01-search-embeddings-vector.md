@@ -6,7 +6,7 @@
 (`docs/superpowers/specs/2026-10-31-hybrid-article-search-design.md`:
 Schema, Ports and adapters, Search query, UI, Backfill, Cost). Wire the
 `Embedder` port (#40) into ingestion and search on top of the lexical search
-and ingest worker (#42): migration 017 with `bookmark_chunks`, chunking and
+and ingest worker (#42): migration 018 (renumbered from the spec's 017, which the tag consolidation took) with `bookmark_chunks`, chunking and
 the metadata fallback chunk, the vector leg as the third RRF leg, the
 Settings → Search index panel, and the resumable embedding backfill. Also fix
 the four follow-ups from the PR 42 review, (d) being a security fix.
@@ -49,7 +49,7 @@ with `pg_trgm` and pgvector ≥ 0.8 (`halfvec`, `hnsw.iterative_scan`).
    spec's Backfill section already describes the backfill as "the worker
    re-embeds from the stored text … `embedded_model = NULL`".
 2. **The embed queue lives in `bookmark_contents`**, with three new columns
-   in 017 (`embed_attempts`, `embed_next_attempt_at`, `embed_error`), the
+   in 018 (`embed_attempts`, `embed_next_attempt_at`, `embed_error`), the
    same way the fetch queue does. Claims use `FOR UPDATE SKIP LOCKED` and a
    lease. A write is accepted only while the row's `updated_at` is the one
    claimed, so an edit during an embed call drops the stale result (the next
@@ -73,7 +73,7 @@ with `pg_trgm` and pgvector ≥ 0.8 (`halfvec`, `hnsw.iterative_scan`).
    tokens" without a tokenizer in the server: normal prose (≈6 characters a
    word) keeps the prototype's 200-word windows; dense code is cut well
    below BGE's 512 tokens.
-6. **The trigger keeps chunks in step with edits.** 017 replaces
+6. **The trigger keeps chunks in step with edits.** 018 replaces
    `bookmarks_sync_content()`: a URL change deletes the bookmark's chunks;
    a title or description change sets `embedded_model = NULL` (both are in
    chunk headers); a tag change does so only for metadata-chunk rows (tags
@@ -132,7 +132,7 @@ with `pg_trgm` and pgvector ≥ 0.8 (`halfvec`, `hnsw.iterative_scan`).
 
 ## Tasks
 
-- [ ] **1. Migration 017** `migrations/017_bookmark_chunks_vector.sql`:
+- [ ] **1. Migration 018** `migrations/018_bookmark_chunks_vector.sql`:
   `CREATE EXTENSION IF NOT EXISTS vector`, `bookmark_chunks` (halfvec, no
   fixed size, `model`), user index, partial HNSW indexes for 1024 and 384,
   the embed queue columns and index, and the replaced trigger function.

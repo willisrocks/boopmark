@@ -18,7 +18,7 @@ pub const MAX_CHUNKS: usize = 64;
 /// otherwise truncate silently.
 pub const MAX_CHUNK_CHARS: usize = 1600;
 /// Shorter article text is not chunked; the bookmark gets the metadata chunk
-/// instead. Migration 017's sync trigger repeats this number.
+/// instead. Migration 018's sync trigger repeats this number.
 pub const MIN_CHUNKED_TEXT_CHARS: usize = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

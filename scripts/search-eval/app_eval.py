@@ -49,6 +49,8 @@ from common import (HERE, TEXT_CAP_CHARS, bookmark_uuid, load_jsonl, load_querie
                     print_table, summarize)
 
 SPEC_LEXICAL_ONLY = 0.791  # spec: "fts AND->OR + trgm title+description", main/fallback
+# spec: the 3-leg SQL, main/fallback (bge-small local; te3-large@1024 hosted)
+SPEC_THREE_LEG = {"bge-small": 0.925, "te3-large@1024": 0.960}
 
 
 def seed(conn, user_id, docs, failed, mode: str) -> None:
@@ -94,6 +96,26 @@ def wait_for_ingest(conn, user_id, timeout_s: int) -> dict:
         time.sleep(15)
 
 
+def wait_for_embeddings(conn, user_id, timeout_s: int) -> dict:
+    """Wait until the server's embedding worker has built chunks for every
+    bookmark that is not pending (EMBEDDING_BACKEND other than disabled)."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        waiting, chunks = conn.execute(
+            """SELECT count(*) FILTER (WHERE status <> 'pending' AND embedded_model IS NULL),
+                      (SELECT count(*) FROM bookmark_chunks WHERE user_id = %s)
+               FROM bookmark_contents WHERE user_id = %s""",
+            (user_id, user_id)).fetchone()
+        models = [r[0] for r in conn.execute(
+            "SELECT DISTINCT embedded_model FROM bookmark_contents WHERE user_id = %s AND embedded_model IS NOT NULL",
+            (user_id,)).fetchall()]
+        conn.commit()
+        print(f"  embeddings: {waiting} bookmarks waiting, {chunks} chunks, models {models}", flush=True)
+        if not waiting or time.monotonic() > deadline:
+            return {"waiting": waiting, "chunks": chunks, "models": models}
+        time.sleep(15)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", required=True)
@@ -102,6 +124,8 @@ def main() -> None:
     ap.add_argument("--email", default="eval@example.com")
     ap.add_argument("--text", choices=["corpus", "ingest"], default="corpus")
     ap.add_argument("--ingest-timeout", type=int, default=1800, help="seconds, --text ingest only")
+    ap.add_argument("--wait-embedded", type=int, default=0, metavar="SECONDS",
+                    help="wait up to this long for the embedding worker (non-disabled EMBEDDING_BACKEND)")
     ap.add_argument("--queries", type=pathlib.Path, default=HERE / "queries.jsonl")
     ap.add_argument("--json", type=pathlib.Path, help="write the summary and per-query results here")
     args = ap.parse_args()
@@ -132,6 +156,9 @@ def main() -> None:
         coverage = None
         if args.text == "ingest":
             coverage = wait_for_ingest(conn, user_id, args.ingest_timeout)
+        embedded = None
+        if args.wait_embedded:
+            embedded = wait_for_embeddings(conn, user_id, args.wait_embedded)
 
         try:
             per_query, latency = {}, []
@@ -157,8 +184,11 @@ def main() -> None:
           f"p95 {latency[int(0.95 * len(latency))]:.1f} ms")
     if coverage:
         print(f"ingest coverage: {coverage}")
+    if embedded:
+        print(f"embeddings: {embedded}; spec 3-leg: "
+              + ", ".join(f"{k} {v:.3f}" for k, v in SPEC_THREE_LEG.items()))
     if args.json:
-        args.json.write_text(json.dumps({"summary": summary, "coverage": coverage,
+        args.json.write_text(json.dumps({"summary": summary, "coverage": coverage, "embedded": embedded,
                                          "per_query": per_query}, indent=1))
 
 

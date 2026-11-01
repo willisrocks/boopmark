@@ -29,7 +29,7 @@ const MAX_ERROR_CHARS: usize = 500;
 /// Builds and stores the chunks of every bookmark whose chunks were not made
 /// by the configured embedder: new articles, the metadata chunk of failed
 /// fetches, edits, and (because all of that state is in the database) the
-/// backfill after migration 017 or a model change. Rate-limited, resumable
+/// backfill after migration 018 or a model change. Rate-limited, resumable
 /// and idempotent: a bookmark's chunks are replaced as a whole.
 pub struct EmbedWorker<R> {
     repo: Arc<R>,
