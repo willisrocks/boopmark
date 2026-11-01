@@ -28,6 +28,7 @@ use app::enrichment::EnrichmentService;
 use app::invite::InviteService;
 use app::secrets::SecretBox;
 use app::settings::{ConfiguredImageAiSettingsProvider, SettingsService};
+use app::tag_alias::TagAliasService;
 use config::{Config, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, StorageBackend};
 use domain::ports::embedder::Embedder;
 use domain::ports::image_generator::{ImageAiSettingsProvider, ImageGenerator};
@@ -36,6 +37,7 @@ use domain::ports::llm_enricher::LlmEnricher;
 use domain::ports::llm_prompt_assistant::LlmPromptAssistant;
 use domain::ports::login_provider::LoginProvider;
 use domain::ports::screenshot::ScreenshotProvider;
+use domain::ports::tag_resolver::TagResolver;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use web::state::{AppState, Bookmarks, ImageStorage};
@@ -62,6 +64,8 @@ async fn main() {
     let db = Arc::new(PostgresPool::new(pool));
     let secret_box = Arc::new(SecretBox::new(&config.llm_settings_encryption_key));
     let settings_service = Arc::new(SettingsService::new(db.clone(), secret_box));
+    let tag_alias_service = Arc::new(TagAliasService::new(db.clone()));
+    let tag_resolver: Arc<dyn TagResolver> = tag_alias_service.clone();
 
     let html_extractor = HtmlMetadataExtractor::new();
     let mut extractors: Vec<Box<dyn domain::ports::metadata::MetadataExtractor>> =
@@ -127,7 +131,8 @@ async fn main() {
             (
                 Bookmarks::Local(Arc::new(
                     BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
-                        .with_image_generator(image_generator.clone()),
+                        .with_image_generator(image_generator.clone())
+                        .with_tag_resolver(tag_resolver.clone()),
                 )),
                 images,
             )
@@ -165,7 +170,8 @@ async fn main() {
             (
                 Bookmarks::S3(Arc::new(
                     BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
-                        .with_image_generator(image_generator.clone()),
+                        .with_image_generator(image_generator.clone())
+                        .with_tag_resolver(tag_resolver.clone()),
                 )),
                 images,
             )
@@ -228,6 +234,7 @@ async fn main() {
         config: Arc::new(config.clone()),
         enrichment: enrichment_service,
         tag_consolidation: tag_consolidation_service,
+        tag_aliases: tag_alias_service,
         images_storage,
         image_processing_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         active_image_fix_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),

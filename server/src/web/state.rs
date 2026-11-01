@@ -7,6 +7,7 @@ use crate::app::bookmarks::BookmarkService;
 use crate::app::enrichment::EnrichmentService;
 use crate::app::invite::InviteService;
 use crate::app::settings::SettingsService;
+use crate::app::tag_alias::TagAliasService;
 use crate::app::tag_consolidation::TagConsolidationService;
 use crate::config::Config;
 use crate::domain::error::DomainError;
@@ -31,6 +32,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub enrichment: Arc<EnrichmentService<FallbackMetadataExtractor, PostgresPool>>,
     pub tag_consolidation: Arc<TagConsolidationService<PostgresPool, PostgresPool>>,
+    pub tag_aliases: Arc<TagAliasService<PostgresPool>>,
     pub images_storage: ImageStorage,
     pub image_processing_slots: Arc<tokio::sync::Semaphore>,
     pub active_image_fix_jobs: Arc<Mutex<HashSet<Uuid>>>,
