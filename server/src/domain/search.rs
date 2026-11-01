@@ -89,37 +89,31 @@ pub struct IngestFailure {
 /// group, joined by `or`. A group without operators constrains nothing, and
 /// then neither does the whole query (`"cold brew" or espresso`).
 pub fn websearch_constraints(text: &str) -> Option<String> {
-    let mut groups: Vec<Vec<String>> = vec![Vec::new()];
-    let mut group_has_terms = vec![false];
+    #[derive(Default)]
+    struct Group {
+        operators: Vec<String>,
+        has_terms: bool,
+    }
+    let mut groups = vec![Group::default()];
     for token in websearch_tokens(text) {
+        let group = groups.last_mut().unwrap();
         match token {
-            WebsearchToken::Or => {
-                groups.push(Vec::new());
-                group_has_terms.push(false);
-            }
+            WebsearchToken::Or => groups.push(Group::default()),
             WebsearchToken::Operator(op) => {
-                groups.last_mut().unwrap().push(op);
-                *group_has_terms.last_mut().unwrap() = true;
+                group.operators.push(op);
+                group.has_terms = true;
             }
-            WebsearchToken::Word => *group_has_terms.last_mut().unwrap() = true,
+            WebsearchToken::Word => group.has_terms = true,
         }
     }
-    let groups: Vec<Vec<String>> = groups
-        .into_iter()
-        .zip(group_has_terms)
-        .filter(|(_, has_terms)| *has_terms)
-        .map(|(ops, _)| ops)
-        .collect();
-    if groups.is_empty() || groups.iter().any(Vec::is_empty) {
-        return None;
+    let mut constraint = Vec::new();
+    for group in groups.into_iter().filter(|g| g.has_terms) {
+        if group.operators.is_empty() {
+            return None;
+        }
+        constraint.push(group.operators.join(" "));
     }
-    Some(
-        groups
-            .iter()
-            .map(|ops| ops.join(" "))
-            .collect::<Vec<_>>()
-            .join(" or "),
-    )
+    (!constraint.is_empty()).then(|| constraint.join(" or "))
 }
 
 enum WebsearchToken {

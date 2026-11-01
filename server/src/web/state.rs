@@ -11,11 +11,13 @@ use crate::app::settings::SettingsService;
 use crate::app::tag_alias::TagAliasService;
 use crate::app::tag_consolidation::TagConsolidationService;
 use crate::config::Config;
+use crate::domain::bookmark::{BookmarkFilter, BookmarkSort};
 use crate::domain::error::DomainError;
 use crate::domain::ports::embedder::Embedder;
 use crate::domain::ports::llm_client::LlmClient;
 use crate::domain::ports::login_provider::LoginProvider;
 use crate::domain::ports::storage::ObjectStorage;
+use crate::domain::search::SearchHit;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -92,6 +94,34 @@ impl ObjectStorage for ImageStorage {
             Self::Local(s) => s.public_url(key),
             Self::S3(s) => s.public_url(key),
         }
+    }
+}
+
+impl AppState {
+    /// The bookmarks a list view shows: a relevance-ranked search when the
+    /// filter has search text, otherwise the plain list (whose hits carry no
+    /// snippet). The sort is resolved here for both.
+    pub async fn find_bookmarks(
+        &self,
+        user_id: Uuid,
+        mut filter: BookmarkFilter,
+    ) -> Result<Vec<SearchHit>, DomainError> {
+        let searching = filter.search_text().is_some();
+        filter.sort = Some(BookmarkSort::resolve(filter.sort, searching));
+        if searching {
+            return self.search.search(user_id, filter).await;
+        }
+        let bookmarks = match &self.bookmarks {
+            Bookmarks::Local(svc) => svc.list(user_id, filter).await,
+            Bookmarks::S3(svc) => svc.list(user_id, filter).await,
+        }?;
+        Ok(bookmarks
+            .into_iter()
+            .map(|bookmark| SearchHit {
+                bookmark,
+                snippet: None,
+            })
+            .collect())
     }
 }
 

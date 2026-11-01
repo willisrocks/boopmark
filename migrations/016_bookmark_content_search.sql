@@ -71,9 +71,18 @@ BEGIN
 END
 $$;
 
-CREATE TRIGGER bookmarks_sync_content
-    AFTER INSERT OR UPDATE OF title, description, url, tags ON bookmarks
+CREATE TRIGGER bookmarks_sync_content_insert
+    AFTER INSERT ON bookmarks
     FOR EACH ROW EXECUTE FUNCTION bookmarks_sync_content();
+
+-- Edits that leave these columns as they were (most saves send them all)
+-- skip the trigger, so the article text is not re-tokenized for nothing.
+CREATE TRIGGER bookmarks_sync_content_update
+    AFTER UPDATE OF title, description, url, tags ON bookmarks
+    FOR EACH ROW
+    WHEN ((OLD.title, OLD.description, OLD.url, OLD.tags)
+          IS DISTINCT FROM (NEW.title, NEW.description, NEW.url, NEW.tags))
+    EXECUTE FUNCTION bookmarks_sync_content();
 
 -- Backfill: every existing bookmark starts pending, already searchable by
 -- its metadata. The ingest worker drains the queue with per-host throttling.

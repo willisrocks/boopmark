@@ -20,6 +20,12 @@ const JOB_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const IDLE_POLL: Duration = Duration::from_secs(2);
 const MAX_ERROR_CHARS: usize = 500;
 
+fn report(result: Result<(), tokio::task::JoinError>) {
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "article ingest task panicked");
+    }
+}
+
 /// What to record for a fetch that produced no article.
 fn failure_for(job: &IngestJob, err: &ArticleFetchError, now: DateTime<Utc>) -> IngestFailure {
     let error: String = err.to_string().chars().take(MAX_ERROR_CHARS).collect();
@@ -80,8 +86,10 @@ where
             // Wait for a free slot (a job finishing), new work, or the poll.
             tokio::select! {
                 Some(result) = in_flight.join_next() => {
-                    if let Err(e) = result {
-                        tracing::warn!(error = %e, "article ingest task panicked");
+                    report(result);
+                    // Refill every slot that has freed up in one claim.
+                    while let Some(result) = in_flight.try_join_next() {
+                        report(result);
                     }
                 }
                 _ = wake.notified() => {}
@@ -90,22 +98,21 @@ where
         }
     }
 
-    /// Claim jobs for the free slots and start them. Returns how many started.
-    async fn fill(self: Arc<Self>, in_flight: &mut JoinSet<()>) -> Result<usize, DomainError> {
+    /// Claim jobs for the free slots and start them.
+    async fn fill(self: Arc<Self>, in_flight: &mut JoinSet<()>) -> Result<(), DomainError> {
         let free = self.concurrency.saturating_sub(in_flight.len());
         if free == 0 {
-            return Ok(0);
+            return Ok(());
         }
         let jobs = self
             .repo
             .claim_ingest_batch(free as i64, CLAIM_LEASE)
             .await?;
-        let started = jobs.len();
         for job in jobs {
             let worker = self.clone();
             in_flight.spawn(async move { worker.process(job).await });
         }
-        Ok(started)
+        Ok(())
     }
 
     async fn process(&self, job: IngestJob) {

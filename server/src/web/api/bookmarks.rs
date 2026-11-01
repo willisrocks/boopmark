@@ -196,31 +196,17 @@ async fn list_bookmarks(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
-    let mut filter = BookmarkFilter::from(params);
-    filter.search = filter
-        .search
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let result = if filter.search.is_some() {
-        state.search.search(user.id, filter).await.map(|hits| {
+    let result = state
+        .find_bookmarks(user.id, BookmarkFilter::from(params))
+        .await
+        .map(|hits| {
             hits.into_iter()
                 .map(|hit| ListedBookmark {
                     snippet: hit.snippet.map(|s| s.plain_text()),
                     bookmark: hit.bookmark,
                 })
                 .collect::<Vec<_>>()
-        })
-    } else {
-        with_bookmarks!(&state.bookmarks, svc => svc.list(user.id, filter).await).map(|bookmarks| {
-            bookmarks
-                .into_iter()
-                .map(|bookmark| ListedBookmark {
-                    bookmark,
-                    snippet: None,
-                })
-                .collect()
-        })
-    };
+        });
     match result {
         Ok(bookmarks) => Ok(Json(bookmarks)),
         Err(e) => Err(error_response(e)),

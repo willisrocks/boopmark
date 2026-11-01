@@ -6,7 +6,6 @@ use crate::domain::search::{
     IngestFailure, IngestJob, MAX_INGEST_ATTEMPTS, MAX_SEARCH_RESULTS, SearchHit, SearchQuery,
     Snippet, websearch_constraints,
 };
-use sqlx::{Postgres, Transaction};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -14,27 +13,35 @@ use uuid::Uuid;
 /// rank `r` as `1 / (RRF_K + r)` (the measured configuration).
 const LEG_DEPTH: i64 = 50;
 const RRF_K: i64 = 60;
-/// How many due queue rows a claim looks at when it picks its jobs round-robin
-/// by user and host.
-const CLAIM_WINDOW: i64 = 500;
+/// A claim looks at this many due queue rows per job it hands out (at least
+/// `MIN_CLAIM_WINDOW`) when it picks its jobs round-robin by user and host.
+const CLAIM_WINDOW_PER_JOB: i64 = 20;
+const MIN_CLAIM_WINDOW: i64 = 100;
+/// The start of an ingest result write ($1 bookmark, $2 claimed URL): it
+/// share-locks the bookmark, so its URL cannot change until the write
+/// commits, and matches nothing once the bookmark was deleted or moved. The
+/// write then also requires the claim token ($3), which a later claim
+/// replaces.
+const CLAIMED_BOOKMARK: &str = "WITH b AS (
+    SELECT id, title, description, url, tags FROM bookmarks
+    WHERE id = $1 AND url = $2
+    FOR SHARE
+)";
 
 /// `ts_headline` options: one fragment of about 20 words, with matches wrapped
 /// in the `SNIPPET_START`/`SNIPPET_STOP` control characters.
 const HEADLINE_OPTIONS: &str = "'StartSel=' || chr(2) || ', StopSel=' || chr(3) || \
      ', MaxWords=28, MinWords=12, MaxFragments=1, FragmentDelimiter=\" … \"'";
+/// `ts_headline` re-parses the text it is given, so it sees only this much of
+/// each article (the measured maximum was 99k characters). A match further in
+/// gets no snippet.
+const HEADLINE_SOURCE_CHARS: usize = 100_000;
 
 #[derive(sqlx::FromRow)]
 struct SearchRow {
     #[sqlx(flatten)]
     bookmark: Bookmark,
     snippet: Option<String>,
-}
-
-/// The positional parameters of the search statement, in bind order.
-struct SearchSql {
-    sql: String,
-    binds_tags: bool,
-    binds_constraints: bool,
 }
 
 /// Build the hybrid search statement. Each leg is one CTE that applies the
@@ -52,7 +59,7 @@ struct SearchSql {
 /// Quoted phrases and `-exclusions` (`cq`) filter inside each lexical leg,
 /// so excluded bookmarks do not use up a leg's top 50, and again on the
 /// fused union, so no leg can bring back a bookmark the query excludes.
-fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> SearchSql {
+fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> String {
     // $1 user, $2 query text, then the optional tags and constraints, then
     // limit and offset.
     let mut next = 3;
@@ -99,7 +106,7 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Sear
     ]
     .join(" UNION ALL ");
 
-    let sql = format!(
+    format!(
         "WITH q AS (
              SELECT websearch_to_tsquery('english', $2) AS and_q,
                     to_tsquery('english',
@@ -129,13 +136,14 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Sear
              FROM q
          ),
          trg AS (
-             SELECT c.bookmark_id,
-                    row_number() OVER (ORDER BY word_similarity($2, c.meta_text) DESC,
-                                                c.bookmark_id) AS r
-             FROM bookmark_contents c CROSS JOIN q{scope_join}
-             WHERE c.user_id = $1 AND $2 <% c.meta_text{scope_filter}{leg_constraint}
-             ORDER BY word_similarity($2, c.meta_text) DESC, c.bookmark_id
-             LIMIT {LEG_DEPTH}
+             SELECT bookmark_id, row_number() OVER (ORDER BY sim DESC, bookmark_id) AS r
+             FROM (
+                 SELECT c.bookmark_id, word_similarity($2, c.meta_text) AS sim
+                 FROM bookmark_contents c CROSS JOIN q{scope_join}
+                 WHERE c.user_id = $1 AND $2 <% c.meta_text{scope_filter}{leg_constraint}
+                 ORDER BY sim DESC, c.bookmark_id
+                 LIMIT {LEG_DEPTH}
+             ) t
          ),
          fused AS (
              SELECT u.bookmark_id, sum(1.0 / ({RRF_K} + u.r)) AS score,
@@ -154,18 +162,14 @@ fn search_sql(has_tags: bool, has_constraints: bool, sort: BookmarkSort) -> Sear
          SELECT b.id, b.user_id, b.url, b.title, b.description, b.image_url,
                 b.override_image_url, b.domain, b.tags, b.created_at, b.updated_at,
                 CASE WHEN p.lexical AND c.status = 'fetched' AND c.text IS NOT NULL
-                     THEN ts_headline('english', c.text, (SELECT q FROM lex_q), {HEADLINE_OPTIONS})
+                     THEN ts_headline('english', left(c.text, {HEADLINE_SOURCE_CHARS}),
+                                      (SELECT q FROM lex_q), {HEADLINE_OPTIONS})
                 END AS snippet
          FROM page p
          JOIN bookmarks b ON b.id = p.bookmark_id
          JOIN bookmark_contents c ON c.bookmark_id = p.bookmark_id
          ORDER BY p.pos"
-    );
-    SearchSql {
-        sql,
-        binds_tags: has_tags,
-        binds_constraints: has_constraints,
-    }
+    )
 }
 
 impl SearchRepository for PostgresPool {
@@ -175,14 +179,14 @@ impl SearchRepository for PostgresPool {
         query: &SearchQuery,
     ) -> Result<Vec<SearchHit>, DomainError> {
         let constraints = websearch_constraints(&query.text);
-        let statement = search_sql(query.tags.is_some(), constraints.is_some(), query.sort);
-        let mut q = sqlx::query_as::<_, SearchRow>(&statement.sql)
+        let sql = search_sql(query.tags.is_some(), constraints.is_some(), query.sort);
+        let mut q = sqlx::query_as::<_, SearchRow>(&sql)
             .bind(user_id)
             .bind(&query.text);
-        if statement.binds_tags {
+        if query.tags.is_some() {
             q = q.bind(&query.tags);
         }
-        if statement.binds_constraints {
+        if constraints.is_some() {
             q = q.bind(&constraints);
         }
         let rows = q
@@ -225,7 +229,7 @@ impl SearchRepository for PostgresPool {
                  FROM bookmark_contents c JOIN bookmarks b ON b.id = c.bookmark_id
                  WHERE c.status = 'pending' AND c.next_attempt_at <= now() AND c.attempts < $3
                  ORDER BY c.next_attempt_at, c.bookmark_id
-                 LIMIT {CLAIM_WINDOW}
+                 LIMIT greatest($1 * {CLAIM_WINDOW_PER_JOB}, {MIN_CLAIM_WINDOW})
                  FOR UPDATE OF c SKIP LOCKED
              ),
              picked AS (
@@ -264,29 +268,24 @@ impl SearchRepository for PostgresPool {
         text: &str,
         content_hash: &str,
     ) -> Result<bool, DomainError> {
-        let Some(mut tx) = self.lock_claimed(job).await? else {
-            return Ok(false);
-        };
-        let result = sqlx::query(
-            "UPDATE bookmark_contents c
+        let result = sqlx::query(&format!(
+            "{CLAIMED_BOOKMARK}
+             UPDATE bookmark_contents c
              SET status = 'fetched', error = NULL, claim_token = NULL,
-                 text = $3, text_chars = char_length($3), content_hash = $4,
-                 search = bookmark_search_document(b.title, b.description, b.url, b.tags, $3),
+                 text = $4, text_chars = char_length($4), content_hash = $5,
+                 search = bookmark_search_document(b.title, b.description, b.url, b.tags, $4),
                  fetched_at = now(), updated_at = now()
-             FROM bookmarks b
-             WHERE c.bookmark_id = $1 AND b.id = c.bookmark_id
-               AND c.claim_token = $2 AND c.status = 'pending'",
-        )
+             FROM b
+             WHERE c.bookmark_id = b.id AND c.claim_token = $3 AND c.status = 'pending'"
+        ))
         .bind(job.bookmark_id)
+        .bind(&job.url)
         .bind(job.claim_token)
         .bind(text)
         .bind(content_hash)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
         .map_err(|e| DomainError::Internal(e.to_string()))?;
-        tx.commit()
-            .await
-            .map_err(|e| DomainError::Internal(e.to_string()))?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -295,51 +294,24 @@ impl SearchRepository for PostgresPool {
         job: &IngestJob,
         failure: &IngestFailure,
     ) -> Result<bool, DomainError> {
-        let Some(mut tx) = self.lock_claimed(job).await? else {
-            return Ok(false);
-        };
-        let result = sqlx::query(
-            "UPDATE bookmark_contents
-             SET status = $3, error = $4, next_attempt_at = coalesce($5, now()),
+        let result = sqlx::query(&format!(
+            "{CLAIMED_BOOKMARK}
+             UPDATE bookmark_contents c
+             SET status = $4, error = $5, next_attempt_at = coalesce($6, now()),
                  claim_token = NULL, updated_at = now()
-             WHERE bookmark_id = $1 AND claim_token = $2 AND status = 'pending'",
-        )
+             FROM b
+             WHERE c.bookmark_id = b.id AND c.claim_token = $3 AND c.status = 'pending'"
+        ))
         .bind(job.bookmark_id)
+        .bind(&job.url)
         .bind(job.claim_token)
         .bind(failure.status.as_str())
         .bind(&failure.error)
         .bind(failure.retry_at)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
         .map_err(|e| DomainError::Internal(e.to_string()))?;
-        tx.commit()
-            .await
-            .map_err(|e| DomainError::Internal(e.to_string()))?;
         Ok(result.rows_affected() > 0)
-    }
-}
-
-impl PostgresPool {
-    /// Start the transaction that writes an ingest result: share-lock the
-    /// bookmark so its URL cannot change until the write commits, and check
-    /// that it still has the claimed URL. `None` when it was deleted or moved.
-    /// The write itself then checks the claim token.
-    async fn lock_claimed(
-        &self,
-        job: &IngestJob,
-    ) -> Result<Option<Transaction<'static, Postgres>>, DomainError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| DomainError::Internal(e.to_string()))?;
-        let url: Option<String> =
-            sqlx::query_scalar("SELECT url FROM bookmarks WHERE id = $1 FOR SHARE")
-                .bind(job.bookmark_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| DomainError::Internal(e.to_string()))?;
-        Ok((url.as_deref() == Some(job.url.as_str())).then_some(tx))
     }
 }
 

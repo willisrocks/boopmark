@@ -189,66 +189,40 @@ pub async fn list(
         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
 
-    let search = query
-        .search
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let searching = search.is_some();
-
-    // A search is in relevance order unless another order is picked; the
-    // search box does not send the sort, so each new query starts there.
-    let sort_str = match query.sort.as_deref() {
-        Some("relevance") if !searching => "newest".to_string(),
-        Some(sort) => sort.to_string(),
-        None if searching => "relevance".to_string(),
-        None => "newest".to_string(),
-    };
-    let sort = match sort_str.as_str() {
-        "relevance" => BookmarkSort::Relevance,
-        "oldest" => BookmarkSort::Oldest,
-        "title" => BookmarkSort::Title,
-        "domain" => BookmarkSort::Domain,
-        _ => BookmarkSort::Newest,
-    };
-
     let filter = BookmarkFilter {
-        search,
+        search: query.search,
         tags: if active_tags.is_empty() {
             None
         } else {
             Some(active_tags.clone())
         },
-        sort: Some(sort),
+        // The search box does not send the sort, so each new query starts in
+        // relevance order; an unknown value falls back to the default.
+        sort: query.sort.as_deref().and_then(BookmarkSort::parse),
         ..Default::default()
     };
+    let searching = filter.search_text().is_some();
+    let sort_str = BookmarkSort::resolve(filter.sort, searching)
+        .as_str()
+        .to_string();
 
-    let bookmark_views: Vec<BookmarkView> = if searching {
-        state
-            .search
-            .search(user.id, filter)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "bookmark search failed");
-                Vec::new()
-            })
-            .into_iter()
-            .map(Into::into)
-            .collect()
-    } else {
-        with_bookmarks!(&state.bookmarks, svc => svc.list(user.id, filter).await)
-            .unwrap_or_default()
-            .into_iter()
-            .map(Into::into)
-            .collect()
-    };
+    // Query all distinct tags for the filter bar (used by both HTMX and
+    // full-page paths) while the list is fetched.
+    let (hits, all_tag_names) = tokio::join!(state.find_bookmarks(user.id, filter), async {
+        with_bookmarks!(&state.bookmarks, svc => svc.all_tags(user.id).await)
+    },);
+    let bookmark_views: Vec<BookmarkView> = hits
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "listing bookmarks failed");
+            Vec::new()
+        })
+        .into_iter()
+        .map(Into::into)
+        .collect();
     let capped = searching && bookmark_views.len() as i64 >= MAX_SEARCH_RESULTS;
 
-    // Query all distinct tags for the filter bar (used by both HTMX and full-page paths).
-    let all_tag_names = with_bookmarks!(&state.bookmarks, svc =>
-        svc.all_tags(user.id).await
-    )
-    .unwrap_or_default();
     let filter_tags: Vec<TagView> = all_tag_names
+        .unwrap_or_default()
         .into_iter()
         .map(|name| {
             let active = active_tags.contains(&name);

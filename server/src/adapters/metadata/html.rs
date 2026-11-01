@@ -1,5 +1,5 @@
 use crate::adapters::net::{
-    Blocked, Lookup, SystemLookup, UrlGuard, guarded_client_builder, guarded_redirect_policy,
+    GuardedGetError, Lookup, SystemLookup, UrlGuard, guarded_client_builder, guarded_get,
 };
 use crate::domain::bookmark::UrlMetadata;
 use crate::domain::error::{CF_CHALLENGE_MSG, DomainError};
@@ -12,10 +12,8 @@ use url::Url;
 #[derive(Clone)]
 pub struct HtmlMetadataExtractor {
     client: reqwest::Client,
+    guard: UrlGuard,
 }
-
-/// The guard's DNS and redirect checks apply to every hop (see `adapters::net`).
-const MAX_REDIRECTS: usize = 10;
 
 impl HtmlMetadataExtractor {
     pub fn new() -> Self {
@@ -24,15 +22,11 @@ impl HtmlMetadataExtractor {
 
     fn with_lookup(guard: UrlGuard, lookup: impl Lookup) -> Self {
         Self {
-            client: guarded_client_builder(
-                guard,
-                lookup,
-                guarded_redirect_policy(guard, MAX_REDIRECTS),
-            )
-            .timeout(std::time::Duration::from_secs(10))
-            .user_agent("Boopmark/1.0 (+https://boopmark.app)")
-            .build()
-            .unwrap(),
+            client: guarded_client_builder(guard, lookup)
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap(),
+            guard,
         }
     }
 }
@@ -44,27 +38,29 @@ impl MetadataExtractor for HtmlMetadataExtractor {
     ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
         let url_str = url_str.to_string();
         Box::pin(async move {
-            let safe_url = crate::adapters::net::validate_public_url(&url_str)?;
-            let parsed_url = Url::parse(&safe_url)
+            let mut parsed_url = Url::parse(&url_str)
                 .map_err(|e| DomainError::InvalidInput(format!("invalid URL: {e}")))?;
+            parsed_url.set_fragment(None);
+            let safe_url = parsed_url.to_string();
 
             let domain = parsed_url.host_str().map(|h| h.to_string());
 
-            let resp =
-                self.client.get(&safe_url).send().await.map_err(|e| {
-                    match Blocked::in_chain(&e) {
-                        Some(blocked) => DomainError::InvalidInput(blocked.to_string()),
-                        None => DomainError::Internal(format!("fetch error: {e}")),
+            let resp = guarded_get(&self.client, self.guard, None, parsed_url.clone())
+                .await
+                .map_err(|e| match e {
+                    GuardedGetError::Blocked(blocked) => {
+                        DomainError::InvalidInput(blocked.to_string())
+                    }
+                    GuardedGetError::TooManyRedirects => {
+                        DomainError::Internal("fetch error: too many redirects".to_string())
+                    }
+                    GuardedGetError::Request(e) => {
+                        DomainError::Internal(format!("fetch error: {e}"))
                     }
                 })?;
 
             // Check the CF-Mitigated header before consuming the body
-            if resp
-                .headers()
-                .get("cf-mitigated")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.eq_ignore_ascii_case("challenge"))
-            {
+            if is_cloudflare_challenge_response(resp.headers()) {
                 return Err(DomainError::Internal(CF_CHALLENGE_MSG.to_string()));
             }
 
@@ -100,6 +96,14 @@ impl MetadataExtractor for HtmlMetadataExtractor {
             })
         })
     }
+}
+
+/// Cloudflare marks its challenge responses with `cf-mitigated: challenge`.
+pub(crate) fn is_cloudflare_challenge_response(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get("cf-mitigated")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("challenge"))
 }
 
 pub(crate) fn is_cloudflare_challenge(body: &str) -> bool {
@@ -151,24 +155,15 @@ fn resolve_url(base: &str, relative: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Every name resolves to one fixed address.
-    struct ResolvesTo(&'static str);
-
-    impl Lookup for ResolvesTo {
-        fn lookup(
-            &self,
-            _host: String,
-        ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<std::net::SocketAddr>>> + Send>>
-        {
-            let addr = std::net::SocketAddr::new(self.0.parse().unwrap(), 80);
-            Box::pin(async move { Ok(vec![addr]) })
-        }
-    }
-
     #[tokio::test]
     async fn refuses_names_that_resolve_to_private_addresses() {
-        let extractor =
-            HtmlMetadataExtractor::with_lookup(UrlGuard::public(), ResolvesTo("10.0.0.7"));
+        let extractor = HtmlMetadataExtractor::with_lookup(
+            UrlGuard::public(),
+            crate::adapters::net::FakeLookup(std::collections::HashMap::from([(
+                "intranet.example.com",
+                vec!["10.0.0.7"],
+            )])),
+        );
         let err = extractor
             .extract("http://intranet.example.com/admin")
             .await

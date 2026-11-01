@@ -252,33 +252,68 @@ impl<L: Lookup> reqwest::dns::Resolve for PublicOnlyResolver<L> {
     }
 }
 
-/// A redirect policy that re-checks every hop with the guard and stops after
-/// `max_hops` redirects.
-pub fn guarded_redirect_policy(guard: UrlGuard, max_hops: usize) -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(move |attempt| {
-        if attempt.previous().len() > max_hops {
-            return attempt.error(format!("more than {max_hops} redirects"));
-        }
-        match guard.check(attempt.url()) {
-            Ok(()) => attempt.follow(),
-            Err(blocked) => attempt.error(blocked),
-        }
-    })
-}
+/// The User-Agent of every fetch of a user-supplied URL.
+pub const USER_AGENT: &str = "Boopmark/1.0 (+https://boopmark.app)";
+/// Redirects followed by `guarded_get`.
+pub const MAX_REDIRECTS: usize = 5;
 
 /// A reqwest client builder for fetching user-supplied URLs: DNS through
-/// `PublicOnlyResolver`, the given redirect policy, and no proxy (a proxy
-/// would resolve names itself and bypass the resolver). Callers add their
-/// timeouts and user agent.
-pub fn guarded_client_builder(
-    guard: UrlGuard,
-    lookup: impl Lookup,
-    redirect: reqwest::redirect::Policy,
-) -> reqwest::ClientBuilder {
+/// `PublicOnlyResolver`, no proxy (a proxy would resolve names itself and
+/// bypass the resolver), and no automatic redirects, because `guarded_get`
+/// follows them itself. Callers add their timeouts.
+pub fn guarded_client_builder(guard: UrlGuard, lookup: impl Lookup) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .no_proxy()
         .dns_resolver(Arc::new(PublicOnlyResolver::new(lookup, guard)))
-        .redirect(redirect)
+        .redirect(reqwest::redirect::Policy::none())
+}
+
+#[derive(Debug)]
+pub enum GuardedGetError {
+    /// The guard refused the URL, a redirect target, or a resolved address.
+    Blocked(Blocked),
+    TooManyRedirects,
+    Request(reqwest::Error),
+}
+
+/// GET a user-supplied URL with a client from `guarded_client_builder`.
+/// Every hop, redirects included, is checked by the guard and, with a
+/// throttle, waits for its host's slot; at most `MAX_REDIRECTS` are followed.
+pub async fn guarded_get(
+    client: &reqwest::Client,
+    guard: UrlGuard,
+    throttle: Option<&HostThrottle>,
+    mut url: Url,
+) -> Result<reqwest::Response, GuardedGetError> {
+    for _ in 0..=MAX_REDIRECTS {
+        guard.check(&url).map_err(GuardedGetError::Blocked)?;
+        if let Some(throttle) = throttle {
+            throttle.wait_for(&url).await;
+        }
+        let resp =
+            client
+                .get(url.clone())
+                .send()
+                .await
+                .map_err(|e| match Blocked::in_chain(&e) {
+                    Some(blocked) => GuardedGetError::Blocked(blocked.clone()),
+                    None => GuardedGetError::Request(e),
+                })?;
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok());
+        match location {
+            Some(location) if resp.status().is_redirection() => {
+                url = url.join(location).map_err(|e| {
+                    GuardedGetError::Blocked(Blocked(format!("invalid redirect: {e}")))
+                })?;
+            }
+            _ => return Ok(resp),
+        }
+    }
+    Err(GuardedGetError::TooManyRedirects)
 }
 
 /// Hands out request slots per host, `interval` apart, so a batch of links
@@ -310,6 +345,30 @@ impl HostThrottle {
     pub async fn wait_for(&self, url: &Url) {
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
         tokio::time::sleep_until(self.reserve(&host)).await;
+    }
+}
+
+/// A resolver for tests: each name maps to fixed addresses (the URL's port
+/// applies); unknown names do not resolve.
+#[cfg(test)]
+pub struct FakeLookup(pub HashMap<&'static str, Vec<&'static str>>);
+
+#[cfg(test)]
+impl Lookup for FakeLookup {
+    fn lookup(
+        &self,
+        host: String,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>> {
+        let addrs = self
+            .0
+            .get(host.as_str())
+            .map(|ips| {
+                ips.iter()
+                    .map(|ip| SocketAddr::new(ip.parse().unwrap(), 0))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Box::pin(async move { Ok(addrs) })
     }
 }
 
@@ -434,26 +493,6 @@ mod tests {
             "ff02::1",
         ] {
             assert!(!is_public_ip(ip.parse().unwrap()), "{ip} is not public");
-        }
-    }
-
-    struct FakeLookup(HashMap<&'static str, Vec<&'static str>>);
-
-    impl Lookup for FakeLookup {
-        fn lookup(
-            &self,
-            host: String,
-        ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>> {
-            let addrs = self
-                .0
-                .get(host.as_str())
-                .map(|ips| {
-                    ips.iter()
-                        .map(|ip| SocketAddr::new(ip.parse().unwrap(), 0))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Box::pin(async move { Ok(addrs) })
         }
     }
 
