@@ -53,10 +53,11 @@ pub trait Embedder: Send + Sync {
     /// batches and keep the order. Errors:
     ///
     /// - `InvalidInput`: the request will never be accepted (an empty input,
-    ///   HTTP 4xx such as a bad request or a rejected key, or the backend is
-    ///   disabled). Do not retry.
-    /// - `Internal`: transient or vendor-side (network, timeout, 408, 409,
-    ///   429, 5xx, a malformed response). The ingest worker retries with
+    ///   HTTP 4xx such as a bad request, or the backend is disabled). Do not
+    ///   retry.
+    /// - `Internal`: transient, vendor-side or operator-fixable (network,
+    ///   timeout, 401/403 for the operator's key, 408, 409, 429, 5xx, a
+    ///   malformed or unusable response). The ingest worker retries with
     ///   backoff; search drops the vector leg.
     ///
     /// Messages carry the HTTP status, never a key or response body.

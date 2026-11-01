@@ -53,18 +53,22 @@ fn http_client(timeout: Duration) -> reqwest::Client {
         .expect("failed to build LLM HTTP client")
 }
 
+/// Keywords whose values are data, not schemas: never rewritten.
+const LITERAL_KEYWORDS: [&str; 4] = ["enum", "const", "default", "examples"];
+
 /// Copy of `schema` without the keywords in `UNENFORCED_KEYWORDS`, at any depth.
-/// Property names are kept even when they collide with a keyword.
+/// Property names and literal values (`enum`, `const`, ...) are kept even when
+/// they contain a keyword.
 pub fn strip_unenforced(schema: &Value) -> Value {
     match schema {
         Value::Object(map) => Value::Object(
             map.iter()
                 .filter(|(key, _)| !UNENFORCED_KEYWORDS.contains(&key.as_str()))
                 .map(|(key, value)| {
-                    let value = if key == "properties" || key == "$defs" || key == "definitions" {
-                        strip_each(value)
-                    } else {
-                        strip_unenforced(value)
+                    let value = match key.as_str() {
+                        "properties" | "$defs" | "definitions" => strip_each(value),
+                        literal if LITERAL_KEYWORDS.contains(&literal) => value.clone(),
+                        _ => strip_unenforced(value),
                     };
                     (key.clone(), value)
                 })
@@ -108,9 +112,12 @@ fn matches_at(schema: &Value, value: &Value, root: &Value, depth: usize) -> bool
         // `true`/`false` schemas.
         return schema.as_bool().unwrap_or(true);
     };
-    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
-        return resolve_ref(root, reference)
-            .is_some_and(|target| matches_at(target, value, root, depth + 1));
+    // Sibling keywords of `$ref` apply too (JSON Schema 2020-12).
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str)
+        && !resolve_ref(root, reference)
+            .is_some_and(|target| matches_at(target, value, root, depth + 1))
+    {
+        return false;
     }
     if let Some(options) = schema.get("anyOf").and_then(Value::as_array)
         && !options
@@ -225,9 +232,12 @@ pub(crate) fn http_status_error(vendor: &str, status: StatusCode) -> DomainError
 }
 
 /// Maps a transport failure. reqwest errors can embed the URL, so only the
-/// kind of failure is reported.
+/// kind of failure is reported. A request that cannot be built (a key that
+/// is not a valid header value) fails the same way every time.
 pub(crate) fn transport_error(vendor: &str, error: &reqwest::Error) -> DomainError {
-    if error.is_timeout() {
+    if error.is_builder() {
+        DomainError::InvalidInput(format!("{vendor} API request could not be built"))
+    } else if error.is_timeout() {
         DomainError::Internal(format!("{vendor} API request timed out"))
     } else {
         DomainError::Internal(format!("{vendor} API request failed"))
@@ -266,6 +276,28 @@ fn parse_answer(text: &str, schema: &Value, vendor: &str) -> Result<Value, Domai
         )));
     }
     Ok(json)
+}
+
+/// The response, or the error after logging what the failed answer still
+/// cost. Refusals, truncation and off-schema answers are billed; the port
+/// returns no usage with an error, so the tokens are logged (counts only).
+fn billed(
+    vendor: &str,
+    usage: TokenUsage,
+    answer: Result<Value, DomainError>,
+) -> Result<StructuredResponse, DomainError> {
+    answer
+        .map(|json| StructuredResponse { json, usage })
+        .inspect_err(|error| {
+            if usage != TokenUsage::default() {
+                tracing::warn!(
+                    vendor,
+                    input_tokens = usage.input_tokens,
+                    output_tokens = usage.output_tokens,
+                    "billed LLM call failed: {error}"
+                );
+            }
+        })
 }
 
 fn usage_field(payload: &Value, pointer: &str) -> u32 {
@@ -340,6 +372,14 @@ impl AnthropicLlmClient {
     }
 
     fn parse_response(payload: &Value, schema: &Value) -> Result<StructuredResponse, DomainError> {
+        let usage = TokenUsage {
+            input_tokens: usage_field(payload, "/usage/input_tokens"),
+            output_tokens: usage_field(payload, "/usage/output_tokens"),
+        };
+        billed("Anthropic", usage, Self::answer(payload, schema))
+    }
+
+    fn answer(payload: &Value, schema: &Value) -> Result<Value, DomainError> {
         match payload.get("stop_reason").and_then(Value::as_str) {
             Some("refusal") => {
                 return Err(DomainError::InvalidInput(
@@ -362,13 +402,7 @@ impl AnthropicLlmClient {
             .find(|block| block.get("type").and_then(Value::as_str) == Some("text"))
             .and_then(|block| block.get("text").and_then(Value::as_str))
             .ok_or_else(|| DomainError::Internal("Anthropic response had no text".into()))?;
-        Ok(StructuredResponse {
-            json: parse_answer(text, schema, "Anthropic")?,
-            usage: TokenUsage {
-                input_tokens: usage_field(payload, "/usage/input_tokens"),
-                output_tokens: usage_field(payload, "/usage/output_tokens"),
-            },
-        })
+        parse_answer(text, schema, "Anthropic")
     }
 }
 
@@ -428,6 +462,14 @@ impl OpenAiLlmClient {
     }
 
     fn parse_response(payload: &Value, schema: &Value) -> Result<StructuredResponse, DomainError> {
+        let usage = TokenUsage {
+            input_tokens: usage_field(payload, "/usage/input_tokens"),
+            output_tokens: usage_field(payload, "/usage/output_tokens"),
+        };
+        billed("OpenAI", usage, Self::answer(payload, schema))
+    }
+
+    fn answer(payload: &Value, schema: &Value) -> Result<Value, DomainError> {
         if payload.get("status").and_then(Value::as_str) == Some("incomplete") {
             let reason = payload
                 .pointer("/incomplete_details/reason")
@@ -468,13 +510,7 @@ impl OpenAiLlmClient {
                     .and_then(|content| content.get("text").and_then(Value::as_str))
             })
             .ok_or_else(|| DomainError::Internal("OpenAI response had no text".into()))?;
-        Ok(StructuredResponse {
-            json: parse_answer(text, schema, "OpenAI")?,
-            usage: TokenUsage {
-                input_tokens: usage_field(payload, "/usage/input_tokens"),
-                output_tokens: usage_field(payload, "/usage/output_tokens"),
-            },
-        })
+        parse_answer(text, schema, "OpenAI")
     }
 }
 
@@ -533,6 +569,14 @@ impl LlamaCppLlmClient {
     }
 
     fn parse_response(payload: &Value, schema: &Value) -> Result<StructuredResponse, DomainError> {
+        let usage = TokenUsage {
+            input_tokens: usage_field(payload, "/usage/prompt_tokens"),
+            output_tokens: usage_field(payload, "/usage/completion_tokens"),
+        };
+        billed("llama.cpp", usage, Self::answer(payload, schema))
+    }
+
+    fn answer(payload: &Value, schema: &Value) -> Result<Value, DomainError> {
         if payload
             .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
@@ -546,13 +590,7 @@ impl LlamaCppLlmClient {
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
             .ok_or_else(|| DomainError::Internal("llama.cpp response had no text".into()))?;
-        Ok(StructuredResponse {
-            json: parse_answer(text, schema, "llama.cpp")?,
-            usage: TokenUsage {
-                input_tokens: usage_field(payload, "/usage/prompt_tokens"),
-                output_tokens: usage_field(payload, "/usage/completion_tokens"),
-            },
-        })
+        parse_answer(text, schema, "llama.cpp")
     }
 }
 
@@ -824,6 +862,17 @@ mod tests {
     }
 
     #[test]
+    fn strip_leaves_literal_values_alone() {
+        let literals = json!({
+            "enum": [{"minimum": 1}],
+            "const": {"maxItems": 2},
+            "default": {"minLength": 3},
+            "examples": [{"maximum": 4}]
+        });
+        assert_eq!(strip_unenforced(&literals), literals);
+    }
+
+    #[test]
     fn schema_check_covers_types_enum_required_and_extra_fields() {
         let schema = schema();
         assert!(matches_schema(&schema, &json!({"tags": ["a"]})));
@@ -846,6 +895,18 @@ mod tests {
 
         let looping = json!({"$ref": "#"});
         assert!(!matches_schema(&looping, &json!({})));
+
+        let narrowed = json!({
+            "$defs": {"tag": {"type": "string"}},
+            "$ref": "#/$defs/tag",
+            "enum": ["a"]
+        });
+        assert!(matches_schema(&narrowed, &json!("a")));
+        assert!(
+            !matches_schema(&narrowed, &json!("b")),
+            "sibling enum applies"
+        );
+        assert!(!matches_schema(&narrowed, &json!(1)), "the target applies");
     }
 
     #[test]
@@ -1043,6 +1104,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unbuildable_requests_are_final() {
+        // A key with a newline is not a valid header value; it never reaches
+        // the network and no retry can fix it.
+        let (url, seen) = fake_vendor("/v1/responses", 200, openai_answer("{}")).await;
+        let mut req = request(TextProvider::OpenAi, "gpt-5.6-luna");
+        req.api_key = "sk-test\n".into();
+        let result = OpenAiLlmClient::with_url(&url)
+            .complete_structured(req)
+            .await;
+        assert_invalid_input(result, "could not be built");
+        assert!(seen.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn llamacpp_sends_full_schema_without_key_and_reads_usage() {
         let answer = json!({
             "choices": [{"finish_reason": "stop", "message": {"content": "{\"tags\":[\"a\"]}"}}],
@@ -1179,5 +1254,11 @@ mod tests {
         assert!(shown.contains("gpt-5.6-luna"));
         assert!(!shown.contains("sk-test"));
         assert!(!shown.contains("usr"));
+
+        let response = StructuredResponse {
+            json: json!({"title": "private bookmark title"}),
+            usage: TokenUsage::default(),
+        };
+        assert!(!format!("{response:?}").contains("private"));
     }
 }

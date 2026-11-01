@@ -31,14 +31,17 @@ behaviour changes.
    workers are writing now. Unknown values fall back to `low` with a warning.
 3. **Error classes.** `DomainError` has no retry flag, so the two existing
    variants carry it, as both specs and the brief say:
-   - `InvalidInput` = do not retry: HTTP 4xx (including 401/403: a rejected
-     key does not fix itself), a refusal, an empty or impossible request, a
+   - `InvalidInput` = do not retry: HTTP 4xx (for `LlmClient` including
+     401/403: the user's own key does not fix itself), a refusal, a request
+     that cannot be built, an empty or impossible request, a
      disabled backend.
    - `Internal` = retryable: network failures and timeouts, HTTP 408, 409
      and 429 (rate limits are transient by definition; the search spec also
      lists 429 as retryable), 5xx (including Anthropic's 529), malformed
      JSON, a response that does not match the schema, truncation at
      `max_tokens`.
+   - For the `Embedder`, 401/403 are `Internal` (review of #40): the key is
+     the operator's, and a rotated key must not fail bookmarks for good.
    The brief says "4xx non-retryable"; 408/409/429 are the standard
    transient 4xx codes, and treating a rate limit as permanent would make
    the ingest worker drop work under load. This is called out in the PR.

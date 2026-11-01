@@ -51,12 +51,22 @@ pub struct TokenUsage {
     pub output_tokens: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct StructuredResponse {
     /// The answer, already checked against the request's schema (types,
     /// `enum`, `required`, `additionalProperties: false`).
     pub json: serde_json::Value,
     pub usage: TokenUsage,
+}
+
+/// Hand-written so the answer, which can echo bookmark content, never
+/// reaches a log line through `{:?}`.
+impl std::fmt::Debug for StructuredResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StructuredResponse")
+            .field("usage", &self.usage)
+            .finish_non_exhaustive()
+    }
 }
 
 pub trait LlmClient: Send + Sync {

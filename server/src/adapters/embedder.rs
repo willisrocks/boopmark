@@ -8,8 +8,8 @@
 //! ```text
 //! EMBEDDING_BACKEND=disabled | openai | local     (default: disabled; `fastembed` = `local`)
 //! EMBEDDING_MODEL=text-embedding-3-large          (local default: BAAI/bge-small-en-v1.5)
-//! EMBEDDING_DIMENSIONS=1024                       (openai only; default: 1024 for the default
-//!                                                 model, else the model's native size)
+//! EMBEDDING_DIMENSIONS=1024                       (openai only; default: 1024 for text-embedding-3-*,
+//!                                                 else the native size; must be 1024 or 384)
 //! OPENAI_EMBEDDING_API_KEY=sk-...                 (operator key, not a user's BYO key)
 //! FASTEMBED_CACHE_DIR=...                         (local only; model download cache)
 //! ```
@@ -20,6 +20,7 @@
 use crate::adapters::llm_client::{http_status_error, transport_error};
 use crate::domain::error::DomainError;
 use crate::domain::ports::embedder::{BoxFuture, EmbedKind, Embedder, Embeddings};
+use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::ops::Range;
 use std::sync::Arc;
@@ -28,12 +29,18 @@ use std::time::Duration;
 const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 const DEFAULT_OPENAI_MODEL: &str = "text-embedding-3-large";
 /// The measured production choice: text-embedding-3-large shortened to 1,024
-/// dimensions.
+/// dimensions. Every `text-embedding-3-*` model defaults to it, so naming the
+/// model alone does not change the vector space size.
 const DEFAULT_OPENAI_DIMENSIONS: usize = 1024;
 const DEFAULT_LOCAL_MODEL: &str = "BAAI/bge-small-en-v1.5";
+/// The vector sizes the article-search schema has an HNSW index for
+/// (te3 at 1,024, bge-small at 384). Any other size could not be searched.
+const INDEXED_DIMENSIONS: [usize; 2] = [1024, 384];
 /// The API accepts 2,048 inputs and 300k tokens per request; stay well below.
 const OPENAI_MAX_INPUTS: usize = 256;
-const OPENAI_MAX_BATCH_CHARS: usize = 400_000;
+/// Every token covers at least one byte of UTF-8, so a byte cap below 300k
+/// also keeps a batch under the token limit, whatever the script.
+const OPENAI_MAX_BATCH_BYTES: usize = 250_000;
 /// A query embedding is on the search request path: past this, search runs
 /// the lexical legs alone.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -95,13 +102,14 @@ impl EmbeddingSettings {
                 )));
             }
         };
-        let model = get("EMBEDDING_MODEL");
-        let default_dims = (backend == EmbeddingBackend::OpenAi && model.is_none())
-            .then_some(DEFAULT_OPENAI_DIMENSIONS);
         let default_model = match backend {
             EmbeddingBackend::Local => DEFAULT_LOCAL_MODEL,
             _ => DEFAULT_OPENAI_MODEL,
         };
+        let model = get("EMBEDDING_MODEL").unwrap_or_else(|| default_model.to_string());
+        let default_dims = (backend == EmbeddingBackend::OpenAi
+            && model.starts_with("text-embedding-3-"))
+        .then_some(DEFAULT_OPENAI_DIMENSIONS);
         let dimensions = match get("EMBEDDING_DIMENSIONS") {
             Some(value) => Some(value.parse().map_err(|_| {
                 DomainError::InvalidInput(format!(
@@ -112,19 +120,57 @@ impl EmbeddingSettings {
         };
         Ok(Self {
             backend,
-            model: model.unwrap_or_else(|| default_model.to_string()),
+            model,
             dimensions,
             openai_api_key: get("OPENAI_EMBEDDING_API_KEY"),
         })
     }
 }
 
-fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
+/// The unit-length copy of `v`, or `None` for a vector that cannot be one:
+/// all zeros, or a non-finite norm (NaN, infinity, or an overflowing sum).
+fn l2_normalize(mut v: Vec<f32>) -> Option<Vec<f32>> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        v.iter_mut().for_each(|x| *x /= norm);
+    if !norm.is_finite() || norm == 0.0 {
+        return None;
     }
-    v
+    v.iter_mut().for_each(|x| *x /= norm);
+    Some(v)
+}
+
+fn check_indexed(dims: usize) -> Result<(), DomainError> {
+    if INDEXED_DIMENSIONS.contains(&dims) {
+        return Ok(());
+    }
+    Err(DomainError::InvalidInput(format!(
+        "{dims}-dimension embeddings have no search index; set EMBEDDING_DIMENSIONS \
+         (and EMBEDDING_MODEL) to a size the schema indexes: 1024 or 384"
+    )))
+}
+
+/// The key is the operator's: a rejected or rotated key is fixed by the
+/// operator, so 401 and 403 stay retryable instead of failing bookmarks for
+/// good. Other statuses map as for `LlmClient`.
+fn status_error(status: StatusCode) -> DomainError {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            DomainError::Internal(format!("{VENDOR} API returned HTTP {status}"))
+        }
+        _ => http_status_error(VENDOR, status),
+    }
+}
+
+/// `embed` returns no usage with an error, so tokens already billed for a
+/// failed call (an unusable answer, or earlier batches) are logged: counts
+/// only, never the inputs.
+fn log_billed_failure(usage_tokens: u32, error: &DomainError) {
+    if usage_tokens > 0 {
+        tracing::warn!(
+            vendor = VENDOR,
+            usage_tokens,
+            "billed embedding call failed: {error}"
+        );
+    }
 }
 
 fn reject_empty(inputs: &[String]) -> Result<(), DomainError> {
@@ -158,21 +204,21 @@ impl EmbedderRouter {
                         "EMBEDDING_BACKEND=openai needs OPENAI_EMBEDDING_API_KEY".into(),
                     )
                 })?;
-                Arc::new(OpenAiEmbedder::new(
-                    key,
-                    &settings.model,
-                    settings.dimensions,
-                )?)
+                let embedder = OpenAiEmbedder::new(key, &settings.model, settings.dimensions)?;
+                check_indexed(embedder.dims())?;
+                Arc::new(embedder)
             }
             #[cfg(feature = "local-embeddings")]
             EmbeddingBackend::Local => {
-                if settings
-                    .dimensions
-                    .is_some_and(|dims| dims != FastembedEmbedder::native_dims(&settings.model))
-                {
+                // Checked before loading, which downloads the model.
+                let native = FastembedEmbedder::native_dims(&settings.model);
+                if settings.dimensions.is_some_and(|dims| dims != native) {
                     return Err(DomainError::InvalidInput(
                         "EMBEDDING_DIMENSIONS does not match the local model".into(),
                     ));
+                }
+                if native != 0 {
+                    check_indexed(native)?;
                 }
                 Arc::new(FastembedEmbedder::new(&settings.model)?)
             }
@@ -292,15 +338,15 @@ impl OpenAiEmbedder {
     /// Consecutive index ranges under both the input-count and size limits.
     fn batches(&self, inputs: &[String]) -> Vec<Range<usize>> {
         let mut ranges = Vec::new();
-        let (mut start, mut chars) = (0, 0);
+        let (mut start, mut bytes) = (0, 0);
         for (i, input) in inputs.iter().enumerate() {
             if i > start
-                && (i - start == self.max_inputs || chars + input.len() > OPENAI_MAX_BATCH_CHARS)
+                && (i - start == self.max_inputs || bytes + input.len() > OPENAI_MAX_BATCH_BYTES)
             {
                 ranges.push(start..i);
-                (start, chars) = (i, 0);
+                (start, bytes) = (i, 0);
             }
-            chars += input.len();
+            bytes += input.len();
         }
         if start < inputs.len() {
             ranges.push(start..inputs.len());
@@ -328,7 +374,7 @@ impl OpenAiEmbedder {
             .map_err(|error| transport_error(VENDOR, &error))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(http_status_error(VENDOR, status));
+            return Err(status_error(status));
         }
         let bytes = response
             .bytes()
@@ -337,11 +383,13 @@ impl OpenAiEmbedder {
         let payload: Value = serde_json::from_slice(&bytes).map_err(|_| {
             DomainError::Internal(format!("{VENDOR} returned a malformed response"))
         })?;
-        let vectors = self.parse_vectors(&payload, batch.len())?;
         let tokens = payload
             .pointer("/usage/total_tokens")
             .and_then(Value::as_u64)
             .map_or(0, |tokens| u32::try_from(tokens).unwrap_or(u32::MAX));
+        let vectors = self
+            .parse_vectors(&payload, batch.len())
+            .inspect_err(|error| log_billed_failure(tokens, error))?;
         Ok((vectors, tokens))
     }
 
@@ -378,7 +426,8 @@ impl OpenAiEmbedder {
                 .collect::<Option<Vec<f32>>>()
                 .filter(|vector| vector.len() == self.dims)
                 .ok_or_else(mismatch)?;
-            if slots[index].replace(l2_normalize(vector)).is_some() {
+            let vector = l2_normalize(vector).ok_or_else(mismatch)?;
+            if slots[index].replace(vector).is_some() {
                 return Err(mismatch());
             }
         }
@@ -410,7 +459,10 @@ impl Embedder for OpenAiEmbedder {
             };
             let mut out = Embeddings::default();
             for range in self.batches(&inputs) {
-                let (vectors, tokens) = self.embed_batch(&inputs[range], timeout).await?;
+                let (vectors, tokens) = self
+                    .embed_batch(&inputs[range], timeout)
+                    .await
+                    .inspect_err(|error| log_billed_failure(out.usage_tokens, error))?;
                 out.vectors.extend(vectors);
                 out.usage_tokens = out.usage_tokens.saturating_add(tokens);
             }
@@ -513,8 +565,15 @@ impl Embedder for FastembedEmbedder {
             })
             .await
             .map_err(|_| DomainError::Internal("fastembed task panicked".into()))??;
+            let vectors = vectors
+                .into_iter()
+                .map(l2_normalize)
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    DomainError::Internal("fastembed returned an unusable vector".into())
+                })?;
             Ok(Embeddings {
-                vectors: vectors.into_iter().map(l2_normalize).collect(),
+                vectors,
                 usage_tokens: 0,
             })
         })
@@ -638,12 +697,22 @@ mod tests {
         assert_eq!(openai_default.model, "text-embedding-3-large");
         assert_eq!(openai_default.dimensions, Some(1024));
 
-        let small_native = EmbeddingSettings::from_lookup(lookup(&[
+        // Naming the model, even the default one, keeps the indexed size.
+        for model in ["text-embedding-3-large", "text-embedding-3-small"] {
+            let named = EmbeddingSettings::from_lookup(move |key| match key {
+                "EMBEDDING_BACKEND" => Some("openai".into()),
+                "EMBEDDING_MODEL" => Some(model.into()),
+                _ => None,
+            })
+            .unwrap();
+            assert_eq!(named.dimensions, Some(1024), "{model}");
+        }
+        let ada = EmbeddingSettings::from_lookup(lookup(&[
             ("EMBEDDING_BACKEND", "openai"),
-            ("EMBEDDING_MODEL", "text-embedding-3-small"),
+            ("EMBEDDING_MODEL", "text-embedding-ada-002"),
         ]))
         .unwrap();
-        assert_eq!(small_native.dimensions, None);
+        assert_eq!(ada.dimensions, None);
 
         for name in ["local", "fastembed"] {
             let local = EmbeddingSettings::from_lookup(move |key| {
@@ -682,7 +751,7 @@ mod tests {
         let mut settings = EmbeddingSettings {
             backend: EmbeddingBackend::OpenAi,
             model: "text-embedding-3-small".into(),
-            dimensions: Some(512),
+            dimensions: Some(1024),
             openai_api_key: None,
         };
         assert!(
@@ -692,8 +761,21 @@ mod tests {
         settings.openai_api_key = Some("sk-op".into());
         let openai = EmbedderRouter::from_settings(&settings).unwrap();
         assert!(openai.enabled());
-        assert_eq!(openai.model_id(), "openai:text-embedding-3-small@512");
-        assert_eq!(openai.dims(), 512);
+        assert_eq!(openai.model_id(), "openai:text-embedding-3-small@1024");
+        assert_eq!(openai.dims(), 1024);
+
+        // Sizes the schema has no index for are refused at startup.
+        for dims in [Some(512), Some(3072)] {
+            settings.model = "text-embedding-3-large".into();
+            settings.dimensions = dims;
+            assert!(matches!(
+                EmbedderRouter::from_settings(&settings),
+                Err(DomainError::InvalidInput(message)) if message.contains("no search index")
+            ));
+        }
+        settings.model = "text-embedding-ada-002".into();
+        settings.dimensions = None;
+        assert!(EmbedderRouter::from_settings(&settings).is_err(), "1536");
 
         let production = EmbedderRouter::from_settings(
             &EmbeddingSettings::from_lookup(lookup(&[
@@ -778,12 +860,16 @@ mod tests {
         assert!(embedder.parse_vectors(&duplicate, 2).is_err());
         let not_numbers = json!({"data": [{"index": 0, "embedding": [1.0, "x"]}]});
         assert!(embedder.parse_vectors(&not_numbers, 1).is_err());
+        for unusable in [json!([0.0, 0.0]), json!([3.0e38, 3.0e38])] {
+            let payload = json!({"data": [{"index": 0, "embedding": unusable}]});
+            assert!(embedder.parse_vectors(&payload, 1).is_err(), "{unusable}");
+        }
     }
 
     #[test]
     fn batches_split_on_size_as_well_as_count() {
         let embedder = OpenAiEmbedder::new("sk".into(), "text-embedding-3-small", None).unwrap();
-        let big = "x".repeat(OPENAI_MAX_BATCH_CHARS / 2 + 1);
+        let big = "x".repeat(OPENAI_MAX_BATCH_BYTES / 2 + 1);
         let texts = vec![big.clone(), big.clone(), big];
         assert_eq!(embedder.batches(&texts), vec![0..1, 1..2, 2..3]);
         assert_eq!(embedder.batches(&inputs(&["a", "b"])), vec![0..2]);
@@ -795,8 +881,11 @@ mod tests {
         let secret = json!({"error": {"message": SECRET_BODY}}).to_string();
         for (status, retryable) in [
             (400, false),
-            (401, false),
+            // The operator's key: a rotated key must not fail work for good.
+            (401, true),
+            (403, true),
             (404, false),
+            (422, false),
             (429, true),
             (500, true),
             (503, true),
