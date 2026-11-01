@@ -33,9 +33,13 @@ test('non-public IPv6 ranges are refused', () => {
     'fec0::1', '2001:db8::1', 'ff02::1',
     '2001:0:4136:e378:8000:63bf:3fff:fdd2', // Teredo
     '64:ff9b:1::808:808', // local-use NAT64: never trusted
+    '100::1', '2001:2::1', '3fff::1', '3fff:fff::1', // discard-only, benchmarking, documentation
     'not-an-ip',
   ]) {
     assert.ok(!isPublicIp(ip), `${ip} is not public`);
+  }
+  for (const ip of ['100:0:0:1::1', '2001:2:1::1', '3fff:1000::1']) {
+    assert.ok(isPublicIp(ip), `${ip} is just outside a refused range`);
   }
 });
 

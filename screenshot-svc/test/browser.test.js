@@ -14,6 +14,7 @@ const guard = createGuard({
   lookup: async host => ({
     'public.test': [{ address: '127.0.0.1', family: 4 }],
     'intranet.test': [{ address: '127.0.0.1', family: 4 }, { address: '10.0.0.5', family: 4 }],
+    'dead.test': [{ address: '127.0.0.1', family: 4 }],
   })[host] || [],
 });
 
@@ -50,6 +51,9 @@ test('Chromium never reaches a private host by subresource or redirect', async t
     if (req.url === '/redirect') {
       res.writeHead(302, { location: `http://intranet.test:${sitePort}/secret` });
       res.end();
+    } else if (req.url === '/redirect-dead') {
+      res.writeHead(302, { location: `http://dead.test:${deadPort}/` });
+      res.end();
     } else if (req.url === '/page') {
       res.writeHead(200, { 'content-type': 'text/html' });
       res.end(`<img src="http://public.test:${sitePort}/ok.png">
@@ -60,6 +64,10 @@ test('Chromium never reaches a private host by subresource or redirect', async t
     }
   });
   const sitePort = await listen(site);
+  // A port nothing listens on: the proxy's fetch fails with a 502 of its own.
+  const closed = http.createServer();
+  const deadPort = await listen(closed);
+  await new Promise(r => closed.close(r));
   t.after(() => new Promise(r => site.close(r)));
   const service = createServer({ browser: launched.browser, guard, settleMs: 200 });
   const servicePort = await listen(service);
@@ -72,6 +80,11 @@ test('Chromium never reaches a private host by subresource or redirect', async t
 
   const redirected = await post(servicePort, `http://public.test:${sitePort}/redirect`);
   assert.strictEqual(redirected.status, 403, redirected.body.toString());
+
+  // The proxy's error page must fail the capture, not become the thumbnail.
+  const dead = await post(servicePort, `http://public.test:${sitePort}/redirect-dead`);
+  assert.strictEqual(dead.status, 500, dead.body.toString());
+  assert.match(dead.body.toString(), /fetch failed/);
 
   const direct = await post(servicePort, `http://intranet.test:${sitePort}/page`);
   assert.strictEqual(direct.status, 403);

@@ -81,7 +81,10 @@ function isPublicIpv6(s) {
     (first & 0xffc0) === 0xfec0 || // deprecated site-local fec0::/10
     (first === 0x64 && second === 0xff9b && third === 1) || // local-use NAT64 64:ff9b:1::/48
     (first === 0x2001 && second === 0) || // Teredo 2001::/32
-    (first === 0x2001 && second === 0x0db8) // documentation 2001:db8::/32
+    (first === 0x2001 && second === 0x0db8) || // documentation 2001:db8::/32
+    (first === 0x0100 && second === 0 && third === 0 && s[3] === 0) || // discard-only 100::/64
+    (first === 0x2001 && second === 0x0002 && third === 0) || // benchmarking 2001:2::/48
+    (first === 0x3fff && (second & 0xf000) === 0) // documentation 3fff::/20
   );
 }
 

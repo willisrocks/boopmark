@@ -1,6 +1,6 @@
 const http = require('http');
 const { Blocked, createGuard } = require('./guard');
-const { BLOCKED_HEADER, startGuardProxy } = require('./proxy');
+const { PROXY_ERROR_HEADER, startGuardProxy } = require('./proxy');
 
 const PORT = process.env.PORT || 3001;
 
@@ -55,7 +55,7 @@ async function guardPage(page, guard, log = console) {
     try {
       await guard.checkUrl(url);
     } catch (err) {
-      log.warn(`Refused ${url}: ${err.message}`);
+      log.warn('Refused %s: %s', url, err.message);
       await route.abort('blockedbyclient');
       return;
     }
@@ -112,9 +112,15 @@ function createServer({ browser, guard, settleMs = 2000 }) {
         await guardPage(page, guard);
         await page.setViewportSize({ width: 1200, height: 630 });
         const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        if (response && response.headers()[BLOCKED_HEADER]) {
-          // A redirect led somewhere the proxy refused.
+        // The proxy made this response up: a redirect led somewhere it
+        // refused, or the fetch failed. Never capture its error text.
+        const proxyError = response && response.headers()[PROXY_ERROR_HEADER];
+        if (proxyError === 'blocked') {
           sendJson(res, 403, { error: 'private urls not allowed' });
+          return;
+        }
+        if (proxyError) {
+          sendJson(res, 500, { error: `fetch failed: ${(await response.text()).slice(0, 200)}` });
           return;
         }
         // Brief settle for JS-rendered content after DOM is ready
@@ -123,7 +129,7 @@ function createServer({ browser, guard, settleMs = 2000 }) {
         res.writeHead(200, { 'Content-Type': 'image/jpeg' });
         res.end(screenshot);
       } catch (err) {
-        console.error(`Screenshot failed for ${url}:`, err.message);
+        console.error('Screenshot failed for %s: %s', url, err.message);
         sendJson(res, 500, { error: err.message });
       } finally {
         if (page) await page.close().catch(() => {});

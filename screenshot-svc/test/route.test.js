@@ -6,7 +6,7 @@ const http = require('http');
 const net = require('net');
 const { createGuard } = require('../guard');
 const { guardPage } = require('../index');
-const { BLOCKED_HEADER, startGuardProxy } = require('../proxy');
+const { PROXY_ERROR_HEADER, startGuardProxy } = require('../proxy');
 
 function stubLookup(table) {
   return async host => (table[host] || []).map(address => ({ address, family: net.isIPv6(address) ? 6 : 4 }));
@@ -50,15 +50,29 @@ test('the route handler aborts refused requests and continues the rest', async (
   }
 });
 
-/** A fixture server on loopback that records the paths it serves. */
+/**
+ * A fixture server on IPv4 loopback only, that records the paths it serves.
+ * `/slow` never answers; `dropped` resolves when its client goes away.
+ */
 async function fixture() {
   const hits = [];
+  let onDropped;
+  const dropped = new Promise(r => { onDropped = r; });
   const server = http.createServer((req, res) => {
     hits.push(req.url);
+    if (req.url === '/slow') {
+      res.on('close', onDropped);
+      return;
+    }
     res.end(`hello ${req.headers.host}`);
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
-  return { hits, port: server.address().port, close: () => new Promise(r => server.close(r)) };
+  return {
+    hits,
+    dropped,
+    port: server.address().port,
+    close: () => new Promise(r => { server.closeAllConnections(); server.close(r); }),
+  };
 }
 
 function viaProxy(proxyPort, url) {
@@ -103,9 +117,11 @@ test('the proxy forwards public hosts to the checked address and refuses the res
   ]) {
     const refused = await viaProxy(proxy.port, url);
     assert.strictEqual(refused.status, 403, url);
-    assert.strictEqual(refused.headers[BLOCKED_HEADER], '1', url);
+    assert.strictEqual(refused.headers[PROXY_ERROR_HEADER], 'blocked', url);
   }
-  assert.strictEqual((await viaProxy(proxy.port, `http://nothing.test:${site.port}/`)).status, 502);
+  const failed = await viaProxy(proxy.port, `http://nothing.test:${site.port}/`);
+  assert.strictEqual(failed.status, 502);
+  assert.strictEqual(failed.headers[PROXY_ERROR_HEADER], 'failed');
 
   assert.strictEqual(await connectVia(proxy.port, `public.test:${site.port}`), 200);
   assert.strictEqual(await connectVia(proxy.port, `intranet.test:${site.port}`), 403);
@@ -124,5 +140,49 @@ test('without allowLoopback the proxy refuses loopback and non-web ports', async
   assert.strictEqual((await viaProxy(proxy.port, `http://localhost/`)).status, 403);
   assert.strictEqual(await connectVia(proxy.port, 'public.test:22'), 403);
   assert.strictEqual(await connectVia(proxy.port, `127.0.0.1:${site.port}`), 403);
+  assert.deepStrictEqual(site.hits, []);
+});
+
+test('the proxy falls back to the other checked addresses', async t => {
+  const site = await fixture();
+  t.after(site.close);
+  // ::1 answers first but nothing listens there: the fixture is IPv4 only.
+  const guard = createGuard({ allowLoopback: true, lookup: stubLookup({ 'dual.test': ['::1', '127.0.0.1'] }) });
+  const proxy = await startGuardProxy(guard);
+  t.after(proxy.close);
+
+  assert.strictEqual((await viaProxy(proxy.port, `http://dual.test:${site.port}/v4`)).status, 200);
+  assert.strictEqual(await connectVia(proxy.port, `dual.test:${site.port}`), 200);
+  assert.deepStrictEqual(site.hits, ['/v4']);
+});
+
+test('the proxy cancels the upstream request when the client goes away', { timeout: 5000 }, async t => {
+  const site = await fixture();
+  t.after(site.close);
+  const proxy = await startGuardProxy(createGuard({ allowLoopback: true, lookup: stubLookup({ 'public.test': ['127.0.0.1'] }) }));
+  t.after(proxy.close);
+
+  const req = http.get({ host: '127.0.0.1', port: proxy.port, path: `http://public.test:${site.port}/slow` });
+  req.on('error', () => {});
+  while (!site.hits.includes('/slow')) await new Promise(r => setTimeout(r, 10));
+  req.destroy();
+  await site.dropped;
+});
+
+test('the proxy drops connections beyond its cap, tunnels included', async t => {
+  const site = await fixture();
+  t.after(site.close);
+  const guard = createGuard({ allowLoopback: true, lookup: stubLookup({ 'public.test': ['127.0.0.1'] }) });
+  const proxy = await startGuardProxy(guard, { maxConnections: 1 });
+  t.after(proxy.close);
+
+  const open = await new Promise((resolve, reject) => {
+    http.request({ host: '127.0.0.1', port: proxy.port, method: 'CONNECT', path: `public.test:${site.port}` })
+      .on('connect', (res, socket) => resolve(socket))
+      .on('error', reject)
+      .end();
+  });
+  t.after(() => open.destroy());
+  await assert.rejects(viaProxy(proxy.port, `http://public.test:${site.port}/`));
   assert.deepStrictEqual(site.hits, []);
 });
