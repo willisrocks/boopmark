@@ -462,7 +462,7 @@ impl SearchRepository for PostgresPool {
 }
 
 #[cfg(test)]
-mod search_tests {
+pub(super) mod search_tests {
     use super::*;
     use crate::domain::bookmark::CreateBookmark;
     use crate::domain::ports::bookmark_repo::BookmarkRepository;
@@ -471,7 +471,7 @@ mod search_tests {
     use sqlx::postgres::PgPoolOptions;
     use std::collections::HashMap;
 
-    async fn pool() -> PgPool {
+    pub(crate) async fn pool() -> PgPool {
         let database_url = std::env::var("DATABASE_URL")
             .expect("DATABASE_URL is required for the ignored Postgres search test");
         PgPoolOptions::new()
@@ -481,7 +481,7 @@ mod search_tests {
             .expect("DATABASE_URL must point at a migrated database")
     }
 
-    async fn user(pool: &PgPool) -> Uuid {
+    pub(crate) async fn user(pool: &PgPool) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO users (id, email, name) VALUES ($1, $2, 'search test')")
             .bind(id)
@@ -492,7 +492,7 @@ mod search_tests {
         id
     }
 
-    async fn bookmark(
+    pub(crate) async fn bookmark(
         repo: &PostgresPool,
         user_id: Uuid,
         url: &str,
@@ -516,8 +516,8 @@ mod search_tests {
     }
 
     /// The tests claim from the shared queue, so they must not interleave.
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    const LEASE: Duration = Duration::from_secs(600);
+    pub(crate) static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(crate) const LEASE: Duration = Duration::from_secs(600);
 
     /// Release claims that belong to rows outside these tests, as if they
     /// had never been claimed.
@@ -553,7 +553,7 @@ mod search_tests {
     /// Move these users' pending rows to the head of the queue (ahead of
     /// anything else in a shared database), claim them, and release whatever
     /// else the claim took.
-    async fn claim_mine(
+    pub(crate) async fn claim_mine(
         pool: &PgPool,
         repo: &PostgresPool,
         users: &[Uuid],
@@ -574,7 +574,7 @@ mod search_tests {
             .collect()
     }
 
-    async fn store(repo: &PostgresPool, job: &IngestJob, text: &str) {
+    pub(crate) async fn store(repo: &PostgresPool, job: &IngestJob, text: &str) {
         assert!(repo.store_article(job, text, "hash").await.unwrap());
     }
 
@@ -604,7 +604,7 @@ mod search_tests {
         .expect("search")
     }
 
-    fn ids(hits: &[SearchHit]) -> Vec<Uuid> {
+    pub(crate) fn ids(hits: &[SearchHit]) -> Vec<Uuid> {
         hits.iter().map(|h| h.bookmark.id).collect()
     }
 
