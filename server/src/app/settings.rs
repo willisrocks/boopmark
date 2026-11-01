@@ -567,12 +567,9 @@ mod tests {
     }
 
     #[test]
-    fn normalize_model_defaults_to_latest_full_haiku_id() {
-        assert_eq!(normalize_model(None), "claude-haiku-4-5-20251001");
-        assert_eq!(
-            normalize_model(Some("   ".into())),
-            "claude-haiku-4-5-20251001"
-        );
+    fn normalize_model_defaults_to_haiku_5_5() {
+        assert_eq!(normalize_model(None), "claude-haiku-5-5");
+        assert_eq!(normalize_model(Some("   ".into())), "claude-haiku-5-5");
     }
 
     #[test]
@@ -603,6 +600,7 @@ mod tests {
         for model in [
             "claude-opus-5",
             "claude-sonnet-5",
+            "claude-haiku-5-5",
             "claude-haiku-4-5-20251001",
         ] {
             let view = service

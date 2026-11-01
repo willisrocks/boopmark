@@ -418,6 +418,9 @@ impl TagAliasRepository for PostgresPool {
         proposals: &[NewTagMergeProposal],
     ) -> Result<Vec<TagMergeProposal>, DomainError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
+        // Serialized with other runs and with apply/undo, so two concurrent
+        // runs cannot both delete and then both insert their groups.
+        lock_user_tags(&mut tx, user_id).await?;
         sqlx::query(
             "DELETE FROM tag_merge_proposals
              WHERE user_id = $1 AND source = $2 AND status = 'pending'",

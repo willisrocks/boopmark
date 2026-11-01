@@ -25,7 +25,7 @@ async function resetSettings(page) {
 
   await page
     .getByLabel("Anthropic model")
-    .selectOption("claude-haiku-4-5-20251001");
+    .selectOption("claude-haiku-5-5");
   const metadataProvider = page.getByTestId("metadata-provider");
   if (await metadataProvider.count()) {
     await metadataProvider.selectOption("anthropic");
@@ -67,7 +67,7 @@ test("settings page renders in the app shell with the official default model", a
   await expect(page.getByText("No Anthropic API key saved yet.")).toBeVisible();
   await expect(page.getByLabel("Anthropic API key")).toBeEditable();
   await expect(page.getByLabel("Anthropic model")).toHaveValue(
-    "claude-haiku-4-5-20251001",
+    "claude-haiku-5-5",
   );
   await expect(page.locator("#anthropic_model option").nth(0)).toHaveAttribute(
     "value",
@@ -79,10 +79,14 @@ test("settings page renders in the app shell with the official default model", a
   );
   await expect(page.locator("#anthropic_model option").nth(2)).toHaveAttribute(
     "value",
+    "claude-haiku-5-5",
+  );
+  await expect(page.locator("#anthropic_model option").nth(3)).toHaveAttribute(
+    "value",
     "claude-haiku-4-5-20251001",
   );
   // Normal official-only path after resetSettings; preserved legacy values are covered in unit tests.
-  await expect(page.locator("#anthropic_model option")).toHaveCount(3);
+  await expect(page.locator("#anthropic_model option")).toHaveCount(4);
 });
 
 test("settings page supports add and delete key flows", async ({ page }) => {

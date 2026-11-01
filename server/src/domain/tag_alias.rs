@@ -378,7 +378,9 @@ pub fn resolve_writes(
 /// stray `" rust "` can be merged into `rust`. The canonical is trimmed and
 /// must be a valid tag. A spelling may be merged into only one tag. Chains
 /// are followed (`a -> b` plus `b -> c` maps `a` to `c`), and cycles are
-/// rejected. A merge with nothing to rewrite is an error.
+/// rejected. Spellings that share a compact key must end at the same tag,
+/// because one alias key points at one canonical. A merge with nothing to
+/// rewrite is an error.
 pub fn merge_mapping(merges: &[TagMerge]) -> Result<BTreeMap<String, String>, DomainError> {
     let mut direct: BTreeMap<String, String> = BTreeMap::new();
     for merge in merges {
@@ -420,6 +422,26 @@ pub fn merge_mapping(merges: &[TagMerge]) -> Result<BTreeMap<String, String>, Do
             target = next;
         }
         resolved.insert(source.clone(), target.clone());
+    }
+
+    // One alias key points at one canonical: two spellings with the same
+    // compact key cannot end up at different tags, and a spelling cannot
+    // leave a key that a target of this batch keeps.
+    let mut key_targets: HashMap<String, (&str, &str)> = HashMap::new();
+    let ends = resolved
+        .iter()
+        .map(|(source, target)| (source.as_str(), target.as_str()))
+        .chain(resolved.values().map(|target| (target.as_str(), target.as_str())));
+    for (spelling, target) in ends {
+        if let Some((other, other_target)) =
+            key_targets.insert(compact_key(spelling), (spelling, target))
+            && other_target != target
+        {
+            return Err(DomainError::InvalidInput(format!(
+                "\"{other}\" and \"{spelling}\" are spellings of one tag but merge into \
+                 \"{other_target}\" and \"{target}\""
+            )));
+        }
     }
     Ok(resolved)
 }
@@ -676,6 +698,26 @@ mod tests {
         assert!(merge_mapping(&[merge("b", &["a"]), merge("a", &["b"])]).is_err());
         assert!(merge_mapping(&[merge("a", &["a"])]).is_err());
         assert!(merge_mapping(&[merge(" ", &["a"])]).is_err());
+    }
+
+    #[test]
+    fn merge_mapping_rejects_one_key_merged_into_two_tags() {
+        // `JS` and `js` share the alias key `js`.
+        assert!(
+            merge_mapping(&[merge("javascript", &["JS"]), merge("java script", &["js"])]).is_err()
+        );
+        // `Go` leaves the key `go`, which the target `go` keeps.
+        assert!(merge_mapping(&[merge("go", &["golang"]), merge("Google", &["Go"])]).is_err());
+        // Same key and same target, or a case-only rename, are fine.
+        assert_eq!(
+            merge_mapping(&[merge("GitHub", &["github", "Github", "gh"])])
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(
+            merge_mapping(&[merge("javascript", &["JS"]), merge("javascript", &["js"])]).is_ok()
+        );
     }
 
     #[test]

@@ -459,26 +459,29 @@ mod tests {
     };
 
     #[test]
-    fn official_models_render_only_the_three_official_options() {
+    fn official_models_render_only_the_official_options() {
         let options = build_model_option_views("claude-sonnet-5");
 
-        assert_eq!(options.len(), 3);
+        assert_eq!(options.len(), 4);
         assert_eq!(options[0].label, "Claude Opus 5");
         assert_eq!(options[0].value, "claude-opus-5");
         assert!(!options[0].selected);
         assert_eq!(options[1].label, "Claude Sonnet 5");
         assert_eq!(options[1].value, "claude-sonnet-5");
         assert!(options[1].selected);
-        assert_eq!(options[2].label, "Claude Haiku 4.5");
-        assert_eq!(options[2].value, "claude-haiku-4-5-20251001");
+        assert_eq!(options[2].label, "Claude Haiku 5.5");
+        assert_eq!(options[2].value, "claude-haiku-5-5");
         assert!(!options[2].selected);
+        assert_eq!(options[3].label, "Claude Haiku 4.5");
+        assert_eq!(options[3].value, "claude-haiku-4-5-20251001");
+        assert!(!options[3].selected);
     }
 
     #[test]
     fn legacy_saved_model_gets_one_preservation_option_plus_the_official_options() {
         let options = build_model_option_views("claude-3-7-sonnet-latest");
 
-        assert_eq!(options.len(), 4);
+        assert_eq!(options.len(), 5);
         assert_eq!(
             options[0].label,
             "Keep current saved model (claude-3-7-sonnet-latest)"
@@ -487,7 +490,8 @@ mod tests {
         assert!(options[0].selected);
         assert_eq!(options[1].value, "claude-opus-5");
         assert_eq!(options[2].value, "claude-sonnet-5");
-        assert_eq!(options[3].value, "claude-haiku-4-5-20251001");
+        assert_eq!(options[3].value, "claude-haiku-5-5");
+        assert_eq!(options[4].value, "claude-haiku-4-5-20251001");
     }
 
     #[test]
