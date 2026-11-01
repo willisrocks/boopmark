@@ -53,7 +53,7 @@ pub struct BookmarkFilter {
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BookmarkSort {
     #[default]
@@ -61,6 +61,8 @@ pub enum BookmarkSort {
     Oldest,
     Title,
     Domain,
+    /// Search rank. Only meaningful with a search; a plain list treats it as `Newest`.
+    Relevance,
 }
 
 #[derive(Debug, Serialize)]

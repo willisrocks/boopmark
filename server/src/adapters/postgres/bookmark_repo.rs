@@ -206,7 +206,7 @@ impl BookmarkRepository for PostgresPool {
         let offset = filter.offset.unwrap_or(0);
 
         let order_clause = match filter.sort.unwrap_or_default() {
-            BookmarkSort::Newest => "created_at DESC",
+            BookmarkSort::Newest | BookmarkSort::Relevance => "created_at DESC",
             BookmarkSort::Oldest => "created_at ASC",
             BookmarkSort::Title => "title ASC NULLS LAST",
             BookmarkSort::Domain => "domain ASC NULLS LAST",

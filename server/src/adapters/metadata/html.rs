@@ -30,7 +30,7 @@ impl MetadataExtractor for HtmlMetadataExtractor {
     ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
         let url_str = url_str.to_string();
         Box::pin(async move {
-            let safe_url = super::validate_public_url(&url_str)?;
+            let safe_url = crate::adapters::net::validate_public_url(&url_str)?;
             let parsed_url = Url::parse(&safe_url)
                 .map_err(|e| DomainError::InvalidInput(format!("invalid URL: {e}")))?;
 
@@ -87,7 +87,7 @@ impl MetadataExtractor for HtmlMetadataExtractor {
     }
 }
 
-fn is_cloudflare_challenge(body: &str) -> bool {
+pub(crate) fn is_cloudflare_challenge(body: &str) -> bool {
     // Check for the specific CF challenge title (not body text, which could appear in articles)
     body.contains("<title>Just a moment...</title>")
         || body.contains("Performing security verification")
