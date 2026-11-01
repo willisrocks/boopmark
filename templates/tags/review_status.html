@@ -1,0 +1,19 @@
+{% if let Some(status) = status %}
+<div
+    id="consolidation-status"
+    data-testid="consolidation-status"
+    data-state="{{ status.state }}"
+    {% if status.polling %}hx-get="/tags/review/status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}
+    class="flex items-start gap-2 rounded-lg border px-4 py-3 text-sm {% if status.state == "failed" %}border-red-500/40 bg-red-500/10 text-red-200{% else if status.state == "running" %}border-blue-500/40 bg-blue-500/10 text-blue-200{% else %}border-gray-700 bg-[#0f1117] text-gray-300{% endif %}"
+>
+    {% if status.polling %}
+    <svg class="mt-0.5 h-4 w-4 flex-none animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+    </svg>
+    {% endif %}
+    <span>{{ status.message }}</span>
+</div>
+{% else %}
+<div id="consolidation-status" data-testid="consolidation-status" data-state="none" class="hidden"></div>
+{% endif %}
