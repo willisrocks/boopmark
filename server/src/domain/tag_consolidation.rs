@@ -374,8 +374,24 @@ impl Groups {
     }
 }
 
+/// True when `short` is an abbreviation, initials or numeronym of `long`
+/// (`js` of `javascript`, `k8s` of `kubernetes`).
+fn is_short_form(short: &str, long: &str) -> bool {
+    letters(short).len() < letters(long).len()
+        && matches!(
+            candidate_reason(short, long),
+            Some(
+                CandidateReason::Abbreviation
+                    | CandidateReason::Initials
+                    | CandidateReason::Numeronym
+            )
+        )
+}
+
 /// The canonical of a group: the whole-list call's canonical when the
-/// group holds one (a `high` proposal first), otherwise the display rule.
+/// group holds one (a `high` proposal first). Otherwise the display rule,
+/// over the names that are not a short form of another name in the group,
+/// so `javascript` wins over a more used `js`.
 fn pick_canonical(names: &[(String, i64)], groups: &[ProposedGroup], units: &[TagUnit]) -> String {
     let mut proposed: Vec<&ProposedGroup> = groups.iter().collect();
     proposed.sort_by_key(|g| g.confidence != Confidence::High);
@@ -384,7 +400,14 @@ fn pick_canonical(names: &[(String, i64)], groups: &[ProposedGroup], units: &[Ta
         .map(|g| &units[g.canonical].tag)
         .find(|tag| names.iter().any(|(name, _)| name == *tag))
         .cloned()
-        .unwrap_or_else(|| choose_display(names))
+        .unwrap_or_else(|| {
+            let full: Vec<(String, i64)> = names
+                .iter()
+                .filter(|(name, _)| !names.iter().any(|(other, _)| is_short_form(name, other)))
+                .cloned()
+                .collect();
+            choose_display(if full.is_empty() { names } else { &full })
+        })
 }
 
 /// Union the accepted pairs into merge proposals (spec "Guards"):
@@ -970,6 +993,21 @@ mod tests {
             .map(|p| p.canonical)
             .collect();
         assert_eq!(canonicals, ["javascript", "go lang"]);
+    }
+
+    #[test]
+    fn without_a_whole_list_choice_the_full_name_beats_a_more_used_short_form() {
+        let units = units(&[("js", 9), ("javascript", 4), ("k8s", 3), ("kubernetes", 1)]);
+        let pairs = vec![pair(0, 1), pair(2, 3)];
+        let verdicts = vec![
+            verdict(0, true, Confidence::High),
+            verdict(1, true, Confidence::Medium),
+        ];
+        let canonicals: Vec<String> = build_proposals(&units, &[], &pairs, &verdicts)
+            .into_iter()
+            .map(|p| p.canonical)
+            .collect();
+        assert_eq!(canonicals, ["javascript", "kubernetes"]);
     }
 
     fn proposal(

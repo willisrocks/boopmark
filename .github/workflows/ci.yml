@@ -91,6 +91,11 @@ jobs:
           cargo test -p boopmark-server
           adapters::postgres::search_repo::search_tests
           -- --ignored
+      - name: Test tag consolidation DB
+        run: >-
+          cargo test -p boopmark-server
+          adapters::postgres::tag_consolidation_job_repo::tag_consolidation_postgres_tests::
+          -- --ignored
 
   install-script:
     name: Install script tests
