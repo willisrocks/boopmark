@@ -642,6 +642,13 @@ pub fn resolve_through_aliases(
         .iter()
         .map(|a| (a.alias_key.as_str(), a.canonical.as_str()))
         .collect();
+    let mut padded: HashMap<&str, Vec<&String>> = HashMap::new();
+    for tag in on_bookmarks.iter().filter(|t| t.trim() != t.as_str()) {
+        padded.entry(tag.trim()).or_default().push(tag);
+    }
+    for variants in padded.values_mut() {
+        variants.sort();
+    }
     let current = |tag: &String| -> String {
         if on_bookmarks.contains(tag) {
             return tag.clone();
@@ -654,10 +661,15 @@ pub fn resolve_through_aliases(
         .iter()
         .filter_map(|proposal| {
             let canonical = current(&proposal.canonical);
+            // A spelling on bookmarks that only differs by surrounding
+            // whitespace (" js ") merges with its trimmed member.
             let mut members: Vec<String> = Vec::new();
             for member in proposal.members.iter().map(current) {
-                if !members.contains(&member) {
-                    members.push(member);
+                let variants = padded.get(member.as_str()).into_iter().flatten();
+                for tag in std::iter::once(&member).chain(variants.copied()) {
+                    if !members.contains(tag) {
+                        members.push(tag.clone());
+                    }
                 }
             }
             members
@@ -743,14 +755,28 @@ pub fn plan_reviewed_apply(
     }
     let selected: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
     let applied = expand_selection(&selected, pending);
+    // One merge per checked row, of every spelling it showed. A row that a
+    // checked AI row covers is applied through that row, so each spelling
+    // has one target, even when the AI target was edited to a covered
+    // spelling.
+    let covering: Vec<&TagMergeProposal> = pending
+        .iter()
+        .filter(|p| selected.contains(&p.id))
+        .collect();
+    let merges = covering
+        .iter()
+        .filter(|p| {
+            !covering
+                .iter()
+                .any(|c| c.id != p.id && covered(c, pending).any(|v| v.id == p.id))
+        })
+        .map(|p| TagMerge {
+            canonical: targets[&p.id].clone(),
+            members: row_spellings(p, pending),
+        })
+        .collect();
     Ok(ReviewedApply {
-        merges: applied
-            .iter()
-            .map(|p| TagMerge {
-                canonical: targets.get(&p.id).unwrap_or(&p.canonical).clone(),
-                members: p.members.clone(),
-            })
-            .collect(),
+        merges,
         kind: if applied.iter().any(|p| p.source == ProposalSource::Llm) {
             ChangeKind::LlmMerge
         } else {
@@ -1284,19 +1310,28 @@ mod tests {
         assert_eq!(plan.ids, vec![llm.id, variants.id]);
         assert_eq!(plan.kind, ChangeKind::LlmMerge);
         assert_eq!(plan.edited, vec![(llm.id, "JavaScript".to_string())]);
+        // One merge of every spelling the row showed.
         assert_eq!(
             plan.merges,
-            vec![
-                TagMerge {
-                    canonical: "JavaScript".into(),
-                    members: s(&["javascript", "js"])
-                },
-                TagMerge {
-                    canonical: "js".into(),
-                    members: s(&["JS", "js"])
-                },
-            ]
+            vec![TagMerge {
+                canonical: "JavaScript".into(),
+                members: s(&["javascript", "js", "JS"])
+            }]
         );
+
+        // The target may be one of the covered spellings: no false cycle.
+        let mut to_covered = shown(&llm, &pending);
+        to_covered.canonical = Some("JS".into());
+        let plan = plan_reviewed_apply(&[to_covered], &pending).unwrap();
+        let mapping = crate::domain::tag_alias::merge_mapping(&plan.merges).unwrap();
+        assert_eq!(mapping["javascript"], "JS");
+        assert_eq!(mapping["js"], "JS");
+
+        // Checking the covered row too changes nothing.
+        let both = [shown(&llm, &pending), shown(&variants, &pending)];
+        let plan = plan_reviewed_apply(&both, &pending).unwrap();
+        assert_eq!(plan.merges.len(), 1);
+        assert_eq!(plan.ids.len(), 2);
 
         // An invalid edited target is refused.
         row.canonical = Some("bad\ntag".into());
@@ -1361,6 +1396,14 @@ mod tests {
             &on_bookmarks,
         );
         assert_eq!(resolved, vec![variants]);
+
+        // A whitespace-only variant on bookmarks merges with its member.
+        let on_bookmarks: HashSet<String> = ["javascript", " js "].map(String::from).into();
+        let resolved = resolve_through_aliases(std::slice::from_ref(&llm), &[], &on_bookmarks);
+        assert_eq!(resolved[0].members, s(&["javascript", "js", " js "]));
+        let row = shown(&resolved[0], &resolved);
+        let plan = plan_reviewed_apply(&[row], &resolved).unwrap();
+        assert_eq!(plan.merges[0].members, s(&["javascript", "js", " js "]));
 
         // Nothing left to merge: the proposal drops out.
         let gone = proposal("rust", &["Rust", "rust"], Deterministic, Confidence::High);

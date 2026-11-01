@@ -201,13 +201,15 @@ where
     }
 
     pub async fn review(&self, user_id: Uuid) -> Result<Review, DomainError> {
-        let (pending, samples, aliases, batches, job) = tokio::try_join!(
+        // The job first: a run that finishes while the rest loads then shows
+        // as running (and the page polls), never as finished with old rows.
+        let job = self.job(user_id).await?;
+        let (pending, samples, aliases, batches) = tokio::try_join!(
             self.tags
                 .list_proposals(user_id, Some(ProposalStatus::Pending)),
             self.tags.tag_samples(user_id),
             self.tags.list_aliases(user_id),
             self.tags.list_batches(user_id, RECENT_BATCHES * 4),
-            self.job(user_id),
         )?;
         let on_bookmarks: HashSet<String> = samples.iter().map(|s| s.tag.clone()).collect();
         let pending = resolve_through_aliases(&pending, &aliases, &on_bookmarks);
