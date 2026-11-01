@@ -12,7 +12,9 @@ use encoding_rs::{Encoding, UTF_8};
 use reqwest::StatusCode;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use url::Url;
 
 /// Larger responses are skipped. The measured p90 page was 437 KB, the
@@ -39,11 +41,18 @@ pub struct HtmlArticleFetcher {
     client: reqwest::Client,
     guard: UrlGuard,
     throttle: HostThrottle,
+    /// Extractions running at once, timed-out ones included.
+    extraction_slots: Arc<Semaphore>,
 }
 
 impl HtmlArticleFetcher {
-    pub fn new() -> Self {
-        Self::with_lookup(UrlGuard::public(), SystemLookup, PER_HOST_INTERVAL)
+    /// `extraction_slots` bounds the blocking threads that parse pages; the
+    /// ingest worker passes its concurrency.
+    pub fn new(extraction_slots: usize) -> Self {
+        Self {
+            extraction_slots: Arc::new(Semaphore::new(extraction_slots.max(1))),
+            ..Self::with_lookup(UrlGuard::public(), SystemLookup, PER_HOST_INTERVAL)
+        }
     }
 
     fn with_lookup(guard: UrlGuard, lookup: impl Lookup, per_host_interval: Duration) -> Self {
@@ -56,6 +65,7 @@ impl HtmlArticleFetcher {
             client,
             guard,
             throttle: HostThrottle::new(per_host_interval),
+            extraction_slots: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -104,17 +114,14 @@ impl HtmlArticleFetcher {
         let url_for_parse = final_url.clone();
         // Decoding, the challenge check and extraction all scan the page, so
         // they run off the async threads.
-        let extraction = tokio::task::spawn_blocking(move || {
+        let text = run_bounded(&self.extraction_slots, EXTRACT_TIMEOUT, move || {
             let html = decode_html(body, content_type.as_deref());
             if is_cloudflare_challenge(&html) {
                 return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
             }
             extract_text(&html, &url_for_parse)
-        });
-        let text = tokio::time::timeout(EXTRACT_TIMEOUT, extraction)
-            .await
-            .map_err(|_| ArticleFetchError::Transient("extraction timed out".to_string()))?
-            .map_err(|e| ArticleFetchError::Transient(format!("extraction task failed: {e}")))??;
+        })
+        .await??;
 
         Ok(FetchedArticle {
             text,
@@ -132,6 +139,34 @@ impl ArticleFetcher for HtmlArticleFetcher {
         let url = url.to_string();
         Box::pin(async move { self.fetch_article(&url).await })
     }
+}
+
+/// Run `work` on the blocking pool once one of `slots` is free, waiting at
+/// most `timeout` in all. A blocking thread cannot be cancelled, so the
+/// permit moves into the closure: a timed-out run keeps its slot until its
+/// thread really ends, and hostile pages can never have more extractions
+/// running than there are slots.
+async fn run_bounded<T: Send + 'static>(
+    slots: &Arc<Semaphore>,
+    timeout: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ArticleFetchError> {
+    let slots = slots.clone();
+    let run = async move {
+        let permit = slots
+            .acquire_owned()
+            .await
+            .expect("the extraction semaphore is never closed");
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        })
+        .await
+    };
+    tokio::time::timeout(timeout, run)
+        .await
+        .map_err(|_| ArticleFetchError::Transient("extraction timed out".to_string()))?
+        .map_err(|e| ArticleFetchError::Transient(format!("extraction task failed: {e}")))
 }
 
 fn is_html(content_type: &str) -> bool {
@@ -449,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn production_guard_refuses_private_targets_before_connecting() {
-        let fetcher = HtmlArticleFetcher::new();
+        let fetcher = HtmlArticleFetcher::new(1);
         for url in [
             "http://127.0.0.1/",
             "http://localhost:4000/",
@@ -585,5 +620,33 @@ mod tests {
         assert!(is_html("application/xhtml+xml"));
         assert!(!is_html("application/pdf"));
         assert!(!is_html("text/plain"));
+    }
+
+    /// A run that outlives its timeout keeps its slot until its thread ends,
+    /// so the next run waits instead of starting a second extraction.
+    #[tokio::test]
+    async fn a_timed_out_extraction_keeps_its_slot_until_it_ends() {
+        let slots = Arc::new(Semaphore::new(1));
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let stuck = run_bounded(&slots, Duration::from_millis(50), move || {
+            wait.recv().ok();
+        })
+        .await;
+        assert_eq!(
+            stuck,
+            Err(ArticleFetchError::Transient("extraction timed out".into()))
+        );
+        assert_eq!(
+            slots.available_permits(),
+            0,
+            "the stuck thread holds the slot"
+        );
+        let queued = run_bounded(&slots, Duration::from_millis(50), || 1).await;
+        assert!(queued.is_err(), "no second extraction while the first runs");
+
+        release.send(()).unwrap();
+        let ran = run_bounded(&slots, Duration::from_secs(5), || 2).await;
+        assert_eq!(ran, Ok(2));
+        assert_eq!(slots.available_permits(), 1);
     }
 }

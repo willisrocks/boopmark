@@ -125,43 +125,55 @@ enum WebsearchToken {
     Word,
 }
 
+/// Splits a query the way `websearch_to_tsquery` reads it. Minus signs
+/// negate the next term or phrase even when spaced (`coffee - tea` is
+/// `'coffe' & !'tea'` in Postgres), so a run of them is carried over to it,
+/// and the operator is passed on as written, signs and all.
 fn websearch_tokens(text: &str) -> Vec<WebsearchToken> {
     let chars: Vec<char> = text.chars().collect();
     let mut tokens = Vec::new();
+    // Minus signs seen since the last term.
+    let mut signs = String::new();
     let mut i = 0;
     while i < chars.len() {
         if chars[i].is_whitespace() {
             i += 1;
             continue;
         }
-        let negated = chars[i] == '-';
-        let body = if negated { i + 1 } else { i };
-        if chars.get(body) == Some(&'"') {
+        let body = i + chars[i..].iter().take_while(|c| **c == '-').count();
+        signs.extend(&chars[i..body]);
+        if body == chars.len() || chars[body].is_whitespace() {
+            // Only minus signs: they apply to whatever comes next.
+            i = body;
+            continue;
+        }
+        if chars[body] == '"' {
             let close = chars[body + 1..].iter().position(|c| *c == '"');
             let end = close.map_or(chars.len(), |p| body + 1 + p);
             let phrase: String = chars[body + 1..end].iter().collect();
             if !phrase.trim().is_empty() {
-                let sign = if negated { "-" } else { "" };
                 tokens.push(WebsearchToken::Operator(format!(
-                    "{sign}\"{}\"",
+                    "{signs}\"{}\"",
                     phrase.trim()
                 )));
             }
+            signs.clear();
             i = end + 1;
             continue;
         }
-        let end = chars[i..]
+        let end = chars[body..]
             .iter()
             .position(|c| c.is_whitespace())
-            .map_or(chars.len(), |p| i + p);
-        let word: String = chars[i..end].iter().collect();
-        if negated && word.len() > 1 {
-            tokens.push(WebsearchToken::Operator(word));
+            .map_or(chars.len(), |p| body + p);
+        let word: String = chars[body..end].iter().collect();
+        if !signs.is_empty() {
+            tokens.push(WebsearchToken::Operator(format!("{signs}{word}")));
         } else if word.eq_ignore_ascii_case("or") {
             tokens.push(WebsearchToken::Or);
-        } else if word != "-" {
+        } else {
             tokens.push(WebsearchToken::Word);
         }
+        signs.clear();
         i = end;
     }
     tokens
@@ -250,6 +262,30 @@ mod tests {
         assert_eq!(websearch_constraints("well-known rust"), None);
         assert_eq!(websearch_constraints("plain words"), None);
         assert_eq!(websearch_constraints("dangling - \"\""), None);
+        assert_eq!(websearch_constraints("coffee -"), None);
+    }
+
+    /// Postgres reads a spaced minus as an exclusion (`coffee - tea` is
+    /// `'coffe' & !'tea'`), so every leg must exclude too.
+    #[test]
+    fn websearch_constraints_treat_a_spaced_minus_like_postgres() {
+        assert_eq!(
+            websearch_constraints("coffee - tea").as_deref(),
+            Some("-tea")
+        );
+        assert_eq!(
+            websearch_constraints("coffee - \"green tea\"").as_deref(),
+            Some("-\"green tea\"")
+        );
+        assert_eq!(
+            websearch_constraints("- tea coffee").as_deref(),
+            Some("-tea")
+        );
+        // Double negation is passed on as written, for Postgres to read.
+        assert_eq!(
+            websearch_constraints("coffee - - tea").as_deref(),
+            Some("--tea")
+        );
         assert_eq!(
             websearch_constraints("\"cold brew\" OR \"grind size\" -tea").as_deref(),
             Some("\"cold brew\" or \"grind size\" -tea")

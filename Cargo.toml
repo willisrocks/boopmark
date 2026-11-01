@@ -19,7 +19,7 @@ scraper = "0.22"
 aws-sdk-s3 = "1"
 aws-config = "1"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "set-header"] }
 argon2 = { version = "0.5", features = ["std"] }
 rand = "0.9"
 uuid = { version = "1", features = ["v4", "serde"] }

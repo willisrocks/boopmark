@@ -228,7 +228,7 @@ async fn main() {
         );
         app::ingest::IngestWorker::new(
             Arc::new(PostgresPool::new(ingest_pool)),
-            Arc::new(HtmlArticleFetcher::new()),
+            Arc::new(HtmlArticleFetcher::new(config.article_ingest_concurrency)),
             config.article_ingest_concurrency,
         )
         .spawn(wake);

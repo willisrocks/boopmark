@@ -214,9 +214,10 @@ impl SearchRepository for PostgresPool {
         // longest ago first (`bookmark_ingest_turns`), so fairness holds
         // across claims, even when each claim takes a single job. `due` locks
         // each waiting user's share of the batch, so however big one import
-        // is, every other waiting user is a candidate. `picked` takes one row
-        // per user in rank order, then a second, and so on; within a user,
-        // rows rotate through hosts. `turns` records the users served. Every
+        // is, every other waiting user is a candidate; within a user, the share
+        // is taken by host turn, so an old single-host backlog does not hold
+        // back that user's other hosts. `picked` takes one row per user in
+        // rank order, then a second, and so on. `turns` records the users served. Every
         // claim gets a fresh token, so a worker whose lease ran out can no
         // longer write.
         let sql = format!(
@@ -240,32 +241,37 @@ impl SearchRepository for PostgresPool {
              ),
              due AS (
                  SELECT w.user_rank, d.* FROM waiting w CROSS JOIN LATERAL (
-                     SELECT c.bookmark_id, c.user_id, c.next_attempt_at,
-                            lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)')) AS host
-                     FROM bookmark_contents c JOIN bookmarks b ON b.id = c.bookmark_id
-                     WHERE c.user_id = w.user_id AND c.status = 'pending'
-                       AND c.next_attempt_at <= now() AND c.attempts < $3
-                     ORDER BY c.next_attempt_at, c.bookmark_id
+                     SELECT c.bookmark_id, c.user_id, c.next_attempt_at, r.host_turn
+                     FROM (
+                         -- Every due row of this user, numbered within its
+                         -- host, so the share below rotates through hosts
+                         -- however old a single-host backlog is.
+                         SELECT q.bookmark_id,
+                                row_number() OVER (
+                                    PARTITION BY lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)'))
+                                    ORDER BY q.next_attempt_at, q.bookmark_id) AS host_turn
+                         FROM bookmark_contents q JOIN bookmarks b ON b.id = q.bookmark_id
+                         WHERE q.user_id = w.user_id AND q.status = 'pending'
+                           AND q.next_attempt_at <= now() AND q.attempts < $3
+                     ) r
+                     JOIN bookmark_contents c ON c.bookmark_id = r.bookmark_id
+                     -- Rechecked on the locked row version.
+                     WHERE c.status = 'pending' AND c.next_attempt_at <= now() AND c.attempts < $3
+                     ORDER BY r.host_turn, c.next_attempt_at, c.bookmark_id
                      -- Each user's share of the batch.
                      LIMIT ceil($1::numeric / (SELECT count(*) FROM waiting))::bigint
                      FOR UPDATE OF c SKIP LOCKED
                  ) d
              ),
-             -- Two levels, because a user's turn order depends on its host
-             -- turns, and window functions cannot sit next to FOR UPDATE in `due`.
+             -- A second level, because window functions cannot sit next to
+             -- FOR UPDATE in `due`.
              picked AS (
                  SELECT bookmark_id FROM (
                      SELECT bookmark_id, user_rank,
                             row_number() OVER (PARTITION BY user_id
                                                ORDER BY host_turn, next_attempt_at, bookmark_id)
                                 AS user_turn
-                     FROM (
-                         SELECT due.*,
-                                row_number() OVER (PARTITION BY user_id, host
-                                                   ORDER BY next_attempt_at, bookmark_id)
-                                    AS host_turn
-                         FROM due
-                     ) h
+                     FROM due
                  ) u
                  ORDER BY user_turn, user_rank
                  LIMIT $1
@@ -773,6 +779,77 @@ mod search_tests {
             .await
             .unwrap();
         pool.close().await;
+    }
+
+    /// Within one user, the claim's share rotates through hosts before it
+    /// looks at age: an old single-host backlog does not hold back the same
+    /// user's link to another host.
+    #[tokio::test]
+    #[ignore = "requires a migrated Postgres database (DATABASE_URL)"]
+    async fn a_users_share_of_a_claim_rotates_through_hosts() {
+        let _serial = SERIAL.lock().await;
+        let pool = pool().await;
+        let repo = PostgresPool::new(pool.clone());
+        let owner = user(&pool).await;
+        let mut backlog = Vec::new();
+        for i in 0..20 {
+            let b = bookmark(
+                &repo,
+                owner,
+                &format!("https://one-host.example.net/page-{i}"),
+                "backlog",
+                None,
+                &[],
+            )
+            .await;
+            backlog.push(b.id);
+        }
+        let other_host = bookmark(
+            &repo,
+            owner,
+            "https://another-host.example.org/new",
+            "new",
+            None,
+            &[],
+        )
+        .await;
+        sqlx::query(
+            "UPDATE bookmark_contents SET next_attempt_at = '1970-01-01' WHERE bookmark_id = ANY($1)",
+        )
+        .bind(&backlog)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE bookmark_contents SET next_attempt_at = '1970-01-02' WHERE bookmark_id = $1",
+        )
+        .bind(other_host.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Two rows for every waiting user (other tests' rows may wait too),
+        // so this user's share is exactly two.
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(DISTINCT user_id) FROM bookmark_contents
+             WHERE status = 'pending' AND next_attempt_at <= now() AND attempts < $1",
+        )
+        .bind(MAX_INGEST_ATTEMPTS)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let jobs = repo.claim_ingest_batch(2 * waiting, LEASE).await.unwrap();
+        let mut mine = backlog.clone();
+        mine.push(other_host.id);
+        release_others(&pool, &jobs, &mine).await;
+        let claimed: Vec<Uuid> = jobs
+            .iter()
+            .map(|j| j.bookmark_id)
+            .filter(|id| mine.contains(id))
+            .collect();
+        assert_eq!(claimed.len(), 2);
+        assert!(claimed.contains(&other_host.id), "{claimed:?}");
+        assert!(claimed.iter().any(|id| backlog.contains(id)));
+        reset_claims(&pool, &[owner]).await;
     }
 
     #[tokio::test]

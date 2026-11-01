@@ -942,13 +942,15 @@ fn normalize_social_image(bytes: &[u8]) -> Result<Vec<u8>, DomainError> {
     Ok(output.into_inner())
 }
 
+/// The key extension for a fetched card image. Local storage serves files by
+/// extension, so there is deliberately no `.svg`: an SVG (refused by the
+/// fetcher anyway) could carry script that runs on our origin.
 fn extension_from_content_type(ct: &str) -> &str {
     let mime = ct.split(';').next().unwrap_or(ct).trim();
     match mime {
         "image/png" => "png",
         "image/gif" => "gif",
         "image/webp" => "webp",
-        "image/svg+xml" => "svg",
         _ => "jpg",
     }
 }
@@ -996,6 +998,17 @@ fn merge_metadata(input: &mut CreateBookmark, meta: UrlMetadata) -> Option<Strin
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn stored_images_never_get_an_svg_extension() {
+        assert_eq!(extension_from_content_type("image/png"), "png");
+        assert_eq!(extension_from_content_type("image/webp; q=1"), "webp");
+        assert_eq!(extension_from_content_type("image/svg+xml"), "jpg");
+        assert_eq!(
+            extension_from_content_type("image/svg+xml; charset=utf-8"),
+            "jpg"
+        );
+    }
 
     #[test]
     fn needs_metadata_when_image_or_domain_is_missing() {
