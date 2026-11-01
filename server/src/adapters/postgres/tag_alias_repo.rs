@@ -1,0 +1,668 @@
+use super::PostgresPool;
+use crate::domain::error::DomainError;
+use crate::domain::ports::tag_alias_repo::TagAliasRepository;
+use crate::domain::tag_alias::{
+    AliasSource, ChangeKind, Confidence, NewTagAlias, NewTagMergeProposal, ProposalSource,
+    ProposalStatus, TagAlias, TagChangeBatch, TagChangeSummary, TagMerge, TagMergeProposal,
+    merge_mapping, rewrite_tags, undo_tags,
+};
+use crate::domain::tag_normalize::compact_key;
+use chrono::{DateTime, Utc};
+use sqlx::{Postgres, Transaction};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use uuid::Uuid;
+
+fn db_err(e: sqlx::Error) -> DomainError {
+    DomainError::Internal(e.to_string())
+}
+
+type AliasRow = (String, String, String, String, Option<Uuid>);
+
+fn alias_from_row(
+    (alias_key, alias, canonical, source, batch_id): AliasRow,
+) -> Result<TagAlias, DomainError> {
+    Ok(TagAlias {
+        alias_key,
+        alias,
+        canonical,
+        source: AliasSource::parse(&source)?,
+        batch_id,
+    })
+}
+
+const PROPOSAL_COLUMNS: &str =
+    "id, user_id, canonical, members, source, confidence, status, batch_id, created_at, decided_at";
+
+type ProposalRow = (
+    Uuid,
+    Uuid,
+    String,
+    Vec<String>,
+    String,
+    String,
+    String,
+    Option<Uuid>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
+
+fn proposal_from_row(row: ProposalRow) -> Result<TagMergeProposal, DomainError> {
+    let (
+        id,
+        user_id,
+        canonical,
+        members,
+        source,
+        confidence,
+        status,
+        batch_id,
+        created_at,
+        decided_at,
+    ) = row;
+    Ok(TagMergeProposal {
+        id,
+        user_id,
+        canonical,
+        members,
+        source: ProposalSource::parse(&source)?,
+        confidence: Confidence::parse(&confidence)?,
+        status: ProposalStatus::parse(&status)?,
+        batch_id,
+        created_at,
+        decided_at,
+    })
+}
+
+const BATCH_COLUMNS: &str = "id, user_id, kind, summary::text, undone_at, created_at";
+
+type BatchRow = (
+    Uuid,
+    Uuid,
+    String,
+    String,
+    Option<DateTime<Utc>>,
+    DateTime<Utc>,
+);
+
+fn batch_from_row(row: BatchRow) -> Result<TagChangeBatch, DomainError> {
+    let (id, user_id, kind, summary, undone_at, created_at) = row;
+    Ok(TagChangeBatch {
+        id,
+        user_id,
+        kind: ChangeKind::parse(&kind)?,
+        summary: serde_json::from_str(&summary)
+            .map_err(|e| DomainError::Internal(format!("bad tag batch summary: {e}")))?,
+        undone_at,
+        created_at,
+    })
+}
+
+fn sorted(members: &[String]) -> Vec<String> {
+    let mut members = members.to_vec();
+    members.sort();
+    members.dedup();
+    members
+}
+
+/// Apply merges inside `tx`: rewrite bookmark tags, repoint and add aliases,
+/// and record the batch with before-images of everything it changed.
+async fn apply_merges_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    kind: ChangeKind,
+    merges: &[TagMerge],
+) -> Result<TagChangeBatch, DomainError> {
+    let mapping = merge_mapping(merges)?;
+    let sources: Vec<String> = mapping.keys().cloned().collect();
+
+    let rows = sqlx::query_as::<_, (Uuid, Vec<String>)>(
+        "SELECT id, tags FROM bookmarks
+         WHERE user_id = $1 AND tags && $2
+         ORDER BY id
+         FOR UPDATE",
+    )
+    .bind(user_id)
+    .bind(&sources)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let changes: Vec<(Uuid, Vec<String>, Vec<String>)> = rows
+        .into_iter()
+        .filter_map(|(id, before)| {
+            let after = rewrite_tags(&before, &mapping);
+            (after != before).then_some((id, before, after))
+        })
+        .collect();
+
+    let summary = TagChangeSummary {
+        merges: merges.to_vec(),
+        bookmarks_changed: changes.len() as u64,
+    };
+    let summary_json = serde_json::to_string(&summary)
+        .map_err(|e| DomainError::Internal(format!("bad tag batch summary: {e}")))?;
+    let batch = sqlx::query_as::<_, BatchRow>(&format!(
+        "INSERT INTO tag_change_batches (user_id, kind, summary)
+         VALUES ($1, $2, $3::jsonb)
+         RETURNING {BATCH_COLUMNS}"
+    ))
+    .bind(user_id)
+    .bind(kind.as_str())
+    .bind(&summary_json)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let batch = batch_from_row(batch)?;
+
+    for (id, before, after) in &changes {
+        sqlx::query(
+            "UPDATE bookmarks SET tags = $1, updated_at = now() WHERE id = $2 AND user_id = $3",
+        )
+        .bind(after)
+        .bind(id)
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO tag_change_snapshots (batch_id, bookmark_id, tags_before, tags_after)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(batch.id)
+        .bind(id)
+        .bind(before)
+        .bind(after)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    }
+
+    // Aliases: every alias of a merged tag now points at its target, and
+    // every merged spelling and target gets a key of its own.
+    let repointed = sqlx::query_as::<_, AliasRow>(
+        "SELECT alias_key, alias, canonical, source, batch_id FROM tag_aliases
+         WHERE user_id = $1 AND canonical = ANY($2)
+         FOR UPDATE",
+    )
+    .bind(user_id)
+    .bind(&sources)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let mut desired: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for (key, alias, canonical, _, _) in repointed {
+        desired.insert(key, (alias, mapping[&canonical].clone()));
+    }
+    for (source, target) in &mapping {
+        desired.insert(compact_key(source), (source.clone(), target.clone()));
+    }
+    let targets: HashSet<&String> = mapping.values().collect();
+    for target in targets {
+        desired.insert(compact_key(target), (target.clone(), target.clone()));
+    }
+
+    let keys: Vec<String> = desired.keys().cloned().collect();
+    let current: HashMap<String, (String, String, String, Option<Uuid>, DateTime<Utc>)> =
+        sqlx::query_as::<_, (String, String, String, String, Option<Uuid>, DateTime<Utc>)>(
+            "SELECT alias_key, alias, canonical, source, batch_id, created_at FROM tag_aliases
+             WHERE user_id = $1 AND alias_key = ANY($2)
+             FOR UPDATE",
+        )
+        .bind(user_id)
+        .bind(&keys)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(db_err)?
+        .into_iter()
+        .map(|(key, alias, canonical, source, batch_id, created_at)| {
+            (key, (alias, canonical, source, batch_id, created_at))
+        })
+        .collect();
+
+    let alias_source = kind.alias_source().as_str();
+    for (key, (alias, canonical)) in &desired {
+        let before = current.get(key);
+        if before.is_some_and(|(_, c, _, _, _)| c == canonical) {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO tag_change_alias_snapshots
+                (batch_id, alias_key, alias_before, canonical_before, source_before,
+                 batch_id_before, created_at_before)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(batch.id)
+        .bind(key)
+        .bind(before.map(|b| &b.0))
+        .bind(before.map(|b| &b.1))
+        .bind(before.map(|b| &b.2))
+        .bind(before.and_then(|b| b.3))
+        .bind(before.map(|b| b.4))
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO tag_aliases (user_id, alias_key, alias, canonical, source, batch_id)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (user_id, alias_key) DO UPDATE
+             SET alias = EXCLUDED.alias, canonical = EXCLUDED.canonical,
+                 source = EXCLUDED.source, batch_id = EXCLUDED.batch_id",
+        )
+        .bind(user_id)
+        .bind(key)
+        .bind(alias)
+        .bind(canonical)
+        .bind(alias_source)
+        .bind(batch.id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    }
+
+    Ok(batch)
+}
+
+impl TagAliasRepository for PostgresPool {
+    async fn list_aliases(&self, user_id: Uuid) -> Result<Vec<TagAlias>, DomainError> {
+        sqlx::query_as::<_, AliasRow>(
+            "SELECT alias_key, alias, canonical, source, batch_id FROM tag_aliases
+             WHERE user_id = $1
+             ORDER BY canonical, alias",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?
+        .into_iter()
+        .map(alias_from_row)
+        .collect()
+    }
+
+    async fn tag_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT tag, COUNT(*) FROM bookmarks, unnest(tags) AS tag
+             WHERE user_id = $1
+             GROUP BY tag
+             ORDER BY tag",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)
+    }
+
+    async fn insert_aliases_if_absent(
+        &self,
+        user_id: Uuid,
+        aliases: &[NewTagAlias],
+    ) -> Result<Vec<TagAlias>, DomainError> {
+        if aliases.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keys: Vec<&str> = aliases.iter().map(|a| a.alias_key.as_str()).collect();
+        let spellings: Vec<&str> = aliases.iter().map(|a| a.alias.as_str()).collect();
+        let canonicals: Vec<&str> = aliases.iter().map(|a| a.canonical.as_str()).collect();
+        sqlx::query(
+            "INSERT INTO tag_aliases (user_id, alias_key, alias, canonical, source)
+             SELECT $1, k, a, c, $5 FROM UNNEST($2::text[], $3::text[], $4::text[]) AS t(k, a, c)
+             ON CONFLICT (user_id, alias_key) DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(&keys)
+        .bind(&spellings)
+        .bind(&canonicals)
+        .bind(AliasSource::Normalize.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        sqlx::query_as::<_, AliasRow>(
+            "SELECT alias_key, alias, canonical, source, batch_id FROM tag_aliases
+             WHERE user_id = $1 AND alias_key = ANY($2)",
+        )
+        .bind(user_id)
+        .bind(&keys)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?
+        .into_iter()
+        .map(alias_from_row)
+        .collect()
+    }
+
+    async fn replace_pending_proposals(
+        &self,
+        user_id: Uuid,
+        source: ProposalSource,
+        proposals: &[NewTagMergeProposal],
+    ) -> Result<Vec<TagMergeProposal>, DomainError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        sqlx::query(
+            "DELETE FROM tag_merge_proposals
+             WHERE user_id = $1 AND source = $2 AND status = 'pending'",
+        )
+        .bind(user_id)
+        .bind(source.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let dismissed: HashSet<Vec<String>> = sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT members FROM tag_merge_proposals
+             WHERE user_id = $1 AND status = 'dismissed'",
+        )
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?
+        .iter()
+        .map(|members| sorted(members))
+        .collect();
+
+        let mut out = Vec::with_capacity(proposals.len());
+        for proposal in proposals {
+            let members = sorted(&proposal.members);
+            if dismissed.contains(&members) {
+                continue;
+            }
+            let row = sqlx::query_as::<_, ProposalRow>(&format!(
+                "INSERT INTO tag_merge_proposals (user_id, canonical, members, source, confidence)
+                 VALUES ($1, $2, $3, $4, $5)
+                 RETURNING {PROPOSAL_COLUMNS}"
+            ))
+            .bind(user_id)
+            .bind(&proposal.canonical)
+            .bind(&members)
+            .bind(source.as_str())
+            .bind(proposal.confidence.as_str())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            out.push(proposal_from_row(row)?);
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(out)
+    }
+
+    async fn list_proposals(
+        &self,
+        user_id: Uuid,
+        status: Option<ProposalStatus>,
+    ) -> Result<Vec<TagMergeProposal>, DomainError> {
+        sqlx::query_as::<_, ProposalRow>(&format!(
+            "SELECT {PROPOSAL_COLUMNS} FROM tag_merge_proposals
+             WHERE user_id = $1 AND ($2::text IS NULL OR status = $2)
+             ORDER BY created_at DESC, canonical"
+        ))
+        .bind(user_id)
+        .bind(status.map(ProposalStatus::as_str))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?
+        .into_iter()
+        .map(proposal_from_row)
+        .collect()
+    }
+
+    async fn dismiss_proposals(&self, user_id: Uuid, ids: &[Uuid]) -> Result<u64, DomainError> {
+        sqlx::query(
+            "UPDATE tag_merge_proposals SET status = 'dismissed', decided_at = now()
+             WHERE user_id = $1 AND id = ANY($2) AND status = 'pending'",
+        )
+        .bind(user_id)
+        .bind(ids)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected())
+        .map_err(db_err)
+    }
+
+    async fn apply_proposals(
+        &self,
+        user_id: Uuid,
+        ids: &[Uuid],
+    ) -> Result<TagChangeBatch, DomainError> {
+        let ids: Vec<Uuid> = ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if ids.is_empty() {
+            return Err(DomainError::InvalidInput("no proposals selected".into()));
+        }
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let proposals = sqlx::query_as::<_, ProposalRow>(&format!(
+            "SELECT {PROPOSAL_COLUMNS} FROM tag_merge_proposals
+             WHERE user_id = $1 AND id = ANY($2)
+             ORDER BY created_at, id
+             FOR UPDATE"
+        ))
+        .bind(user_id)
+        .bind(&ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?
+        .into_iter()
+        .map(proposal_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+        if proposals.len() != ids.len() {
+            return Err(DomainError::NotFound);
+        }
+        if proposals
+            .iter()
+            .any(|p| p.status != ProposalStatus::Pending)
+        {
+            return Err(DomainError::InvalidInput(
+                "only pending proposals can be applied".into(),
+            ));
+        }
+
+        let kind = if proposals.iter().any(|p| p.source == ProposalSource::Llm) {
+            ChangeKind::LlmMerge
+        } else {
+            ChangeKind::Normalize
+        };
+        let merges: Vec<TagMerge> = proposals.iter().map(TagMergeProposal::merge).collect();
+        let batch = apply_merges_tx(&mut tx, user_id, kind, &merges).await?;
+        sqlx::query(
+            "UPDATE tag_merge_proposals
+             SET status = 'applied', batch_id = $3, decided_at = now()
+             WHERE user_id = $1 AND id = ANY($2)",
+        )
+        .bind(user_id)
+        .bind(&ids)
+        .bind(batch.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(batch)
+    }
+
+    async fn apply_merges(
+        &self,
+        user_id: Uuid,
+        kind: ChangeKind,
+        merges: &[TagMerge],
+    ) -> Result<TagChangeBatch, DomainError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let batch = apply_merges_tx(&mut tx, user_id, kind, merges).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(batch)
+    }
+
+    async fn undo_batch(
+        &self,
+        user_id: Uuid,
+        batch_id: Uuid,
+    ) -> Result<TagChangeBatch, DomainError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let batch = sqlx::query_as::<_, BatchRow>(&format!(
+            "SELECT {BATCH_COLUMNS} FROM tag_change_batches
+             WHERE id = $1 AND user_id = $2
+             FOR UPDATE"
+        ))
+        .bind(batch_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?
+        .ok_or(DomainError::NotFound)
+        .and_then(batch_from_row)?;
+        if batch.undone_at.is_some() {
+            return Err(DomainError::InvalidInput(
+                "this change was already undone".into(),
+            ));
+        }
+
+        let blocked = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM tag_change_batches later
+                 WHERE later.user_id = $1 AND later.undone_at IS NULL
+                   AND later.created_at > $3
+                   AND (EXISTS (SELECT 1 FROM tag_change_snapshots ls
+                                JOIN tag_change_snapshots mine
+                                  ON mine.bookmark_id = ls.bookmark_id AND mine.batch_id = $2
+                                WHERE ls.batch_id = later.id)
+                        OR EXISTS (SELECT 1 FROM tag_change_alias_snapshots la
+                                   JOIN tag_change_alias_snapshots mine
+                                     ON mine.alias_key = la.alias_key AND mine.batch_id = $2
+                                   WHERE la.batch_id = later.id)))",
+        )
+        .bind(user_id)
+        .bind(batch.id)
+        .bind(batch.created_at)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if blocked {
+            return Err(DomainError::InvalidInput(
+                "undo the newer change first".into(),
+            ));
+        }
+
+        let snapshots = sqlx::query_as::<_, (Uuid, Vec<String>, Vec<String>, Vec<String>)>(
+            "SELECT b.id, b.tags, s.tags_before, s.tags_after
+             FROM tag_change_snapshots s
+             JOIN bookmarks b ON b.id = s.bookmark_id AND b.user_id = $2
+             WHERE s.batch_id = $1
+             ORDER BY b.id
+             FOR UPDATE OF b",
+        )
+        .bind(batch.id)
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        for (id, current, before, after) in snapshots {
+            let restored = undo_tags(&current, &before, &after);
+            if restored != current {
+                sqlx::query(
+                    "UPDATE bookmarks SET tags = $1, updated_at = now() WHERE id = $2 AND user_id = $3",
+                )
+                .bind(&restored)
+                .bind(id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            }
+        }
+
+        let alias_snapshots = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<Uuid>,
+                Option<DateTime<Utc>>,
+            ),
+        >(
+            "SELECT alias_key, alias_before, canonical_before, source_before, batch_id_before,
+                    created_at_before
+             FROM tag_change_alias_snapshots
+             WHERE batch_id = $1",
+        )
+        .bind(batch.id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        for (key, alias, canonical, source, before_batch, created_at) in alias_snapshots {
+            match (alias, canonical, source, created_at) {
+                (Some(alias), Some(canonical), Some(source), Some(created_at)) => {
+                    sqlx::query(
+                        "INSERT INTO tag_aliases
+                            (user_id, alias_key, alias, canonical, source, batch_id, created_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                         ON CONFLICT (user_id, alias_key) DO UPDATE
+                         SET alias = EXCLUDED.alias, canonical = EXCLUDED.canonical,
+                             source = EXCLUDED.source, batch_id = EXCLUDED.batch_id,
+                             created_at = EXCLUDED.created_at",
+                    )
+                    .bind(user_id)
+                    .bind(&key)
+                    .bind(alias)
+                    .bind(canonical)
+                    .bind(source)
+                    .bind(before_batch)
+                    .bind(created_at)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+                }
+                _ => {
+                    sqlx::query("DELETE FROM tag_aliases WHERE user_id = $1 AND alias_key = $2")
+                        .bind(user_id)
+                        .bind(&key)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db_err)?;
+                }
+            }
+        }
+
+        sqlx::query(
+            "UPDATE tag_merge_proposals
+             SET status = 'pending', batch_id = NULL, decided_at = NULL
+             WHERE user_id = $1 AND batch_id = $2",
+        )
+        .bind(user_id)
+        .bind(batch.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        let undone = sqlx::query_as::<_, BatchRow>(&format!(
+            "UPDATE tag_change_batches SET undone_at = now()
+             WHERE id = $1
+             RETURNING {BATCH_COLUMNS}"
+        ))
+        .bind(batch.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        batch_from_row(undone)
+    }
+
+    async fn list_batches(
+        &self,
+        user_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<TagChangeBatch>, DomainError> {
+        sqlx::query_as::<_, BatchRow>(&format!(
+            "SELECT {BATCH_COLUMNS} FROM tag_change_batches
+             WHERE user_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2"
+        ))
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?
+        .into_iter()
+        .map(batch_from_row)
+        .collect()
+    }
+}

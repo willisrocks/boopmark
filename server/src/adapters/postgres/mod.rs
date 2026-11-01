@@ -3,6 +3,7 @@ pub mod bookmark_repo;
 pub mod invite_repo;
 pub mod llm_settings_repo;
 pub mod session_repo;
+pub mod tag_alias_repo;
 pub mod user_repo;
 
 use sqlx::PgPool;

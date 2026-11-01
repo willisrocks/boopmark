@@ -12,5 +12,7 @@ pub mod metadata;
 pub mod screenshot;
 pub mod session_repo;
 pub mod storage;
+pub mod tag_alias_repo;
 pub mod tag_consolidator;
+pub mod tag_resolver;
 pub mod user_repo;
