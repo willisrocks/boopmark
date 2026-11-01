@@ -4,8 +4,9 @@
 //!
 //! ```text
 //! EMBEDDING_BACKEND=disabled | openai | fastembed     (default: disabled)
-//! EMBEDDING_MODEL=text-embedding-3-small              (or BAAI/bge-small-en-v1.5)
-//! EMBEDDING_DIMENSIONS=512                            (openai only; default: native size)
+//! EMBEDDING_MODEL=text-embedding-3-large              (fastembed default: BAAI/bge-small-en-v1.5)
+//! EMBEDDING_DIMENSIONS=1024                           (openai only; default: 1024 for the default
+//!                                                     model, else the model's native size)
 //! OPENAI_EMBEDDING_API_KEY=sk-...                     (operator key, not a user's BYO key)
 //! ```
 //!
@@ -53,16 +54,20 @@ impl EmbeddingSettings {
             Some("fastembed") => EmbeddingBackend::Fastembed,
             _ => EmbeddingBackend::Disabled,
         };
+        let model = get("EMBEDDING_MODEL").filter(|m| !m.trim().is_empty());
+        // The measured production choice: text-embedding-3-large shortened
+        // to 1,024 dimensions, which matches a partial HNSW index.
+        let default_dims = (backend == EmbeddingBackend::OpenAi && model.is_none()).then_some(1024);
         let default_model = match backend {
             EmbeddingBackend::Fastembed => "BAAI/bge-small-en-v1.5",
-            _ => "text-embedding-3-small",
+            _ => "text-embedding-3-large",
         };
         Self {
             backend,
-            model: get("EMBEDDING_MODEL")
-                .filter(|m| !m.trim().is_empty())
-                .unwrap_or_else(|| default_model.to_string()),
-            dimensions: get("EMBEDDING_DIMENSIONS").and_then(|d| d.trim().parse().ok()),
+            model: model.unwrap_or_else(|| default_model.to_string()),
+            dimensions: get("EMBEDDING_DIMENSIONS")
+                .and_then(|d| d.trim().parse().ok())
+                .or(default_dims),
             openai_api_key: get("OPENAI_EMBEDDING_API_KEY").filter(|k| !k.trim().is_empty()),
         }
     }
@@ -168,8 +173,8 @@ impl Embedder for DisabledEmbedder {
 }
 
 /// OpenAI `/v1/embeddings`. `text-embedding-3-*` models take a `dimensions`
-/// parameter (shortened Matryoshka output), which keeps vectors small enough
-/// for `halfvec(512)`.
+/// parameter (shortened Matryoshka output); production stores
+/// text-embedding-3-large at 1,024 dimensions as `halfvec`.
 #[derive(Clone)]
 pub struct OpenAiEmbedder {
     client: reqwest::Client,
@@ -495,8 +500,21 @@ mod tests {
             _ => None,
         });
         assert_eq!(openai.backend, EmbeddingBackend::OpenAi);
-        assert_eq!(openai.model, "text-embedding-3-small");
+        assert_eq!(openai.model, "text-embedding-3-large");
         assert_eq!(openai.dimensions, Some(512));
+
+        let openai_default = EmbeddingSettings::from_lookup(|key| {
+            (key == "EMBEDDING_BACKEND").then(|| "openai".to_string())
+        });
+        assert_eq!(openai_default.model, "text-embedding-3-large");
+        assert_eq!(openai_default.dimensions, Some(1024));
+
+        let small_native = EmbeddingSettings::from_lookup(|key| match key {
+            "EMBEDDING_BACKEND" => Some("openai".into()),
+            "EMBEDDING_MODEL" => Some("text-embedding-3-small".into()),
+            _ => None,
+        });
+        assert_eq!(small_native.dimensions, None);
 
         let local = EmbeddingSettings::from_lookup(|key| {
             (key == "EMBEDDING_BACKEND").then(|| "fastembed".to_string())

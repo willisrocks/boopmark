@@ -24,8 +24,10 @@ News articles, and 72 real HN links whose fetch failed. On 48 hand-labelled
 queries (keyword, natural-language, deep-in-the-body, typo, prefix, and
 failed-link):
 
-- **The recommended hybrid scores nDCG@10 0.926.** On the original 24
-  queries it scores 0.932 (the two-leg version scored 0.936 there).
+- **The recommended hybrid scores nDCG@10 0.960 with the recommended
+  embedder, `text-embedding-3-large` at 1,024 dimensions**, and 0.925 with
+  the free local bge-small. On the original 24 queries it scores 0.962
+  (bge-small: 0.932).
 - **Today's search scores 0.053** and returns nothing for 92% of the
   queries.
 - **BM25 is not needed.** Every hybrid built on Postgres built-ins beats
@@ -42,11 +44,19 @@ recommendation holds on either provider. Neither provider offers
 ParadeDB/BM25.
 
 Embeddings go through an `Embedder` port with OpenAI, local fastembed and
-disabled adapters, chosen by configuration. The production default is the
-operator-paid `text-embedding-3-small`, at about **$0.05 per 1,000
-bookmarks** to ingest. The hosted model's quality is measured by a helper
-with the real key; the harness is ready, see
-[Hosted measurement](#hosted-measurement).
+disabled adapters, chosen by configuration.
+
+- **Production: operator-paid `text-embedding-3-large`, shortened to 1,024
+  dimensions** (`halfvec(1024)`). It ingests at about **$0.35 per 1,000
+  bookmarks**, so the current 334 bookmarks cost about $0.12 once. It scores
+  the same as the full 3,072 dimensions (0.960) with a third of the index,
+  and beats `text-embedding-3-small` at any size (0.944 at 1,536).
+  The [Hosted measurement](#hosted-measurement) has the numbers; the
+  helper's run cost $0.2032.
+- **Self-hosters get `disabled` by default:** full text + trigram (0.791),
+  with no key and no extra RAM. One env var switches on OpenAI with their
+  own key. A `local-embeddings` build adds the free bge-small (0.925), which
+  needs a ≥1 GB VM.
 
 ## Problem
 
@@ -335,7 +345,11 @@ index gave the same rankings and latency at this size.
 | bge-small-en-v1.5, metadata only | 384 | 39 docs/s | 0.813 | 0.915 |
 | all-MiniLM-L6-v2, article chunks | 384 | 35 chunks/s | 0.919 | 0.926 |
 | bge-base-en-v1.5, article chunks | 768 | 3.2 chunks/s | 0.905 | 0.941 |
-| OpenAI text-embedding-3-small / -large | 1536 / 3072, and truncated to 512 / 1024 | — | pending | pending: the helper runs `hosted_eval.py`; see [Hosted measurement](#hosted-measurement) |
+| OpenAI text-embedding-3-small (1536) / -large (1024), original 24 | 1536 / 1024 | hosted | 0.920 / 0.965 | 0.940 / 0.967 |
+
+The hosted rows come from the helper's run on the rebuilt corpus. All 48
+queries, every truncation and the three-leg hybrid are in
+[Hosted measurement](#hosted-measurement).
 
 ### Do we need BM25? No.
 
@@ -398,6 +412,10 @@ How much of the gap it closes (nDCG@10, `eval.py` "Fallback gap"):
 | vector (chunks) | 0.061 → **0.992** | 0.178 → 0.725 (0.934) | 72% |
 | hybrid fts AND + vector | 0.061 → **0.918** | 0.175 → 0.688 (0.935) | **68%** |
 | hybrid fts AND+ + vector | 0.061 → 0.926 | 0.175 → 0.665 (0.910) | 67% |
+| *hosted embedders (same harness, rebuilt corpus)* | | | |
+| 3-leg hybrid, te3-small @ 1536 | 0.061 → 0.926 | 0.174 → 0.799 (0.959) | 80% |
+| 3-leg hybrid, te3-large @ 1024 | 0.061 → 0.926 | 0.188 → 0.850 (0.976) | **84%** |
+| vector, te3-large @ 1024 | 0.061 → 1.000 | 0.208 → 0.857 (0.935) | 89% |
 
 - **Without the fallback, a failed link cannot be found at all.** The
   0.061 comes from one query whose second relevant page, a New Yorker
@@ -422,10 +440,23 @@ How much of the gap it closes (nDCG@10, `eval.py` "Fallback gap"):
 3. **The hybrid beats either leg on keywords** (0.990 vs 0.960 for vector
    alone): exact identifiers favour the lexical leg. The trigram leg adds
    prefixes (0.820 → 0.904) at no measured cost elsewhere.
-4. **The three-leg hybrid and the two-leg "trgm + vector" are within
-   noise** (0.926 vs 0.931). The three-leg version keeps keyword nDCG at
-   0.990 instead of 0.960. Identifiers in tech bookmarks are common, so it
-   is the recommendation.
+4. **The three-leg hybrid and the two-leg "trgm + vector" are close, and
+   which one wins depends on the embedder.**
+   - With bge-small: 0.926 vs 0.931, within noise. The three-leg version
+     keeps keyword nDCG at 0.990 instead of 0.960.
+   - With the hosted models, two legs score higher on all 48 queries:
+     te3-small 0.949 vs 0.944, te3-large@1024 0.974 vs 0.960. The whole
+     difference is in the 10 failed-link queries (1.000 vs 0.926). There,
+     scraped articles whose body contains every query word outrank the
+     metadata-only bookmark in the full-text leg.
+   - On the original 24 queries, three legs win or tie with every
+     embedder (te3-large@1024: 0.962 vs 0.958).
+   - **Three legs stay the recommendation.** It is one query shape for
+     every backend; on te3-small and bge-small it gains +0.03–0.07 on
+     keyword queries; quotes and `-exclusion` need the full-text leg; and
+     the no-embedding mode needs it anyway. Dropping the full-text leg when
+     the embedder is te3-large is a measured, one-CTE option (open
+     question 1).
 5. **Caveats.**
    - 48 queries is still small: one query moves nDCG by about 0.02.
    - The corpus favours vectors, because its topics are distinct.
@@ -448,7 +479,7 @@ How much of the gap it closes (nDCG@10, `eval.py` "Fallback gap"):
 - **Trigram leg:** `word_similarity($q, meta_text)` over title +
   description, with a GIN `gin_trgm_ops` index. It catches prefixes and
   typos in the words people actually remember: the title.
-- **Vector leg:** `bookmark_chunks(embedding halfvec(N))` with an HNSW
+- **Vector leg:** `bookmark_chunks(embedding halfvec)` with an HNSW
   cosine index. Each bookmark scores its best chunk (`min(distance)`). A
   failed fetch contributes one metadata chunk.
 - **Fusion:** RRF with k=60 over the top 50 of each leg, in one SQL
@@ -505,22 +536,69 @@ How much of the gap it closes (nDCG@10, `eval.py` "Fallback gap"):
 
 | option | quality (this eval) | ingest cost / 1k bookmarks | query cost | ops | verdict |
 |---|---|---|---|---|---|
-| **E1. Operator-paid hosted, `text-embedding-3-small`** | pending ([Hosted measurement](#hosted-measurement)) | 2.7M tok × $0.02/M = **$0.054** | ~12 tok/query: $0.24 per 1M queries | API key in Fly secrets; network call per query | ⭐ **production default** |
-| E1'. Hosted, `text-embedding-3-large` | pending | $0.35 | $1.56 per 1M queries | same | Only if it measures clearly better |
+| **E1. Operator-paid hosted, `text-embedding-3-large` @ 1024** | vector 0.954 / hybrid **0.960** (3072: 0.957 / 0.960; 512: 0.942 / 0.954) | 2.7M tok × $0.13/M = **$0.35** | ~12 tok/query: $1.56 per 1M queries; 286 ms p50 | API key in Fly secrets; network call per query | ⭐ **production default** |
+| E1'. Hosted, `text-embedding-3-small` | 1536: 0.935 / 0.944; 512: 0.903 / 0.932 | $0.054 | $0.24 per 1M queries; 187 ms p50 | same | Cheaper, measurably worse: rejected |
 | E1''. Hosted, Voyage `voyage-4-lite` | not measured | $0.054 | same as E1 | same; another adapter behind the same port | Equivalent alternative |
-| **E2. Local fastembed (`bge-small-en-v1.5`, ONNX)** | vector 0.923 / hybrid 0.926 | $0 API cost; measured **9.6 chunks/s** (≈1 bookmark/s) on 4 shared vCPUs | ≈5 ms CPU | about 130 MB model + ONNX Runtime; does **not** fit next to the app in the current 512 MB `shared-cpu-1x` VM; needs ≥1 GB | ⭐ **self-host option** |
+| **E2. Local fastembed (`bge-small-en-v1.5`, ONNX)** | vector 0.923 / hybrid 0.926 | $0 API cost; measured **9.6 chunks/s** (≈1 bookmark/s) on 4 shared vCPUs | ≈5–25 ms CPU (25 ms p50 on the helper's Mac) | about 130 MB model + ONNX Runtime; does **not** fit next to the app in the current 512 MB `shared-cpu-1x` VM; needs ≥1 GB | ⭐ **self-host option** |
 | E3. Per-user BYO key (like `user_llm_settings`) | — | user pays | user pays; needs the user's key on every search | Anthropic, the default text provider, has no embeddings API, so most users get nothing. Index coverage differs per user. A key rotation or removal breaks query embedding, and a model switch means a full re-embed per user. | reject for v1 |
 | E4. `disabled` (no vectors) | lexical-only fusion 0.791 | $0 | $0 | none | ⭐ fallback / default when unconfigured |
 
 Why **operator-paid** over BYO, even though BYO matches today's LLM settings:
 
-- **Embeddings cost very little.** Ingesting 1k bookmarks costs about $0.05,
-  and a heavy user's searches cost fractions of a cent per month.
+- **Embeddings cost very little.** Ingesting 1k bookmarks costs about $0.35
+  with te3-large, and a heavy user's searches cost fractions of a cent per
+  month.
 - **The index must be one consistent vector space.** That is also why the
   `Embedder` port carries no per-request API key, unlike `LlmClient`.
 
 Self-hosters choose the backend the same way they choose `STORAGE_BACKEND`,
 `SCREENSHOT_BACKEND` or `METADATA_FALLBACK_BACKEND`.
+
+#### Production embedder: `text-embedding-3-large` at 1,024 dimensions
+
+Measured on 48 queries (`results/hosted-2026-11-01.json`). Storage is per
+1,000 bookmarks (10.3 chunks each), scaled from the prototype's measured
+sizes (see Cost).
+
+| embedder | 3-leg nDCG | vector alone | ingest $/1k bookmarks | query p50¹ | chunks + HNSW, `halfvec` | HNSW alone | fixed cost |
+|---|---|---|---|---|---|---|---|
+| bge-small, local (384) | 0.925 | 0.923 | $0 | 25 ms | ≈30 MB | ≈13 MB | VM ≥1 GB: ≈+$5/mo; ONNX in the image |
+| te3-small @ 512 | 0.932 | 0.903 | $0.054 | 187 ms | ≈35 MB | ≈15 MB | none |
+| te3-small @ 1536 | 0.944 | 0.935 | $0.054 | 187 ms | ≈75 MB | ≈36 MB | none |
+| te3-large @ 512 | 0.954 | 0.942 | $0.35 | 286 ms | ≈35 MB | ≈15 MB | none |
+| **te3-large @ 1024** ⭐ | **0.960** | 0.954 | $0.35 | 286 ms | ≈55 MB | ≈26 MB | none |
+| te3-large @ 3072 | 0.960 | 0.957 | $0.35 | 286 ms | ≈135 MB | ≈68 MB | none |
+
+¹ Query-embedding round trip from the helper's Mac, 10 queries. From Fly to
+OpenAI it will differ; it is not measured.
+
+Why this one:
+
+- **Quality.** te3-large leads at every size. At 1,024 it equals 3,072 on
+  the hybrid and is ahead of te3-small@1536 by 0.016 (+0.030 vector alone),
+  with the gains in natural-language (0.904 vs 0.839) and prefix queries
+  (0.961 vs 0.939). The gap from 1,024 to 512 is 0.006, under one query.
+- **Cost.** The price difference is real in ratio (6.5×) and irrelevant in
+  dollars: about $0.12 to backfill production once, then $0.35 per
+  1,000 new bookmarks. Local bge-small saves that, but needs a bigger VM,
+  which costs more per month than te3-large costs per year at this
+  library size.
+- **Index size.** At production's 334 bookmarks, the chunks and index take
+  about 18 MB. The 1 GB MPG plan holds the HNSW for roughly 20k
+  bookmarks at 1,024 dimensions. Past that, re-embed at 512 from the
+  stored text (no refetch, about $0.35 per 1,000) or move to Starter.
+- **Latency.** te3-large adds about 100 ms per search over te3-small. The
+  search box is debounced and the 1.5 s query timeout falls back to the
+  lexical legs, so the risk is bounded. If it bothers users, te3-large@512
+  should not help (the latency is the model, not the size); te3-small@1536
+  is the fallback choice, at −0.016.
+
+**Self-hosters by default:** `EMBEDDING_BACKEND=disabled`, the full-text +
+trigram search (0.791, against 0.053 today), with no key, no extra RAM and
+no ONNX. `EMBEDDING_BACKEND=openai` with their own key gives the production
+setup (te3-large@1024 is the default model and size). A `local-embeddings`
+build with `EMBEDDING_BACKEND=fastembed` gives bge-small for free (0.925),
+on a VM with ≥1 GB.
 
 ---
 
@@ -530,8 +608,8 @@ Self-hosters choose the backend the same way they choose `STORAGE_BACKEND`,
 
 ```
 EMBEDDING_BACKEND=disabled | openai | fastembed     # default: disabled
-EMBEDDING_MODEL=text-embedding-3-small              # or BAAI/bge-small-en-v1.5
-EMBEDDING_DIMENSIONS=512                            # must match the migration's column (see Storage)
+EMBEDDING_MODEL=text-embedding-3-large              # openai default; fastembed default: BAAI/bge-small-en-v1.5
+EMBEDDING_DIMENSIONS=1024                           # openai default for te3-large; must match an HNSW index (see Schema)
 OPENAI_EMBEDDING_API_KEY=...                        # operator key; separate from users' BYO keys
 ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so           # fastembed only
 ARTICLE_INGEST_CONCURRENCY=4
@@ -581,12 +659,18 @@ CREATE TABLE bookmark_chunks (
     user_id     UUID NOT NULL,
     ord         INT  NOT NULL,     -- a failed fetch has one chunk, ord 0, made of the metadata
     text        TEXT NOT NULL,     -- the passage, shown as a snippet
-    embedding   halfvec(512) NOT NULL,
+    embedding   halfvec NOT NULL,  -- no fixed dimension: one schema for every backend
     PRIMARY KEY (bookmark_id, ord)
 );
 CREATE INDEX idx_bookmark_chunks_user ON bookmark_chunks(user_id);
-CREATE INDEX idx_bookmark_chunks_hnsw ON bookmark_chunks
-    USING hnsw (embedding halfvec_cosine_ops);
+-- One partial expression index per supported default size: te3-large@1024
+-- (production, and the openai default) and bge-small@384 (fastembed).
+CREATE INDEX idx_bookmark_chunks_hnsw_1024 ON bookmark_chunks
+    USING hnsw ((embedding::halfvec(1024)) halfvec_cosine_ops)
+    WHERE vector_dims(embedding) = 1024;
+CREATE INDEX idx_bookmark_chunks_hnsw_384 ON bookmark_chunks
+    USING hnsw ((embedding::halfvec(384)) halfvec_cosine_ops)
+    WHERE vector_dims(embedding) = 384;
 
 -- Backfill queue: every existing bookmark starts pending, already searchable
 -- by its metadata in the lexical legs.
@@ -608,17 +692,23 @@ FROM bookmarks;
   the title, description, URL, tags or text change, in the same transaction
   as the bookmark update. (`eval.py` stores `unaccent(meta_text)`; that is
   optional.)
-- **Why `halfvec(512)`.** `text-embedding-3-small` supports shortened
-  Matryoshka output (`dimensions: 512`). Combined with half-precision
-  storage (pgvector ≥ 0.7), that is 1 KB per chunk instead of 6 KB at
-  1536-d float32, which keeps the HNSW index in RAM on the 1 GB plan.
-  - The local `bge-small` (384-d) uses `halfvec(384)`.
-  - Because the dimension lives in the migration, **changing models is a
-    migration plus a re-embed backfill**. `embedded_model`
-    (`Embedder::model_id()`, which includes the dimension) lets the worker
-    find stale rows.
-  - The hosted harness measures the 512-d truncation directly, from the
-    same API call.
+- **Why `halfvec` at 1,024 dimensions.** `text-embedding-3-large` supports
+  shortened Matryoshka output (`dimensions: 1024`), measured equal to the
+  full 3,072 on the hybrid (0.960). With half precision (pgvector ≥ 0.7)
+  that is 2 KB per chunk instead of 12 KB at 3,072-d float32. See
+  [Production embedder](#production-embedder-text-embedding-3-large-at-1024-dimensions).
+- **Why no fixed dimension in the column.** A self-hoster on bge-small
+  (384) and production on te3-large (1,024) run the same migration.
+  pgvector indexes an untyped column through a partial expression index
+  per size (pgvector README, "Can I store vectors with different
+  dimensions in the same column?"). The vector leg casts to the configured
+  size and filters on it (Search query), so it uses the matching index.
+  - Any other size still works, as an exact scan of the user's chunks
+    (13 ms for 5k chunks, measured). A deployment that wants an index for
+    it adds one more partial index.
+  - **Changing models is a re-embed backfill, with no schema change.**
+    `embedded_model` (`Embedder::model_id()`, which includes the dimension)
+    lets the worker find stale rows; the stored text means no refetch.
 - **Self-hosting / dev / CI** need a Postgres with pgvector:
   - `docker-compose.yml`: `postgres:16-alpine` → `pgvector/pgvector:pg16`
     (it includes contrib, so `pg_trgm` too);
@@ -665,7 +755,7 @@ pub struct Embeddings {
 }
 
 pub trait Embedder: Send + Sync {
-    fn model_id(&self) -> &str;   // "<backend>:<model>@<dims>", e.g. "openai:text-embedding-3-small@512"
+    fn model_id(&self) -> &str;   // "<backend>:<model>@<dims>", e.g. "openai:text-embedding-3-large@1024"
     fn dims(&self) -> usize;      // 0 when disabled
     fn enabled(&self) -> bool { true }
     fn embed(&self, inputs: Vec<String>, kind: EmbedKind)
@@ -860,10 +950,11 @@ trg AS (
     ORDER BY word_similarity($2, meta_text) DESC, bookmark_id LIMIT 50
 ),
 nn AS (
-    SELECT bookmark_id, embedding <=> $3 AS dist
+    -- 1024 = Embedder::dims(), inlined by the repository so the partial index matches
+    SELECT bookmark_id, embedding::halfvec(1024) <=> $3::halfvec(1024) AS dist
     FROM bookmark_chunks
-    WHERE user_id = $1
-    ORDER BY embedding <=> $3 LIMIT 200
+    WHERE user_id = $1 AND vector_dims(embedding) = 1024
+    ORDER BY embedding::halfvec(1024) <=> $3::halfvec(1024) LIMIT 200
 ),
 vec AS (
     SELECT bookmark_id, row_number() OVER (ORDER BY min(dist), bookmark_id) AS r
@@ -944,8 +1035,9 @@ The search input in `templates/components/header.html` keeps its
   minutes, and costs about $0.02 with E1.
 - Old bookmarks suffer link rot. Expect a higher failure rate than the 33%
   measured on popular HN links; the metadata fallback covers them.
-- Changing the embedding model later means a migration for the new dimension
-  plus `UPDATE bookmark_contents SET embedded_model = NULL`. The worker then
+- Changing the embedding model later means `UPDATE bookmark_contents SET
+  embedded_model = NULL` (plus a partial HNSW index if the new size has
+  none). The worker then
   re-embeds from the stored text, with **no refetch**. The text is kept for
   exactly this reason.
 
@@ -955,32 +1047,43 @@ The search input in `templates/components/header.html` keeps its
 10.3 chunks per scraped bookmark. Storage is scaled from the prototype's 490
 bookmarks.
 
-| item | E1 hosted (te3-small, 512-d halfvec) | E2 local (bge-small, 384-d halfvec) | E4 disabled |
+| item | E1 hosted (te3-large, 1024-d halfvec) | E2 local (bge-small, 384-d halfvec) | E4 disabled |
 |---|---|---|---|
-| ingest: embedding API | 2.7M tok × $0.02/M = **$0.054** (te3-large: $0.35) | $0 | $0 |
+| ingest: embedding API | 2.7M tok × $0.13/M = **$0.35** (te3-small: $0.054) | $0 | $0 |
 | ingest: compute | negligible | ≈17 min of CPU (4 vCPU) | negligible |
 | storage: article text + tsvector + GIN + trigram on metadata² | ≈28 MB | ≈28 MB | ≈28 MB |
-| storage: chunks + HNSW | ≈35 MB¹ | ≈30 MB¹ | 0 |
-| storage $ on MPG ($0.28/GB-mo) | ≈$0.018/mo | ≈$0.016/mo | ≈$0.008/mo |
-| query | ≈12 tok → **$0.00000024**/query ($0.24 per 1M) + one HTTPS round trip | ≈5 ms CPU per query (measured p50 4.1–6.5 ms) | $0 |
+| storage: chunks + HNSW | ≈55 MB¹ | ≈30 MB¹ | 0 |
+| storage $ on MPG ($0.28/GB-mo) | ≈$0.023/mo | ≈$0.016/mo | ≈$0.008/mo |
+| query | ≈12 tok → **$0.0000016**/query ($1.56 per 1M) + one HTTPS round trip (286 ms p50 from the helper's Mac) | ≈5 ms CPU per query (measured p50 4.1–6.5 ms) | $0 |
 | fixed | none | VM 512 MB → ≥1 GB (about +$5/mo on Fly) | none |
 
 ¹ Measured: the 490-bookmark prototype at 384-d float32 used 24 MB for
 chunks in total, of which 10 MB was the HNSW index; the rest is the vectors,
-the chunk text and TOAST. `halfvec` halves the vector part.
+the chunk text and TOAST. `halfvec` halves the vector part. Other sizes
+are scaled from this at 2 bytes per dimension, twice (heap and HNSW), per
+chunk: about +0.04 MB per 1,000 bookmarks for each extra dimension.
 
 ² The GIN trigram index on `meta_text` measured 752 kB for 562 bookmarks,
 about 1.3 MB per 1,000.
 
-At 50k bookmarks across all users, the chunk index is about 1.5–1.8 GB.
-That stays manageable on Starter (2 GB RAM, $72/mo). On Basic (1 GB),
-queries fall back to a mostly exact scan of the *user's* rows (fine per
-user), and the shared HNSW won't stay cached. Revisit the plan at that size.
+At 50k bookmarks across all users and 1,024 dimensions, chunks + HNSW are
+about 2.8 GB, of which the HNSW is about 1.3 GB (at 512: 1.75 GB and
+0.75 GB). That fits Starter (2 GB RAM, $72/mo). On Basic (1 GB), queries
+fall back to a mostly exact scan of the *user's* rows (fine per user), and
+the shared HNSW won't stay cached. Revisit the plan, or re-embed at 512, at
+about 20k bookmarks.
 
-**Hosted spend while prototyping (this worker):** $0.00. No hosted API was
-called, because no key was available here. The helper's run logs its
-actual spend (model, calls, tokens, USD) in its result file; it is folded in
-below when it arrives.
+**Hosted spend for this track: $0.2032 in total**, all of it the helper's
+run on 2026-11-01 (`results/hosted-2026-11-01.json`, `spend`). This worker
+made no paid call.
+
+| model | calls | tokens | USD |
+|---|---|---|---|
+| `text-embedding-3-small` | 34 | 1,354,960 | $0.0271 |
+| `text-embedding-3-large` | 34 | 1,354,960 | $0.1761 |
+| **total** | 68 | 2,709,920 | **$0.2032** |
+
+The truncated sizes come from the same API responses, at no extra cost.
 
 ---
 
@@ -1005,8 +1108,8 @@ Safeguards and checks:
 - **Spend guard.** Before any call, it projects the spend with tiktoken and
   aborts above `--max-usd 3`. While it runs, it stops at the cap from the
   API's reported usage. It prints only metrics and HTTP status codes.
-- **Expected cost:** about $0.21, for `text-embedding-3-small` (≈$0.03)
-  and `text-embedding-3-large` (≈$0.18).
+- **Cost:** projected $0.21; **actual $0.2032** (te3-small $0.0271,
+  te3-large $0.1761; see Cost). The guard did not trip (`aborted: null`).
 - **What it measures:** each model at its native size and truncated (512
   for small; 1024 and 512 for large), next to the local bge-small baseline
   on the same rebuilt text.
@@ -1017,7 +1120,53 @@ Safeguards and checks:
     pre-flight abort, the missing-key exit, the runtime guard, and the
     spend logged even when the guard trips.
 
-**Results:** pending the helper's run.
+### Results (`results/hosted-2026-11-01.json`)
+
+Run on 2026-11-01 on the helper's Mac. The corpus rebuilt 489 of 490
+documents: 1 missing (its labels dropped), 7 edited since pinning. 48
+queries, scenario `main/fallback`. Truncated sizes are the native vectors
+cut and re-normalised, which is what the API's `dimensions` parameter
+does. The bge-small row is the local baseline on the same rebuilt text; it
+matches the Postgres run (0.923 / 0.926) to within 0.001.
+
+nDCG@10, all 48 queries:
+
+| embedder | vector | fts AND + vector | trgm + vector | **3-leg (recommended SQL)** | 3-leg, orig. 24 | 3-leg MRR | 3-leg R@10 |
+|---|---|---|---|---|---|---|---|
+| bge-small (384), local | 0.923 | 0.917 | 0.930 | **0.925** | 0.932 | 0.948 | 0.954 |
+| te3-small @ 1536 | 0.935 | 0.929 | 0.949 | **0.944** | 0.935 | 0.969 | 0.962 |
+| te3-small @ 512 | 0.903 | 0.902 | 0.933 | **0.932** | 0.931 | 0.958 | 0.962 |
+| te3-large @ 3072 | 0.957 | 0.939 | 0.977 | **0.960** | 0.954 | 0.969 | 0.987 |
+| te3-large @ 1024 ⭐ | 0.954 | 0.939 | 0.974 | **0.960** | 0.962 | 0.969 | 0.984 |
+| te3-large @ 512 | 0.942 | 0.928 | 0.966 | **0.954** | 0.960 | 0.969 | 0.982 |
+
+3-leg nDCG@10 by query type:
+
+| embedder | keyword (7) | natural (9) | deep (8) | typo (8) | prefix (6) | unscraped (10) |
+|---|---|---|---|---|---|---|
+| bge-small (384) | 0.990 | 0.826 | 1.000 | 0.931 | 0.904 | 0.918 |
+| te3-small @ 1536 | 0.982 | 0.839 | 1.000 | 1.000 | 0.939 | 0.926 |
+| te3-small @ 512 | 0.982 | 0.829 | 1.000 | 0.964 | 0.908 | 0.926 |
+| te3-large @ 3072 | 0.994 | 0.883 | 1.000 | 0.998 | 0.988 | 0.926 |
+| te3-large @ 1024 | 0.994 | 0.904 | 1.000 | 0.996 | 0.961 | 0.926 |
+| te3-large @ 512 | 0.990 | 0.900 | 1.000 | 0.992 | 0.931 | 0.926 |
+
+Query-embedding latency (10 queries, p50 / max): bge-small 25 / 175 ms,
+te3-small 187 / 228 ms, te3-large 286 / 357 ms. The hosted numbers include
+the helper's network path to OpenAI.
+
+What it shows:
+
+- **te3-large is the best embedder at every size**, and 1,024 dimensions
+  lose nothing on the hybrid. It is the production choice
+  ([Production embedder](#production-embedder-text-embedding-3-large-at-1024-dimensions)).
+- **te3-small gains less than expected over bge-small** (+0.019 on the
+  hybrid). At 512 it is barely ahead of the free local model.
+- **The fallback closes more of the gap with better vectors:** 84% of the
+  simulated gap with te3-large@1024, against 68% with bge-small.
+- **The unscraped column is flat at 0.926 for every hosted model**: it is
+  set by the full-text leg ranking scraped articles above metadata-only
+  bookmarks (What the numbers say, item 4).
 
 ## Errors and edge cases
 
@@ -1086,7 +1235,8 @@ Safeguards and checks:
    0.791), with `EMBEDDING_BACKEND=disabled`.
 3. **Wire the `Embedder` port** (already on this branch) into `main.rs`,
    along with chunks, the metadata fallback chunk, and the three-leg query.
-   This is the measured step to 0.926.
+   This is the measured step to 0.960 with te3-large@1024 (0.925 with
+   bge-small).
 4. **Settings → Search index panel**, retry and refetch, plus the backfill
    rollout.
 5. **`local-embeddings` build and docs** for self-hosters (ONNX Runtime in
@@ -1094,11 +1244,13 @@ Safeguards and checks:
 
 ## Open questions
 
-1. **Hosted vs local quality.** The helper runs `hosted_eval.py`. The
-   recommendation does not depend on the result: E1 is the production
-   default for operational reasons (RAM on the 512 MB VM, no ONNX in the
-   default build), and the local model already reaches 0.926. A clearly
-   better `-large` would change only `EMBEDDING_MODEL` and the column size.
+1. **Two legs or three with te3-large?** Measured: dropping the full-text
+   leg scores 0.974 vs 0.960 on 48 queries, all of it on failed-link
+   queries, and 0.958 vs 0.962 on the original 24. v1 keeps three legs (one
+   query shape, quotes and `-exclusion`, keyword safety on smaller
+   embedders). Revisit with production query logs; the change is one CTE.
+   Weighting the full-text leg down, or letting metadata-only bookmarks
+   rank on `meta_text` in it, are untested alternatives.
 2. **The Neon leftovers.** Does the "Boopmark - Prod - Neon" project still
    hold data? If so, decide whether to delete it. AGENTS.md:68 should say
    Fly Managed Postgres.
