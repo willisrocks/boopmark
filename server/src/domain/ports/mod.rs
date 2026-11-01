@@ -12,6 +12,8 @@ pub mod metadata;
 pub mod screenshot;
 pub mod session_repo;
 pub mod storage;
+// Merge and undo are called by the /tags page and review screen (later steps).
+#[allow(dead_code)]
 pub mod tag_alias_repo;
 pub mod tag_consolidator;
 pub mod tag_resolver;

@@ -97,6 +97,18 @@ fn batch_from_row(row: BatchRow) -> Result<TagChangeBatch, DomainError> {
     })
 }
 
+/// An alias row as it was before a batch changed it. Every column but the
+/// key is `None` when the row did not exist.
+#[derive(sqlx::FromRow)]
+struct AliasImage {
+    alias_key: String,
+    alias: Option<String>,
+    canonical: Option<String>,
+    source: Option<String>,
+    batch_id: Option<Uuid>,
+    created_at: Option<DateTime<Utc>>,
+}
+
 fn sorted(members: &[String]) -> Vec<String> {
     let mut members = members.to_vec();
     members.sort();
@@ -201,27 +213,24 @@ async fn apply_merges_tx(
     }
 
     let keys: Vec<String> = desired.keys().cloned().collect();
-    let current: HashMap<String, (String, String, String, Option<Uuid>, DateTime<Utc>)> =
-        sqlx::query_as::<_, (String, String, String, String, Option<Uuid>, DateTime<Utc>)>(
-            "SELECT alias_key, alias, canonical, source, batch_id, created_at FROM tag_aliases
-             WHERE user_id = $1 AND alias_key = ANY($2)
-             FOR UPDATE",
-        )
-        .bind(user_id)
-        .bind(&keys)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(db_err)?
-        .into_iter()
-        .map(|(key, alias, canonical, source, batch_id, created_at)| {
-            (key, (alias, canonical, source, batch_id, created_at))
-        })
-        .collect();
+    let current: HashMap<String, AliasImage> = sqlx::query_as::<_, AliasImage>(
+        "SELECT alias_key, alias, canonical, source, batch_id, created_at FROM tag_aliases
+         WHERE user_id = $1 AND alias_key = ANY($2)
+         FOR UPDATE",
+    )
+    .bind(user_id)
+    .bind(&keys)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .map(|image| (image.alias_key.clone(), image))
+    .collect();
 
     let alias_source = kind.alias_source().as_str();
     for (key, (alias, canonical)) in &desired {
         let before = current.get(key);
-        if before.is_some_and(|(_, c, _, _, _)| c == canonical) {
+        if before.is_some_and(|b| b.canonical.as_ref() == Some(canonical)) {
             continue;
         }
         sqlx::query(
@@ -232,11 +241,11 @@ async fn apply_merges_tx(
         )
         .bind(batch.id)
         .bind(key)
-        .bind(before.map(|b| &b.0))
-        .bind(before.map(|b| &b.1))
-        .bind(before.map(|b| &b.2))
-        .bind(before.and_then(|b| b.3))
-        .bind(before.map(|b| b.4))
+        .bind(before.and_then(|b| b.alias.as_ref()))
+        .bind(before.and_then(|b| b.canonical.as_ref()))
+        .bind(before.and_then(|b| b.source.as_ref()))
+        .bind(before.and_then(|b| b.batch_id))
+        .bind(before.and_then(|b| b.created_at))
         .execute(&mut **tx)
         .await
         .map_err(db_err)?;
@@ -567,19 +576,10 @@ impl TagAliasRepository for PostgresPool {
             }
         }
 
-        let alias_snapshots = sqlx::query_as::<
-            _,
-            (
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<Uuid>,
-                Option<DateTime<Utc>>,
-            ),
-        >(
-            "SELECT alias_key, alias_before, canonical_before, source_before, batch_id_before,
-                    created_at_before
+        let alias_snapshots = sqlx::query_as::<_, AliasImage>(
+            "SELECT alias_key, alias_before AS alias, canonical_before AS canonical,
+                    source_before AS source, batch_id_before AS batch_id,
+                    created_at_before AS created_at
              FROM tag_change_alias_snapshots
              WHERE batch_id = $1",
         )
@@ -587,8 +587,13 @@ impl TagAliasRepository for PostgresPool {
         .fetch_all(&mut *tx)
         .await
         .map_err(db_err)?;
-        for (key, alias, canonical, source, before_batch, created_at) in alias_snapshots {
-            match (alias, canonical, source, created_at) {
+        for image in alias_snapshots {
+            let AliasImage {
+                alias_key: key,
+                batch_id: before_batch,
+                ..
+            } = image;
+            match (image.alias, image.canonical, image.source, image.created_at) {
                 (Some(alias), Some(canonical), Some(source), Some(created_at)) => {
                     sqlx::query(
                         "INSERT INTO tag_aliases
