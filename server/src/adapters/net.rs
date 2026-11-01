@@ -86,6 +86,9 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
         || (first & 0xffc0) == 0xfec0 // deprecated site-local fec0::/10
         || (first == 0x0064 && ip.segments()[1] == 0xff9b && ip.segments()[2] == 0x0001) // local-use NAT64 64:ff9b:1::/48
         || (first == 0x2001 && ip.segments()[1] == 0) // Teredo 2001::/32
+        || (first == 0x0100 && ip.segments()[1..4] == [0, 0, 0]) // discard 100::/64
+        || (first == 0x2001 && ip.segments()[1] == 0x0002 && ip.segments()[2] == 0) // benchmarking 2001:2::/48
+        || (first == 0x3fff && ip.segments()[1] & 0xf000 == 0) // documentation 3fff::/20
         || (first == 0x2001 && ip.segments()[1] == 0x0db8)) // documentation 2001:db8::/32
 }
 
@@ -588,10 +591,20 @@ mod tests {
             "2002:a00:1::1",                        // 6to4 of 10.0.0.1
             "2002:c0a8:101::",                      // 6to4 of 192.168.1.1
             "2001:0:4136:e378:8000:63bf:3fff:fdd2", // Teredo
+            "100::1",                               // discard
+            "2001:2::1",                            // benchmarking
+            "3fff:0:1::1",                          // documentation
+            "3fff:fff:ffff::1",                     // documentation, end of the /20
         ] {
             assert!(!is_public_ip(ip.parse().unwrap()), "{ip} is not public");
         }
-        for ip in ["64:ff9b::808:808", "2002:808:808::1"] {
+        for ip in [
+            "64:ff9b::808:808",
+            "2002:808:808::1",
+            "100:0:0:1::1",
+            "2001:3::1",
+            "4000::1",
+        ] {
             assert!(is_public_ip(ip.parse().unwrap()), "{ip} wraps 8.8.8.8");
         }
         assert!(validate_public_url("http://[64:ff9b::a00:1]/").is_err());
