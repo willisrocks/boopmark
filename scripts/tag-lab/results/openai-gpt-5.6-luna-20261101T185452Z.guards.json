@@ -1,0 +1,232 @@
+{
+ "source": "openai-gpt-5.6-luna-20261101T185452Z.json",
+ "mode": "aggregate (no per-pair details in this run)",
+ "wrong_pairs_high": 2,
+ "residual_same_pairs": 102,
+ "rules": {
+  "too-short side": {
+   "wrong_high_vetoed": 1,
+   "wrong_high_left": [
+    [
+     "ai",
+     "tailwind"
+    ]
+   ],
+   "same_pairs_vetoed_upper_bound": 2,
+   "same_pairs_vetoed": [
+    [
+     "c#",
+     "csharp"
+    ],
+    [
+     "c++",
+     "cpp"
+    ]
+   ]
+  },
+  "narrower-topic rule": {
+   "wrong_high_vetoed": 0,
+   "wrong_high_left": [
+    [
+     "c#",
+     "cpp"
+    ],
+    [
+     "ai",
+     "tailwind"
+    ]
+   ],
+   "same_pairs_vetoed_upper_bound": 21,
+   "same_pairs_vetoed": [
+    [
+     "math",
+     "mathematics"
+    ],
+    [
+     "travel",
+     "travelling"
+    ],
+    [
+     "blog",
+     "blogging"
+    ],
+    [
+     "linux",
+     "GNU/Linux"
+    ],
+    [
+     "rails",
+     "ruby on rails"
+    ],
+    [
+     "ux",
+     "ux design"
+    ],
+    [
+     "ai coding agents",
+     "Coding Agents"
+    ],
+    [
+     "evals",
+     "LLM-evals"
+    ],
+    [
+     "architecture",
+     "Software-Architecture"
+    ],
+    [
+     "economics",
+     "econ"
+    ],
+    [
+     "tailwind-css",
+     "tailwind"
+    ],
+    [
+     "climate",
+     "climate change"
+    ],
+    [
+     "cloud computing",
+     "cloud"
+    ],
+    [
+     "embedded systems",
+     "embedded"
+    ],
+    [
+     "performance",
+     "perf"
+    ],
+    [
+     "AI agents",
+     "agents"
+    ],
+    [
+     "Debugging",
+     "debug"
+    ],
+    [
+     "Embeddings",
+     "vector embeddings"
+    ],
+    [
+     "cyber-security",
+     "security"
+    ],
+    [
+     "terminal",
+     "terminal emulator"
+    ],
+    [
+     "video games",
+     "games"
+    ]
+   ]
+  },
+  "both rules": {
+   "wrong_high_vetoed": 1,
+   "wrong_high_left": [
+    [
+     "ai",
+     "tailwind"
+    ]
+   ],
+   "same_pairs_vetoed_upper_bound": 23,
+   "same_pairs_vetoed": [
+    [
+     "math",
+     "mathematics"
+    ],
+    [
+     "travel",
+     "travelling"
+    ],
+    [
+     "blog",
+     "blogging"
+    ],
+    [
+     "linux",
+     "GNU/Linux"
+    ],
+    [
+     "rails",
+     "ruby on rails"
+    ],
+    [
+     "ux",
+     "ux design"
+    ],
+    [
+     "ai coding agents",
+     "Coding Agents"
+    ],
+    [
+     "c#",
+     "csharp"
+    ],
+    [
+     "c++",
+     "cpp"
+    ],
+    [
+     "evals",
+     "LLM-evals"
+    ],
+    [
+     "architecture",
+     "Software-Architecture"
+    ],
+    [
+     "economics",
+     "econ"
+    ],
+    [
+     "tailwind-css",
+     "tailwind"
+    ],
+    [
+     "climate",
+     "climate change"
+    ],
+    [
+     "cloud computing",
+     "cloud"
+    ],
+    [
+     "embedded systems",
+     "embedded"
+    ],
+    [
+     "performance",
+     "perf"
+    ],
+    [
+     "AI agents",
+     "agents"
+    ],
+    [
+     "Debugging",
+     "debug"
+    ],
+    [
+     "Embeddings",
+     "vector embeddings"
+    ],
+    [
+     "cyber-security",
+     "security"
+    ],
+    [
+     "terminal",
+     "terminal emulator"
+    ],
+    [
+     "video games",
+     "games"
+    ]
+   ]
+  }
+ }
+}

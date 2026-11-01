@@ -26,8 +26,9 @@ This spec fixes the problem in three layers. Each layer is useful without the ne
    batch. In the lab, a 4B local model given the whole list proposed topic clusters, not synonyms
    (**6% precision**). The same model checking one pair at a time had **100% precision** (27/27,
    all hand-checked) at 26% recall. The fully local pipeline reached **600 → 303 → 276 tags with 0
-   wrong merges**. Recall needs a stronger model than the local 4B. The hosted measurement of
-   Claude Haiku 5.5 runs on a helper machine with the real key
+   wrong merges**. Claude Haiku 5.5 (hosted, measured) raises recall to 0.89 (231 tags) but its
+   pair check let 11 wrong pairs through (23 wrong merges). Haiku stays the default, with free
+   guards in front of the review screen
    (see [Hosted measurement](#hosted-measurement-claude-haiku-55)).
 3. **A compact filter bar and a tag library page**: top tags by use, a searchable "More tags"
    popover that also matches aliases, multi-select, and a management page for rename, merge, delete
@@ -201,7 +202,7 @@ What the numbers say:
   check: `out/handcheck-llm.txt`). It rejected 83 of its own 84 whole-list proposals.
 - **Recall is limited by how strong the model is, not by the pipeline.** The small model missed
   `ts`/`typescript`, `ML`/`machine learning`, `o11y`/`observability` and `rust`/`rust-lang`. A
-  hosted model is expected to catch these. The Haiku 5.5 run below measures this.
+  hosted model catches most of them: Haiku 5.5's pair check recall is 0.63 of the residual (below).
   String candidates alone also cap recall at 72 of the 102 residual pairs: pure synonyms such as
   `wfh`/`remote work` and `infosec`/`security` need the whole-list call.
 - **The review screen is still required.** It catches judgment calls (`UI/UX` ~ `ux` scored 0.68)
@@ -213,21 +214,128 @@ tokens per pair. The nixpkgs llama.cpp binary has no AVX2 kernels and ran ~10× 
 
 ### Hosted measurement (Claude Haiku 5.5)
 
-**Status: pending the helper run.** No hosted key is available on the worker host, so a helper runs
-`hosted_eval.py` on Chris's Mac with the real key and pushes the results file. This section will
-then be filled from `scripts/tag-lab/results/anthropic-claude-haiku-5-5-<UTC time>.json`.
+A helper ran `hosted_eval.py` on Chris's Mac with the real keys on 2026-11-01:
 
-The run measures the same metrics as the local runs, on the same seed and sample, so the two are
-directly comparable:
+- `scripts/tag-lab/results/anthropic-claude-haiku-5-5-20261101T185243Z.json`: $0.041, 120 s
+- `scripts/tag-lab/results/openai-gpt-5.6-luna-20261101T185452Z.json`: $0.059, 215 s, as an
+  optional comparison
 
-| Metric | Qwen3-4B local (measured) | Claude Haiku 5.5 (pending) |
-|--------|---------------------------|----------------------------|
-| Whole-list proposals: precision (LLM-only) | 0.06 (5 / 84) | — |
-| Pair check over the string candidates (and the whole-list proposals): accepted, precision | 28, 1.00 (p ≥ 0.5) | — (`high` and `high`+`medium`) |
-| Pipeline: tags after / wrong merges / recall (of 388) | 276 / 0 / 0.83 | — |
-| Suggestions, proposed prompt: reuse / new-tag rate | 100% / 0% (20 bookmarks) | — (30 bookmarks) |
-| Suggestions, current prompt: duplicate / new-tag rate | 3% / 13% | — |
-| Tokens and cost of the whole run | 151k in / 3.9k out, $0 | — (dry-run worst case $0.08) |
+The seed and the 303 deterministic tags are the same as in the local runs. The suggestion sample
+is 30 bookmarks instead of 20 (fixed seed). "Recall" is out of the 388 merges a perfect grouping
+makes. A wrong merge is counted per raw spelling, so one wrong pair that folds a five-spelling
+group counts five.
+
+| Metric | Qwen3-4B local | **Claude Haiku 5.5** (default) | gpt-5.6-luna |
+|--------|----------------|--------------------------------|--------------|
+| Whole-list proposals: correct / wrong / ambiguous (precision) | 5 / 76 / 3 (0.06) | 75 / 18 / 23 (**0.81**) | 54 / 0 / 0 (1.00) |
+| … only those the model marked `high` | 4 / 41 (0.09) | **47 / 0 (1.00)** | 47 / 0 (1.00) |
+| … invalid groups dropped by validation | — | 122 of 215 | 4 of 53 |
+| Pair check at `high`: accepted / correct / wrong (precision), recall of the 102 residual pairs | 28 / 27 / 0 (1.00), 0.26 (per-pair log-probabilities, candidates only) | 76 / 64 / 11 (**0.85**), 0.63 | 65 / 63 / 2 (0.97), 0.62 |
+| … candidates only | same | 61 / 53 / 7 (0.88), 0.52 | 59 / 57 / 2 (0.97), 0.56 |
+| **Pipeline** (deterministic + pair check at `high`): tags / wrong merges / recall | **276 / 0 / 0.83** | 231 / **23** / 0.89 | 240 / 7 / 0.91 |
+| … pair check at `high` or `medium` | — | 224 / 28 / 0.88 | 234 / 7 / 0.93 |
+| Suggestions, proposed prompt: reuse / new tag / on-topic | 100% / 0% / 35% | 100% / 0% / **48%** | 100% / 0% / 56% |
+| Suggestions, current prompt: duplicate / new tag / on-topic | 3% / 13% / 38% | 0.8% / 2.4% / 41% | 1.9% / 0% / 48% |
+| Per save, proposed: input / output tokens, cost | 1,980 / 27, $0 | 5,192 / 43, **$0.00054** | 2,791 / 116, $0.00070 |
+| Per save, current prompt | 3,050 / 59, $0 | 4,360 / 121, $0.00050 | 3,039 / 128, $0.00076 |
+| Consolidation run (whole-list + pair check): tokens, cost | 6.4k+34k in, $0 | 8.9k / 6.8k + 21.9k / 6.9k, **$0.0099** | 6.3k / 3.1k + 12.9k / 6.4k, $0.0153 |
+
+What the numbers say:
+
+- **Haiku 5.5 finds far more duplicates than the local model.** The pair check's recall of the
+  residual pairs rises from 0.26 to 0.63, and the pipeline reaches 231 tags against Qwen's 276.
+- **It is not clean on its own.** The pair check at `high` accepted 11 wrong pairs, which become
+  23 wrong merges in the pipeline. gpt-5.6-luna, at a similar price, made 2 wrong pairs (7 wrong
+  merges) at similar recall (0.91 vs 0.89). That is the tradeoff of the Haiku default: it costs
+  35% less per consolidation run than luna ($0.0099 vs $0.0153), but needs a guard (below).
+- **Haiku's self-reported confidence is informative, unlike Qwen's.** Every whole-list proposal
+  Haiku marked `high` was correct (47/47). All 18 wrong proposals were `medium` (6) or `low` (12).
+  This makes the cheapest guard possible.
+- **Suggestions are fine on Haiku.** The enum keeps reuse at 100% and duplicates at 0%. On-topic
+  rises from 35% (Qwen) to 48%. Neither hosted model used `new` even once, so the "over-suppresses
+  new topics" concern remains, and a product test should watch it.
+- **The proposed suggestion prompt costs slightly more input on Haiku** (5,192 vs 4,360 tokens).
+  The enum of 303 tags is billed again as schema on top of the tag list in the prompt; on Qwen and
+  luna the proposed prompt was smaller. At $0.0005 per save this does not matter. If it ever
+  does, drop the counts from the tag list.
+- **The current prompt on hosted models makes few new tags** (2.4% Haiku, 0% luna), far fewer than
+  Qwen's 13%. The duplicate problem on save is mostly a small-model problem. The enum still removes
+  the rest and costs nothing.
+
+#### Haiku 5.5's wrong merges, classified
+
+All 11 wrong pairs accepted at `high`, plus the 2 accepted at `medium`:
+
+| Pair | Confidence | Class | Note |
+|------|------------|-------|------|
+| `sql` ~ `postgresql` | high | broader / narrower | a product of the topic |
+| `design` ~ `design-system` | high | broader / narrower | |
+| `Ruby` ~ `ruby on rails` | high | broader / narrower | language vs framework |
+| `js` ~ `React.js` | medium | broader / narrower | |
+| `selfhosted` ~ `homelab` | high | related, co-occurring | debatable; the ground truth keeps them apart |
+| `self-hosting` ~ `homelab` | high | related, co-occurring | same pair, another spelling |
+| `Algorithms` ~ `data structures` | high | related, co-occurring | "algorithms and data structures" |
+| `algos` ~ `data structures` | high | related, co-occurring | |
+| `ui` ~ `user experience` | high | sibling discipline | UI vs UX |
+| `c#` ~ `cpp` | medium | sibling technology | |
+| `c#` ~ `continuous integration` | high | nonsensical | the candidate pass dropped `#`, so `c#` became `c` and matched every tag starting with c |
+| `seo` ~ `self-hosting` | high | nonsensical | `seo` is a letter subsequence of `self-hosting`; likely an answer attached to the wrong id in a 40-pair batch (unverified; see the echo guard) |
+| `seo` ~ `selfhosted` | high | nonsensical | same |
+
+There are no antonyms. The classes at `high`: 3 broader/narrower, 4 related, 1 sibling,
+3 nonsensical. Eleven pairs became 23 wrong merges because each pair folds a whole deterministic
+group (all five spellings of self-hosting into `homelab`), and union-find chains pairs
+(`seo` → `selfhosted` → `homelab`).
+
+The whole-list call alone, applied unreviewed (which the design never does), made 36 wrong
+merges. They were of the same kinds: broader/narrower (`aws` → `Serverless`, `GPUs` → `cuda`,
+`ChatGPT` → `openai`, `Llama` → `large language models`, `career` → `hiring`), siblings (`GitLab`
+→ `github`), and one plainly wrong (`climate` → `health`). None was marked `high`.
+
+#### Guards for the Haiku default
+
+The wrong merges above would be pre-checked rows on the review screen, not silent rewrites, and
+every apply can be undone. Still, a pre-checked wrong row is a trap, so the goal is close to 0
+wrong among pre-checked rows, with the rest shown unchecked under "Check these". Guards, measured
+offline on the saved outputs with `scripts/tag-lab/guards.py` where the saved data allows:
+
+| Guard | Extra cost | Haiku's 11 wrong pairs at `high` | Recall cost | Measured |
+|-------|------------|----------------------------------|-------------|----------|
+| **Symbol-aware candidates**: spell `#`/`+` out in the candidate pass (a bug fix) | none | removes `c#`~`continuous integration` (and `c#`~`cpp` at medium) | 0 of the 102 same-concept pairs | offline, exact |
+| **Narrower-topic veto**: word subset with a non-generic extra word, or a prefix/suffix within one word | none | removes 3 (`sql`, `design`, `Ruby` pairs) | would veto up to 21 of 102 correct pairs (`rails`~`ruby on rails`, `climate`~`climate change`, `cloud`~`cloud computing`, `perf`~`performance`) | offline, exact; **rejected**, because the same lexical shape is a synonym as often as a narrower topic |
+| **Candidates only** (do not pair-check whole-list proposals) | none | 7 wrong instead of 11 | recall of residual 0.63 → 0.52 | from the saved aggregates |
+| **Pre-check only whole-list proposals marked `high`**; every pair-check result goes unchecked under "Check these" | none | 0 wrong among 47 pre-checked | pre-checked recall smaller; the rest still shown | proposal level exact (47/0); pipeline numbers need the rerun |
+| **Agreement**: pre-check a pair only if the pair check says `high` *and* the whole-list call proposed it | none | needs per-pair data | needs per-pair data | rerun |
+| **Cannot-link** in union-find: never join two groups if any pair across them was judged "not same" | none | targets chains (`seo` → `selfhosted` → `homelab`) | small | rerun |
+| **Echo**: the pair answer repeats both tags, and mismatches are dropped | ~+50% pair output, about +$0.003 per run | targets the `seo` misalignments | none | rerun (`--pair-echo`) |
+| **Second opinion from luna** on Haiku's accepted pairs | about +$0.01 per run, and a second provider key | likely most | small | rerun |
+| **gpt-5.6-luna as the consolidation model** (user option) | +$0.005 per run | 2 wrong pairs, 7 wrong merges | none (recall 0.91) | measured |
+
+**Proposed guard set (pending the rerun):**
+
+1. Fix symbol handling in the candidate pass.
+2. Pre-check a merge only with two agreeing signals: a whole-list `high` proposal, or a whole-list
+   proposal that the pair check also judged `same`/`high`.
+3. Apply cannot-link in union-find.
+4. Show everything else the pair check accepted unchecked under "Check these".
+
+All four are free and keep the Haiku default. If the rerun shows misaligned answers, add echo
+(+$0.003 per run). The narrower-topic veto is rejected. luna stays a user option, not the default.
+
+**Rerun for the per-pair data** (the first runs saved aggregates only, so most guards cannot be
+measured from them; `hosted_eval.py` now saves per-pair verdicts, which are tag names and answers
+only, no prompts or bodies). Helper commands, about $0.04 in total, of the $9.90 left:
+
+```sh
+git pull
+ANTHROPIC_API_KEY=... python3 scripts/tag-lab/hosted_eval.py --steps consolidate,pairs              # ~$0.010
+ANTHROPIC_API_KEY=... python3 scripts/tag-lab/hosted_eval.py --steps consolidate,pairs --pair-echo  # ~$0.013
+OPENAI_API_KEY=... python3 scripts/tag-lab/hosted_eval.py --provider openai --model gpt-5.6-luna --steps consolidate,pairs  # ~$0.015
+git add scripts/tag-lab/results/*.json && git commit -m "tag-lab: hosted reruns with per-pair details" && git push
+```
+
+Then `python3 scripts/tag-lab/guards.py results/<haiku run>.json --second results/<luna run>.json`
+gives every guard's pipeline numbers. This spec's guard choice will be updated from them.
 
 Differences from the local runs, by design:
 
@@ -646,7 +754,7 @@ whole vocabulary is exactly what consolidation needs.
   Suggestions use the enum schema.
 - It uses the keys and settings users already have (Anthropic or OpenAI) and adds no vendor.
 - Measured on the local 4B model: precision 1.00 after the pairwise check. Recall needs a
-  stronger model (Haiku 5.5 hosted run pending).
+  stronger model. Haiku 5.5 hosted: pipeline recall 0.89 with 23 wrong merges before guards.
 - Default model Claude Haiku 5.5: about $0.004 per consolidation run and $0.0002 per save on paper.
   See the table below.
 - All calls go through the shared `LlmClient` port ([section 6](#6-shared-llm-port)).
@@ -684,10 +792,10 @@ threshold. For consolidation, per-tag `Choice` among candidate canonicals.
 
 ### Model choice
 
-**Measured so far:** only the local Qwen3-4B. It shows the failure mode of a small model on the
-whole-list task (6% precision) and the strength of the pairwise check (100%). Claude Haiku 5.5 is
-measured on the same harness by the helper run
-([Hosted measurement](#hosted-measurement-claude-haiku-55)).
+**Measured:** Qwen3-4B locally, and Claude Haiku 5.5 and gpt-5.6-luna hosted
+([Hosted measurement](#hosted-measurement-claude-haiku-55)). Haiku 5.5's whole-list precision is
+0.81 (1.00 at `high`); its pair check is 0.85 precise with 0.63 recall of the residual. luna is
+more precise (0.97) at similar recall and a 50% higher cost per run.
 
 **Defaults (decided):**
 
@@ -768,25 +876,17 @@ half the size of the raw list (measured 1,980 vs 3,050 input tokens per save).
 | Save-time suggestions, current prompt | local | 20 | 61,000 | 1,180 | 0 |
 | Save-time suggestions, proposed prompt | local | 20 | 39,600 | 540 | 0 |
 | Port plumbing check: `hosted_eval.py` suggestions (2 bookmarks) and pair check (110 tags) | local | — | — | — | 0 |
-| Hosted models, decision APIs | — | 0 | 0 | 0 | **0** so far. The Haiku 5.5 run is capped at $3 by its spend guard; the dry-run worst case is $0.08. |
+| Hosted run, all steps (helper, 2026-11-01) | Anthropic claude-haiku-5-5, effort low | 70 | 317,304 | 18,539 | **0.041** |
+| Hosted run, all steps (helper, 2026-11-01) | OpenAI gpt-5.6-luna | 69 | 194,187 | 16,843 | **0.059** |
+| Decision APIs | — | 0 | 0 | 0 | 0 |
+| **Total paid** | | | | | **$0.10 of the $10 approved** (guard reruns ≈ $0.04 more, pending) |
 
 ## Open items
 
-- **Hosted Haiku 5.5 run (helper).** From a clean clone of this branch, on macOS with the system
-  `python3` (3.9 or newer). No Postgres, Rust or pip packages are needed; it reads the committed
-  seed files:
-
-  ```sh
-  git clone -b spec-tag-management https://github.com/willisrocks/boopmark.git && cd boopmark
-  python3 scripts/tag-lab/hosted_eval.py --dry-run            # no calls, prints the worst case
-  ANTHROPIC_API_KEY=... python3 scripts/tag-lab/hosted_eval.py
-  # optional OpenAI comparison:
-  OPENAI_API_KEY=... python3 scripts/tag-lab/hosted_eval.py --provider openai --model gpt-5.6-luna
-  git add scripts/tag-lab/results/*.json && git commit -m "tag-lab: hosted results" && git push
-  ```
-
-  Expected cost: about $0.02–0.05 for Haiku 5.5 (worst case $0.08), and under $0.15 for luna. Each
-  run is aborted before any call that could pass $3.
+- **Guard rerun (helper, ≈ $0.04).** Commands in
+  [Guards for the Haiku default](#guards-for-the-haiku-default). It finalizes the pre-check rule.
+  The first run's setup still works from a clean clone: macOS system `python3` 3.9+, no Postgres,
+  Rust or pip; `python3 scripts/tag-lab/hosted_eval.py --dry-run` checks it without a key.
 - **Decision API access.** The OpenAI Decisions guide says GA, but secondary reports from October
   describe per-account enablement. Check with one request before building Proposal B on it.
 - **Real library check.** Run the normalizer over Chris's production tag list (read-only

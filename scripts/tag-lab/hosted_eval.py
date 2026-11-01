@@ -193,7 +193,8 @@ def step_consolidate(ask, truth, det, samples):
         by_conf[conf] = {"correct": c, "wrong": w, "ambiguous": a,
                          "precision": round(c / (c + w), 4) if c + w else None}
     n = len(p["correct"]) + len(p["wrong"])
-    proposals = [(m, g["canonical"]) for g in final if "proposed" in g for m in g["proposed"] if m != g["canonical"]]
+    proposals = [(m, g["canonical"], g.get("confidence")) for g in final if "proposed" in g
+                 for m in g["proposed"] if m != g["canonical"]]
     result = {
         "proposed_groups": len(merges), "dropped_invalid": len(dropped),
         "applied_unreviewed": summary(s),
@@ -201,25 +202,69 @@ def step_consolidate(ask, truth, det, samples):
                      "wrong": len(p["wrong"]), "ambiguous": len(p["ambiguous"]),
                      "precision": round(len(p["correct"]) / n, 4) if n else None, "by_confidence": by_conf},
         "wrong_merges": s["wrong_merges"],
+        "details": [{"a": a, "b": b, "confidence": conf, "label": label(truth, a, b)} for a, b, conf in proposals],
     }
     return result, proposals
 
 
-def step_pairs(ask, truth, det, samples, proposals):
+def fold_pairs(det, truth, accepted, cannot_link=()):
+    """Union deterministic groups along accepted (a, b) pairs and score the
+    result. With cannot_link, a union is skipped when it would put two tags
+    the pair check judged different into one group."""
+    parent = {g["canonical"]: g["canonical"] for g in det}
+    members = {c: {c} for c in parent}
+    blocked = {}
+    for a, b in cannot_link:
+        blocked.setdefault(a, set()).add(b)
+        blocked.setdefault(b, set()).add(a)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    skipped = 0
+    for a, b in accepted:
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            continue
+        if any(blocked.get(t, set()) & members[rb] for t in members[ra]):
+            skipped += 1
+            continue
+        parent[ra] = rb
+        members[rb] |= members.pop(ra)
+    merged = {}
+    for g in det:
+        merged.setdefault(find(g["canonical"]), []).append(g)
+    groups = [{"canonical": max(gs, key=lambda g: g["count"])["canonical"],
+               "members": sorted(m for g in gs for m in g["members"])} for gs in merged.values()]
+    return {**summary(score(groups, truth)), "skipped_by_cannot_link": skipped}
+
+
+def step_pairs(ask, truth, det, samples, proposals, echo=False):
     canon = [g["canonical"] for g in det]
-    pairs, seen = [], set()
+    pairs, index = [], {}
     for i, a in enumerate(canon):
         for b in canon[i + 1:]:
             if candidate_reason(a, b):
-                pairs.append((a, b, "candidate"))
-                seen.add(frozenset((a, b)))
-    for a, b in proposals:
+                index[frozenset((a, b))] = len(pairs)
+                pairs.append([a, b, "candidate", None])
+    for a, b, conf in proposals:
         key = frozenset((a, b))
-        if key in seen:
-            pairs[[frozenset((x, y)) for x, y, _ in pairs].index(key)] = (a, b, "both")
+        if key in index:
+            pairs[index[key]][2:] = ["both", conf]
         else:
-            pairs.append((a, b, "whole-list"))
-            seen.add(key)
+            index[key] = len(pairs)
+            pairs.append([a, b, "whole-list", conf])
+    schema = PAIR_SCHEMA
+    if echo:
+        # The answer repeats both tags, so an answer attached to the wrong id
+        # can be detected and dropped.
+        schema = json.loads(json.dumps(PAIR_SCHEMA))
+        item = schema["properties"]["pairs"]["items"]
+        item["properties"] = {"id": {"type": "integer"}, "a": {"type": "string"}, "b": {"type": "string"},
+                              **{k: v for k, v in item["properties"].items() if k != "id"}}
+        item["required"] = ["id", "a", "b", "same", "confidence"]
 
     def sample(tag):
         t = (samples.get(tag) or [""])[0]
@@ -229,17 +274,25 @@ def step_pairs(ask, truth, det, samples, proposals):
     for start in range(0, len(pairs), PAIRS_PER_CALL):
         batch = pairs[start:start + PAIRS_PER_CALL]
         user = "\n".join(f"{i}. A: {json.dumps(a)}{sample(a)} | B: {json.dumps(b)}{sample(b)}"
-                         for i, (a, b, _) in enumerate(batch))
-        out = ask("pairs", PAIR_SYSTEM, user, PAIR_SCHEMA, 4096, {"pairs": []})
+                         for i, (a, b, _, _) in enumerate(batch))
+        system = PAIR_SYSTEM + (" Repeat tag A and tag B of each id in \"a\" and \"b\"." if echo else "")
+        out = ask("pairs", system, user, schema, 6144 if echo else 4096, {"pairs": []})
         for item in (out.get("pairs", []) if isinstance(out, dict) else []):
             i = item.get("id")
             if isinstance(i, int) and 0 <= i < len(batch) and start + i not in verdicts:
-                verdicts[start + i] = (bool(item.get("same")), item.get("confidence"))
+                ok = None
+                if echo:
+                    a, b = batch[i][0].lower(), batch[i][1].lower()
+                    ok = {str(item.get("a", "")).strip().lower(), str(item.get("b", "")).strip().lower()} == {a, b}
+                verdicts[start + i] = (bool(item.get("same")), item.get("confidence"), ok)
 
     residual = sum(1 for i, a in enumerate(canon) for b in canon[i + 1:] if label(truth, a, b) == "same")
-    rows = [{"a": a, "b": b, "source": src, "label": label(truth, a, b),
-             "same": verdicts.get(i, (False, None))[0], "confidence": verdicts.get(i, (False, None))[1],
-             "answered": i in verdicts} for i, (a, b, src) in enumerate(pairs)]
+    rows = []
+    for i, (a, b, src, pconf) in enumerate(pairs):
+        same, conf, echo_ok = verdicts.get(i, (False, None, None))
+        rows.append({"a": a, "b": b, "source": src, "reason": candidate_reason(a, b), "proposal_confidence": pconf,
+                     "label": label(truth, a, b), "same": same, "confidence": conf, "echo_ok": echo_ok,
+                     "answered": i in verdicts})
 
     def accepted(levels, source=None):
         acc = [r for r in rows if r["same"] and r["confidence"] in levels
@@ -262,27 +315,14 @@ def step_pairs(ask, truth, det, samples, proposals):
     }
 
     # Full pipeline: union deterministic groups along accepted pairs.
-    pipeline = {}
-    for name, lv in levels.items():
-        parent = {c: c for c in canon}
-
-        def find(x):
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-        for r in rows:
-            if r["same"] and r["confidence"] in lv:
-                ra, rb = find(r["a"]), find(r["b"])
-                if ra != rb:
-                    parent[ra] = rb
-        merged = {}
-        for g in det:
-            merged.setdefault(find(g["canonical"]), []).append(g)
-        groups = [{"canonical": max(gs, key=lambda g: g["count"])["canonical"],
-                   "members": sorted(m for g in gs for m in g["members"])} for gs in merged.values()]
-        pipeline[name] = summary(score(groups, truth))
-    result["pipeline"] = pipeline
+    result["pipeline"] = {name: fold_pairs(det, truth, [(r["a"], r["b"]) for r in rows
+                                                         if r["same"] and r["confidence"] in lv])
+                          for name, lv in levels.items()}
+    if echo:
+        result["echo_mismatches"] = sum(r["echo_ok"] is False for r in rows)
+    # Tag names from the synthetic seed and the verdicts only (no prompts or
+    # response text), so guards can be evaluated offline (guards.py).
+    result["details"] = rows
     return result
 
 
@@ -349,6 +389,7 @@ def main():
     ap.add_argument("--steps", default="consolidate,pairs,suggest")
     ap.add_argument("--suggest-n", type=int, default=30)
     ap.add_argument("--base-url", default="http://127.0.0.1:4211", help="llama.cpp server")
+    ap.add_argument("--pair-echo", action="store_true", help="pair answers repeat both tags; mismatches are flagged")
     ap.add_argument("--dry-run", action="store_true", help="build every request, send none, print the worst case")
     args = ap.parse_args()
     args.model = args.model or DEFAULT_MODELS[args.provider]
@@ -362,8 +403,9 @@ def main():
     ask = make_ask(args, spend)
     truth, counts, det, samples, bookmarks = load()
     started = datetime.datetime.now(datetime.timezone.utc)
-    run = f"{args.provider}-{args.model}-{started.strftime('%Y%m%dT%H%M%SZ')}"
+    run = f"{args.provider}-{args.model}{'-echo' if args.pair_echo else ''}-{started.strftime('%Y%m%dT%H%M%SZ')}"
     results = {"run": run, "provider": args.provider, "model": args.model, "effort": args.effort or None,
+               "pair_echo": args.pair_echo,
                "dry_run": args.dry_run, "budget_usd": cap, "started_utc": started.isoformat(timespec="seconds"),
                "seed": {"raw_tags": len(counts), "deterministic_tags": len(det),
                         "concepts": len(set(truth["concept_of"].values()))}}
@@ -373,7 +415,7 @@ def main():
         if "consolidate" in steps:
             results["consolidate"], proposals = step_consolidate(ask, truth, det, samples)
         if "pairs" in steps:
-            results["pairs"] = step_pairs(ask, truth, det, samples, proposals)
+            results["pairs"] = step_pairs(ask, truth, det, samples, proposals, args.pair_echo)
         if "suggest" in steps:
             results["suggest"] = step_suggest(ask, truth, counts, det, bookmarks, args.suggest_n)
     except BudgetExceeded as e:
@@ -396,7 +438,8 @@ def main():
               f"precision={o['precision']} | unreviewed apply: tags={a['tags']} wrong={a['wrong']} recall={a['recall']}")
     if "pairs" in results:
         p = results["pairs"]
-        print(f"pairs        offered={p['pairs']} answered={p['answered']} residual_same={p['residual_same_pairs']}")
+        print(f"pairs        offered={p['pairs']} answered={p['answered']} residual_same={p['residual_same_pairs']}"
+              + (f" echo_mismatches={p['echo_mismatches']}" if "echo_mismatches" in p else ""))
         for name in ("high", "high_or_medium"):
             x, y = p["accepted"][name], p["pipeline"][name]
             print(f"  {name:<15} accepted={x['accepted']} correct={x['correct']} wrong={x['wrong']} "

@@ -1,0 +1,299 @@
+{
+ "source": "anthropic-claude-haiku-5-5-20261101T185243Z.json",
+ "mode": "aggregate (no per-pair details in this run)",
+ "wrong_pairs_high": 11,
+ "residual_same_pairs": 102,
+ "rules": {
+  "symbol-aware candidates": {
+   "wrong_high_vetoed": 1,
+   "wrong_high_left": [
+    [
+     "sql",
+     "postgresql"
+    ],
+    [
+     "design",
+     "design-system"
+    ],
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "self-hosting"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "Ruby",
+     "ruby on rails"
+    ],
+    [
+     "selfhosted",
+     "homelab"
+    ],
+    [
+     "self-hosting",
+     "homelab"
+    ],
+    [
+     "Algorithms",
+     "data structures"
+    ],
+    [
+     "algos",
+     "data structures"
+    ]
+   ],
+   "same_pairs_vetoed_upper_bound": 0,
+   "same_pairs_vetoed": []
+  },
+  "narrower-topic rule": {
+   "wrong_high_vetoed": 3,
+   "wrong_high_left": [
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "self-hosting"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "c#",
+     "continuous integration"
+    ],
+    [
+     "selfhosted",
+     "homelab"
+    ],
+    [
+     "self-hosting",
+     "homelab"
+    ],
+    [
+     "Algorithms",
+     "data structures"
+    ],
+    [
+     "algos",
+     "data structures"
+    ]
+   ],
+   "same_pairs_vetoed_upper_bound": 21,
+   "same_pairs_vetoed": [
+    [
+     "math",
+     "mathematics"
+    ],
+    [
+     "travel",
+     "travelling"
+    ],
+    [
+     "blog",
+     "blogging"
+    ],
+    [
+     "linux",
+     "GNU/Linux"
+    ],
+    [
+     "rails",
+     "ruby on rails"
+    ],
+    [
+     "ux",
+     "ux design"
+    ],
+    [
+     "ai coding agents",
+     "Coding Agents"
+    ],
+    [
+     "evals",
+     "LLM-evals"
+    ],
+    [
+     "architecture",
+     "Software-Architecture"
+    ],
+    [
+     "economics",
+     "econ"
+    ],
+    [
+     "tailwind-css",
+     "tailwind"
+    ],
+    [
+     "climate",
+     "climate change"
+    ],
+    [
+     "cloud computing",
+     "cloud"
+    ],
+    [
+     "embedded systems",
+     "embedded"
+    ],
+    [
+     "performance",
+     "perf"
+    ],
+    [
+     "AI agents",
+     "agents"
+    ],
+    [
+     "Debugging",
+     "debug"
+    ],
+    [
+     "Embeddings",
+     "vector embeddings"
+    ],
+    [
+     "cyber-security",
+     "security"
+    ],
+    [
+     "terminal",
+     "terminal emulator"
+    ],
+    [
+     "video games",
+     "games"
+    ]
+   ]
+  },
+  "both": {
+   "wrong_high_vetoed": 4,
+   "wrong_high_left": [
+    [
+     "ui",
+     "user experience"
+    ],
+    [
+     "seo",
+     "self-hosting"
+    ],
+    [
+     "seo",
+     "selfhosted"
+    ],
+    [
+     "selfhosted",
+     "homelab"
+    ],
+    [
+     "self-hosting",
+     "homelab"
+    ],
+    [
+     "Algorithms",
+     "data structures"
+    ],
+    [
+     "algos",
+     "data structures"
+    ]
+   ],
+   "same_pairs_vetoed_upper_bound": 21,
+   "same_pairs_vetoed": [
+    [
+     "math",
+     "mathematics"
+    ],
+    [
+     "travel",
+     "travelling"
+    ],
+    [
+     "blog",
+     "blogging"
+    ],
+    [
+     "linux",
+     "GNU/Linux"
+    ],
+    [
+     "rails",
+     "ruby on rails"
+    ],
+    [
+     "ux",
+     "ux design"
+    ],
+    [
+     "ai coding agents",
+     "Coding Agents"
+    ],
+    [
+     "evals",
+     "LLM-evals"
+    ],
+    [
+     "architecture",
+     "Software-Architecture"
+    ],
+    [
+     "economics",
+     "econ"
+    ],
+    [
+     "tailwind-css",
+     "tailwind"
+    ],
+    [
+     "climate",
+     "climate change"
+    ],
+    [
+     "cloud computing",
+     "cloud"
+    ],
+    [
+     "embedded systems",
+     "embedded"
+    ],
+    [
+     "performance",
+     "perf"
+    ],
+    [
+     "AI agents",
+     "agents"
+    ],
+    [
+     "Debugging",
+     "debug"
+    ],
+    [
+     "Embeddings",
+     "vector embeddings"
+    ],
+    [
+     "cyber-security",
+     "security"
+    ],
+    [
+     "terminal",
+     "terminal emulator"
+    ],
+    [
+     "video games",
+     "games"
+    ]
+   ]
+  }
+ }
+}
