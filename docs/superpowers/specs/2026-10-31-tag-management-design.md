@@ -1,0 +1,1015 @@
+# Better Tag Management — Design
+
+**Status:** Draft (exploration spec; nothing here is implemented except the lab prototype)
+**Date:** 2026-10-31
+**Branch:** `spec-tag-management`
+**Supersedes in part:** `2026-04-25-tag-consolidation-design.md` (the one-click consolidation)
+
+## Summary
+
+Boopmark's tag library degrades as it grows. Tags are stored verbatim, so every save can add a new
+spelling of an existing tag (`GitHub`/`github`, `coding-agent`/`coding agents`). The filter bar then
+renders every distinct spelling as one flat wall of chips. On a seeded library of 600 bookmarks the
+wall fills the whole first screen and no bookmark is visible
+([before](assets/2026-10-31-tag-management/before-filter-bar.png)).
+
+This spec fixes the problem in three layers. Each layer is useful without the next:
+
+1. **Deterministic normalization and an alias table.** No LLM. Every tag written by any client
+   (web, API, CLI, extension, iOS, import) resolves to one canonical tag. Case, hyphen, spacing,
+   slash/dot and plural variants collapse. On the lab library this takes **600 → 303 tags with 0
+   wrong merges**. Aliases are remembered, so a duplicate does not come back on the next save.
+2. **Reviewed LLM consolidation** for what rules cannot catch: synonyms, abbreviations and typos
+   (`js`→`javascript`, `k8s`→`kubernetes`, `wfh`→`remote work`). Candidate merges come from two
+   sources: a whole-list structured-output call, and cheap string candidates. Every candidate pair
+   is then *checked one pair at a time*, the user reviews the result, applies it, and can undo the
+   batch. In the lab, a 4B local model given the whole list proposed topic clusters, not synonyms
+   (**6% precision**). The same model checking one pair at a time had **100% precision** (27/27,
+   all hand-checked) at 26% recall. The fully local pipeline reached **600 → 303 → 276 tags with 0
+   wrong merges**. Claude Haiku 5.5 (hosted, measured) raises recall to 0.89 (231 tags) but its
+   pair check let 9–11 wrong pairs through (23 wrong merges). Haiku stays the default, with
+   three changes:
+   - the pair check echoes both tags
+   - only `high` verdicts are pre-checked
+   - cannot-link applies in union-find
+
+   These take the wrong pre-checked merges to **0 in 4 of 4 runs, at recall 0.90–0.93**, for about
+   $0.011 per run (see [Guards](#guards-for-the-haiku-default)).
+3. **A compact filter bar and a tag library page**: top tags by use, a searchable "More tags"
+   popover that also matches aliases, multi-select, and a management page for rename, merge, delete
+   and undo.
+
+Save-time suggestions change to choose from the canonical list (an enum in the output schema), allow
+at most one new tag, and resolve every suggestion through the alias table before storing it.
+Measured on 20 seeded bookmarks with the local model:
+
+- The current pipeline stored a **new distinct tag for 16% of suggested tags** (3% a new spelling
+  of an existing tag, 13% a brand-new tag). The proposed pipeline stored **0%**, reusing an
+  existing canonical tag every time.
+- On-topic rates were similar (38% vs 35% against the synthetic labels).
+- The prompt shrank from 3,050 to 1,980 input tokens per save.
+
+**Recommendation: Proposal A.**
+
+- Normalization and aliases first. They do everything they can (77% of the needed merges in the
+  lab, with no errors), and the LLM only sees what is left.
+- Then consolidation with the user's own configured provider:
+  - propose: a whole-list structured-output call plus string candidates
+  - check: every pair, in one batched structured-output call
+  - review: a review screen, with undo
+- **Default model: Claude Haiku 5.5 (`claude-haiku-5-5`)** for both save-time suggestions and
+  merge proposals, at `effort: low`. About $0.004 per consolidation run and $0.0002 per save on
+  paper. On save it can only pick existing canonical tags (an enum) plus at most one new tag, and
+  the resolver maps that tag to an existing one where it can.
+- **One shared LLM port** (`LlmClient`, [section 6](#6-shared-llm-port)) with Anthropic, OpenAI
+  and local llama.cpp adapters, chosen by config. Both features use it; the hybrid search spec
+  references its names (its v1 makes no LLM call). A prototype is on this branch.
+
+Decision APIs (OpenAI Decisions, TypeSafe Jev) are real and very cheap. They do exactly one part of
+this well, the pairwise check, and they cannot propose canonical names or new tags. They are the
+optional Proposal B upgrade for that one step. See [Model and API choice](#model-and-api-choice).
+
+## Why the existing consolidation is not enough
+
+`server/src/app/tag_consolidation.rs` and the two consolidator adapters implement the April spec:
+one button in Settings → Tag Library, one LLM call, applied immediately. Reading the code shows these
+gaps:
+
+| # | Gap | Where | Effect |
+|---|-----|-------|--------|
+| 1 | No preview, review or undo (explicit non-goals in the April spec) | `TagConsolidationService::consolidate` writes with `update_tags_bulk` straight after the LLM returns | One bad mapping silently rewrites every affected bookmark, and there is no way back |
+| 2 | Duplicates come back | Enrichment passes every raw tag (`tags_with_counts`, unbounded) to the model and stores whatever it returns verbatim. There is no alias memory. | The next save can re-create `GitHub` right after a cleanup merged it into `github` |
+| 3 | Every output tag is forced to lowercase | `compute_new_tags`, `validate_tag_text` | `GitHub`, `macOS`, `iOS` and `UI/UX` lose their casing |
+| 4 | It may add broader parent tags (`react` → `react`, `frontend`) | prompt rule 2 | The tag count can *grow*, and bookmarks get tags the user never chose |
+| 5 | Only the 500 most-used tags are sent | `input.tags.iter().take(500)` in both adapters | The long tail, where typos and one-off spellings live, is never considered |
+| 6 | The output must contain an entry for every tag | prompt rule 5 | Output grows with the library (~10 tokens per tag, so 6–8k for 600 tags), against a 60 s HTTP client timeout (both consolidator clients) inside a synchronous HTMX request |
+| 7 | Anthropic output is parsed from free text | `extract_json_object` takes first `{` to last `}` | One malformed token fails the whole run. The OpenAI path uses JSON-object mode, not a strict schema. |
+| 8 | No deterministic pre-pass | — | Most merges are trivial case/hyphen/plural folds (297 of the 388 needed in the lab). The model spends tokens on them and can still miss some. |
+| 9 | The filter bar shows every distinct tag, single-select | `all_tags` → `filters_inner.html` | The wall of chips. Clicking a chip replaces the filter instead of adding to it. |
+
+The consolidator's validation (`validate_consolidation_mapping`) is good and stays: keys must be
+submitted tags, values are bounded, and control characters are rejected.
+
+## Goals
+
+- A clean library stays clean: no new duplicate spellings from any client.
+- One-time cleanup of an existing messy library, with review and undo.
+- A filter bar that fits in one or two rows at any library size.
+- Better save-time suggestions that reuse canonical tags.
+- Keep the bring-your-own-key model. No new required vendor.
+
+## Non-goals
+
+- Tag hierarchies or parent tags. They are dropped from consolidation (gap 4) and could be a later
+  feature.
+- Shared tags across users. Everything stays per-user.
+- Replacing `bookmarks.tags TEXT[]` with a join table (see [Data model](#canonical-tag-model)).
+- Automatic, unreviewed LLM rewrites.
+
+## Brainstorming decisions (auto-pilot)
+
+The superpowers brainstorming skill is not installed on this host. I ran its question loop myself
+and answered each question from code or measurements; there was no human gate.
+
+| Question | Answer | Evidence |
+|----------|--------|----------|
+| Is the problem storage or display? | Both. Verbatim storage creates the duplicates; the flat chip list amplifies them. | `all_tags` → `filters_inner.html`; the current suggestion pipeline created a new tag for 16% of suggested tags |
+| Normalize on read or on write? | On write, through an alias table, plus a one-time normalization job that writes proposals for review. | Read-time folding would leave the API, export and CLI with dirty data |
+| Aliases or a tag table? | Aliases next to `TEXT[]` (M1). | Every query and client stays unchanged; libraries are small |
+| Is plural folding safe? | Only when the singular already exists. | 0 wrong among 297 deterministic merges, including the `ios`/`news`/`kubernetes` traps |
+| Can an LLM apply merges unreviewed? | No. | 165 wrong merges when the local model's proposals were applied directly |
+| Self-reported confidence for review defaults? | No; use a pairwise check. | 41 of 45 `high`-confidence proposals were wrong; the pairwise check had 0 wrong |
+| Decision API at the core? | No; it is an optional pair-check backend. | Neither can propose names or new tags (primary docs); it is the one step it does well |
+| Which model? | Claude Haiku 5.5 for suggestions and merge proposals (owner decision after review of #36, replacing my first answer of a mid-tier model for consolidation). | Deterministic rules take the bulk; the pair check and the review screen guard precision; the enum bounds suggestions. Hosted numbers: [Hosted measurement](#hosted-measurement-claude-haiku-55) |
+| One LLM integration or one per feature? | One shared `LlmClient` port; feature ports sit on top. | Today each vendor adapter repeats HTTP, auth and parsing for three features (`anthropic.rs`, `anthropic_tag_consolidator.rs`, `openai.rs`) |
+
+## Lab: seed data, prototype, measurements
+
+Everything here is on this branch under `scripts/tag-lab/` and is reproducible.
+
+- `concepts.py`: the ground truth. 212 concepts, each listing the raw spellings a messy library
+  accumulates (627 spellings), plus 52 concept pairs where merging is a judgment call (`UI/UX` vs
+  `ux`, `vim` vs `neovim`, `local ai` vs `local llm`). It deliberately includes traps:
+  - plural lookalikes: `ios`, `news`, `physics`, `kubernetes`, `aws`, `analytics`
+  - near misses: `java`/`javascript`, `go`/`google`, `react`/`react native`, `claude`/`claude code`,
+    `management`/`engineering management`, `ai agents`/`coding agents`
+  - slash tags: `UI/UX`, `CI/CD`, `GNU/Linux`
+  - typos: `kubernets`, `javscript`, `pyhton`
+- `seed.py`: writes `seed.sql`, 600 bookmarks for one user in 13 topic groups, with Zipf-weighted
+  spellings. A coverage pass adds unused spellings, but it can replace the last copy of another,
+  so 600 of the 627 spellings end up on a bookmark. Those 600 are the lab's raw tags, and
+  `ground_truth.json` lists exactly them.
+- `server/src/domain/tag_normalize.rs` (with unit tests) and `server/examples/tag_lab.rs`: the
+  deterministic normalizer.
+- `consolidate.py`: the proposed LLM step. Providers are local llama.cpp, OpenAI Responses with a
+  strict `json_schema`, and Anthropic Messages with `output_config.format`.
+- `verify.py`: the pairwise check. One yes/no question per pair; P(yes) is read from the answer
+  token's log-probabilities, mimicking a decision-API predicate. It also generates the string
+  candidates and unions accepted pairs into groups.
+- `suggest.py`: save-time suggestions, the current prompt against the proposed one.
+- `measure.py`: scores a grouping against the ground truth, overall and for the LLM's proposals
+  alone.
+- `llm_client.py`: the Python mirror of the server's `LlmClient` port
+  ([section 6](#6-shared-llm-port)). It provides `complete_structured(StructuredRequest)`, with
+  Anthropic, OpenAI and llama.cpp adapters.
+- `hosted_eval.py`: the hosted run, using the same prompts and schemas through `llm_client.py`.
+  It runs on the committed seed files alone, has a hard spend guard of $3, prints metrics only and
+  writes `results/<run>.json`
+  ([Hosted measurement](#hosted-measurement-claude-haiku-55)).
+- `out/`: every input and output of the runs, including the two hand checks
+  (`handcheck-deterministic.txt`, `handcheck-llm.txt`) and `spend.jsonl`.
+
+Run: Postgres 16 and the server ran locally from a nix shell on ports 56440 and 4210 (the host has no
+Docker). The lab user was seeded with `psql -f scripts/tag-lab/seed.sql`. Tags and counts were read
+back from the database.
+
+**Metric definitions.** A *merge* folds one raw tag into its group's canonical tag. It is *correct*
+when both tags belong to the same concept, *ambiguous* when the concept pair is a listed judgment
+call, and *wrong* otherwise. Precision = correct / (correct + wrong); ambiguous merges are reported
+separately. Recall = correct merges / 388, the number of merges a perfect grouping makes (600 raw
+tags − 212 concepts).
+
+**Caveat.** I wrote both the seed and the normalizer, so the deterministic precision is optimistic by
+construction. The traps exist to counter that, but a real library will have surprises. That is why
+the alias table records every merge and the library page can split an alias back out.
+
+### Results
+
+| Stage | Tags | Merges | Wrong | Precision | Recall (of 388) |
+|-------|------|--------|-------|-----------|-----------------|
+| Raw | **600** | — | — | — | — |
+| L1 case/separator | 377 | 223 | 0 | 1.00 | 0.57 |
+| L2 compact (`/`, `.`, joined words) | 341 | 259 | 0 | 1.00 | 0.67 |
+| L3 plural, existence-checked | **303** | 297 | 0 | 1.00 | 0.77 |
+| L3 + Qwen3-4B whole-list proposals, applied unreviewed | 219 | 381 | **165** | 0.56 | 0.54 |
+| L3 + string candidates + Qwen3-4B pairwise check (p ≥ 0.5) | **276** | 324 | **0** | 1.00 | 0.83 |
+| Perfect grouping (ground truth) | 212 | 388 | 0 | 1.00 | 1.00 |
+
+**LLM step on its own** (proposals beyond L3, scored per folded tag):
+
+| LLM step | Proposals | Correct | Ambiguous | Wrong | Precision |
+|----------|-----------|---------|-----------|-------|-----------|
+| Qwen3-4B, whole list in one call (consolidate.py) | 84 | 5 | 3 | 76 | **0.06** |
+| … same proposals, then Qwen3-4B pairwise check, p ≥ 0.5 | 1 | 1 | 0 | 0 | 1.00 |
+| String candidates (287 pairs; 72 of the 102 residual same-concept pairs) + Qwen3-4B pairwise check, p ≥ 0.5 | 28 | 27 | 1 | 0 | **1.00** (recall 0.26 of residual) |
+| … at p ≥ 0.9 | 20 | 20 | 0 | 0 | 1.00 (recall 0.20) |
+
+What the numbers say:
+
+- **Deterministic rules get the bulk safely.** They make 297 of the 388 needed merges (77%) with
+  zero errors, and a hand check of 40 random merges found 40/40 correct
+  (`scripts/tag-lab/out/handcheck-deterministic.txt`).
+- **A small model must not see the whole list and decide alone.** Qwen3-4B (Q4_K_M, llama.cpp,
+  strict JSON schema) grouped by *topic*: `android`, `swift` and `macos` into `ios`; `figma` and
+  `ux` into `react`; `claude` and `machine learning` into `python`. It labelled 45 of those
+  proposals `high` confidence, and 41 of the 45 were wrong. Self-reported confidence is no use for
+  review defaults.
+- **Checking one pair at a time is precise even on a small model.** The same model, asked "do A
+  and B mean the same thing?", accepted 28 pairs. All 27 non-ambiguous ones were correct (hand
+  check: `out/handcheck-llm.txt`). It rejected 83 of its own 84 whole-list proposals.
+- **Recall is limited by how strong the model is, not by the pipeline.** The small model missed
+  `ts`/`typescript`, `ML`/`machine learning`, `o11y`/`observability` and `rust`/`rust-lang`. A
+  hosted model catches most of them: Haiku 5.5's pair check recall is 0.63 of the residual (below).
+  String candidates alone also cap recall at 72 of the 102 residual pairs: pure synonyms such as
+  `wfh`/`remote work` and `infosec`/`security` need the whole-list call.
+- **The review screen is still required.** It catches judgment calls (`UI/UX` ~ `ux` scored 0.68)
+  and whatever the checker gets wrong.
+
+Local run cost: $0. On this 4-core EPYC (AVX2, native llama.cpp build) the whole-list call took
+573 s for 6,440 input + 1,791 output tokens. The pairwise check averaged ~2.2 s and ~120 input
+tokens per pair. The nixpkgs llama.cpp binary has no AVX2 kernels and ran ~10× slower.
+
+### Hosted measurement (Claude Haiku 5.5)
+
+A helper ran `hosted_eval.py` on Chris's Mac with the real keys on 2026-11-01:
+
+- `scripts/tag-lab/results/anthropic-claude-haiku-5-5-20261101T185243Z.json`: $0.041, 120 s
+- `scripts/tag-lab/results/openai-gpt-5.6-luna-20261101T185452Z.json`: $0.059, 215 s, as an
+  optional comparison
+
+The seed and the 303 deterministic tags are the same as in the local runs. The suggestion sample
+is 30 bookmarks instead of 20 (fixed seed). "Recall" is out of the 388 merges a perfect grouping
+makes. A wrong merge is counted per raw spelling, so one wrong pair that folds a five-spelling
+group counts five.
+
+| Metric | Qwen3-4B local | **Claude Haiku 5.5** (default) | gpt-5.6-luna |
+|--------|----------------|--------------------------------|--------------|
+| Whole-list proposals: correct / wrong / ambiguous (precision) | 5 / 76 / 3 (0.06) | 75 / 18 / 23 (**0.81**) | 54 / 0 / 0 (1.00) |
+| … only those the model marked `high` | 4 / 41 (0.09) | **47 / 0 (1.00)** | 47 / 0 (1.00) |
+| … invalid groups dropped by validation | — | 122 of 215 | 4 of 53 |
+| Pair check at `high`: accepted / correct / wrong (precision), recall of the 102 residual pairs | 28 / 27 / 0 (1.00), 0.26 (per-pair log-probabilities, candidates only) | 76 / 64 / 11 (**0.85**), 0.63 | 65 / 63 / 2 (0.97), 0.62 |
+| … candidates only | same | 61 / 53 / 7 (0.88), 0.52 | 59 / 57 / 2 (0.97), 0.56 |
+| **Pipeline** (deterministic + pair check at `high`): tags / wrong merges / recall | **276 / 0 / 0.83** | 231 / **23** / 0.89 | 240 / 7 / 0.91 |
+| … pair check at `high` or `medium` | — | 224 / 28 / 0.88 | 234 / 7 / 0.93 |
+| Suggestions, proposed prompt: reuse / new tag / on-topic | 100% / 0% / 35% | 100% / 0% / **48%** | 100% / 0% / 56% |
+| Suggestions, current prompt: duplicate / new tag / on-topic | 3% / 13% / 38% | 0.8% / 2.4% / 41% | 1.9% / 0% / 48% |
+| Per save, proposed: input / output tokens, cost | 1,980 / 27, $0 | 5,192 / 43, **$0.00054** | 2,791 / 116, $0.00070 |
+| Per save, current prompt | 3,050 / 59, $0 | 4,360 / 121, $0.00050 | 3,039 / 128, $0.00076 |
+| Consolidation run (whole-list + pair check): tokens, cost | 6.4k+34k in, $0 | 8.9k / 6.8k + 21.9k / 6.9k, **$0.0099** | 6.3k / 3.1k + 12.9k / 6.4k, $0.0153 |
+
+What the numbers say:
+
+- **Haiku 5.5 finds far more duplicates than the local model.** The pair check's recall of the
+  residual pairs rises from 0.26 to 0.63, and the pipeline reaches 231 tags against Qwen's 276.
+- **It is not clean on its own.** The pair check at `high` accepted 11 wrong pairs, which become
+  23 wrong merges in the pipeline. gpt-5.6-luna, at a similar price, made 2 wrong pairs (7 wrong
+  merges) at similar recall (0.91 vs 0.89). That is the tradeoff of the Haiku default: it costs
+  35% less per consolidation run than luna ($0.0099 vs $0.0153), but needs a guard (below).
+- **Haiku's self-reported confidence is informative, unlike Qwen's.** Every whole-list proposal
+  Haiku marked `high` was correct (47/47). All 18 wrong proposals were `medium` (6) or `low` (12).
+  This makes the cheapest guard possible.
+- **Suggestions are fine on Haiku.** The enum keeps reuse at 100% and duplicates at 0%. On-topic
+  rises from 35% (Qwen) to 48%. Neither hosted model used `new` even once, so the "over-suppresses
+  new topics" concern remains, and a product test should watch it.
+- **The proposed suggestion prompt costs slightly more input on Haiku** (5,192 vs 4,360 tokens).
+  The enum of 303 tags is billed again as schema on top of the tag list in the prompt; on Qwen and
+  luna the proposed prompt was smaller. At $0.0005 per save this does not matter. If it ever
+  does, drop the counts from the tag list.
+- **The current prompt on hosted models makes few new tags** (2.4% Haiku, 0% luna), far fewer than
+  Qwen's 13%. The duplicate problem on save is mostly a small-model problem. The enum still removes
+  the rest and costs nothing.
+
+#### Haiku 5.5's wrong merges, classified
+
+All 11 wrong pairs accepted at `high`, plus the 2 accepted at `medium`:
+
+| Pair | Confidence | Class | Note |
+|------|------------|-------|------|
+| `sql` ~ `postgresql` | high | broader / narrower | a product of the topic |
+| `design` ~ `design-system` | high | broader / narrower | |
+| `Ruby` ~ `ruby on rails` | high | broader / narrower | language vs framework |
+| `js` ~ `React.js` | medium | broader / narrower | |
+| `selfhosted` ~ `homelab` | high | related, co-occurring | debatable; the ground truth keeps them apart |
+| `self-hosting` ~ `homelab` | high | related, co-occurring | same pair, another spelling |
+| `Algorithms` ~ `data structures` | high | related, co-occurring | "algorithms and data structures" |
+| `algos` ~ `data structures` | high | related, co-occurring | |
+| `ui` ~ `user experience` | high | sibling discipline | UI vs UX |
+| `c#` ~ `cpp` | medium | sibling technology | |
+| `c#` ~ `continuous integration` | high | nonsensical | the candidate pass dropped `#`, so `c#` became `c` and matched every tag starting with c |
+| `seo` ~ `self-hosting` | high | nonsensical | `seo` is a letter subsequence of `self-hosting`; likely an answer attached to the wrong id in a 40-pair batch (unverified; see the echo guard) |
+| `seo` ~ `selfhosted` | high | nonsensical | same |
+
+There are no antonyms. The classes at `high`: 3 broader/narrower, 4 related, 1 sibling,
+3 nonsensical. Eleven pairs became 23 wrong merges because each pair folds a whole deterministic
+group (all five spellings of self-hosting into `homelab`), and union-find chains pairs
+(`seo` → `selfhosted` → `homelab`).
+
+The whole-list call alone, applied unreviewed (which the design never does), made 36 wrong
+merges. They were of the same kinds: broader/narrower (`aws` → `Serverless`, `GPUs` → `cuda`,
+`ChatGPT` → `openai`, `Llama` → `large language models`, `career` → `hiring`), siblings (`GitLab`
+→ `github`), and one plainly wrong (`climate` → `health`). None was marked `high`.
+
+#### Guards for the Haiku default
+
+The wrong merges above would be pre-checked rows on the review screen, not silent rewrites, and
+every apply can be undone. Still, a pre-checked wrong row is a trap. The goal is close to 0 wrong
+among pre-checked rows; the rest are shown unchecked under "Check these".
+
+**Data.** A second round of helper runs on 2026-11-01 ($0.033) saved per-pair verdicts, which
+are tag names and answers only, no prompts or response text:
+
+- Haiku 5.5: `…haiku-5-5-20261101T190559Z.json`
+- Haiku 5.5 with `--pair-echo`: `…haiku-5-5-echo-20261101T190653Z.json`
+- gpt-5.6-luna: `…gpt-5.6-luna-20261101T190738Z.json`
+
+`scripts/tag-lab/guards.py` replays each guard offline on those verdicts, folds the accepted pairs
+into the deterministic groups as the product would, and scores the result. Its output is in
+`results/*.guards.json`.
+
+**Guards on the Haiku run without echo** (pair check at `high` accepted 78 pairs, 9 of them wrong):
+
+| Guard (what gets pre-checked) | Extra cost | Pre-checked: correct / wrong | Pipeline: tags / wrong merges / recall | With cannot-link: wrong / recall |
+|--------------------------------|------------|------------------------------|----------------------------------------|----------------------------------|
+| Pair check `high` (baseline) | — | 62 / 9 | 230 / 23 / 0.86 | 13 / 0.88 |
+| Candidates only (no whole-list pairs) | none | 51 / 7 | 244 / 17 / 0.85 | 11 / 0.86 |
+| Narrower-topic lexical veto | none | 53 / 7 | 240 / 18 / 0.85 | 15 / 0.86 |
+| Agreement: pair `high` and the whole-list call proposed it | none | 49 / 4 | 245 / 8 / 0.88 | 8 / 0.88 |
+| Agreement: pair `high` and a whole-list `high` proposal | none | 32 / 0 | 271 / **0** / 0.85 | 0 / 0.85 |
+| Whole-list `high` proposals only, no pair check | none | 37 / 0 | 266 / **0** / 0.86 | 0 / 0.85 |
+| Cross-model: Haiku and luna both say `high` | +$0.015 per run, and a second provider key | 52 / 0 | 252 / **0** / 0.90 | 0 / 0.89 |
+| **Echo** (separate run; the answer repeats both tags) | +$0.001 per run (more pair output) | **52 / 0** | 253 / **0** / 0.89 (`high`+`medium`: 239 / **0** / 0.91) | 0 / 0.89 |
+| gpt-5.6-luna instead of Haiku (rerun) | +$0.006 per run | 68 / 0 | 238 / **0** / 0.93 | 0 / 0.93 |
+
+**Is it echo, or easier inputs?** The echo run's whole-list call came back empty (see below), so
+its pair check saw only the 287 string candidates, while the non-echo run also checked 55
+whole-list pairs. Two effects have to be separated:
+
+1. **Fewer whole-list pairs going in.** In the non-echo run, 2 of its 9 wrong pairs came only
+   from the whole-list call (`cyber-security`~`Privacy`, `db`~`sql`, both proposed at `low`), and
+   2 more came from both sources.
+2. **Echo itself.** Compare only the 287 candidate pairs. They are the same set, in the same
+   order and in identical batches of 40 for the first 280, in both runs:
+
+   | On the same 287 candidate pairs | Without echo | With echo |
+   |----------------------------------|--------------|-----------|
+   | Different-concept pairs judged "same" (any confidence) | **9 of 192** | **0 of 192** |
+   | Same-concept pairs judged "same" | 57 of 72 | 64 of 72 |
+   | Accepted at `high`: correct / wrong | 51 / **7** | 52 / **0** |
+
+   All 7 wrong candidate pairs (`design`~`design-system`, `design-system`~`system design`, `ui`~`user
+   experience`, `seo`~`selfhosted`, `type systems`~`ts`, `Go`~`algos`, `Ruby`~`ruby on rails`) were
+   answered "not same" with echo. Echo also recovered 7 true pairs the non-echo run missed at `high`
+   (`rust`~`rust-lang`, `Kubernetes`~`kubernets`, `neovim`~`nvim`, …). The non-echo runs are
+   consistent: both made 7 wrong candidate pairs at `high` (first run 7, rerun 7).
+
+   The echo *filter* dropped nothing: there were 0 mismatches. What changed is the model's answers.
+   Writing out both tags before answering anchors each verdict to its own pair. This fits the
+   `seo`~`self-hosting` and `Go`~`algos` answers, which look like verdicts meant for a neighbouring
+   pair.
+
+So effect 2 alone takes the wrong candidate pairs from 7 to 0 at no recall cost, on identical
+inputs. Effect 1 accounts for the rest. Three replication runs, below, confirmed effect 2.
+
+**Run-to-run variance (Haiku, same inputs):**
+
+| | First run | Rerun |
+|---|-----------|-------|
+| Whole-list proposals, overall precision | 0.81 (75 / 18) | 0.76 (66 / 21) |
+| … at `high` | **1.00 (47 / 0)** | **1.00 (37 / 0)** |
+| … at `medium` / `low` | 0.80 / 0.25 | 0.96 / 0.23 |
+| Pair check `high`: wrong pairs (of them, from candidates) | 11 (7) | 9 (7) |
+| Pipeline wrong merges | 23 | 23 |
+
+The overall precision moves because of the `medium`/`low` buckets. The `high` bucket was perfect
+in both runs, and that bucket is what the guard pre-checks.
+
+**The empty whole-list answer.** In the echo run, the whole-list call (identical to the
+non-echo request; echo only changes the pair check) returned 40 output tokens: one group, which
+validation then dropped. It was not a refusal or `max_tokens`, since those raise and would be
+logged as failed calls, and none were. It was not a parse or schema error either, since those
+raise too. It was a schema-valid, nearly empty answer, which is model variance at `effort: low`.
+
+- The harness now records each attempt's `stop_reason`, returned and valid group counts, and
+  retries once when no valid group comes back.
+- The product does the same: retry once, then fall back to the pair check over string
+  candidates, which still runs and is what the echo run shows.
+
+**Echo replication** (3 more Haiku runs with `--pair-echo`, 2026-11-01, $0.033). The whole-list call
+worked in all three: 73, 59 and 87 valid groups, each on its first attempt with `stop_reason`
+`end_turn`.
+
+| Echo run | Pair check `high`: correct / wrong / ambiguous | Pre-check rule (whole-list `high` OR pair `high`): correct / wrong / ambiguous | Pipeline: tags / wrong / recall | With cannot-link | `high`+`medium`: wrong / recall | Echo mismatches | Cost |
+|----------|-----------------------------------------------|--------------------------------------------------------------------------------|---------------------------------|------------------|-------------------------------|-----------------|------|
+| 1 (whole-list empty) | 52 / 0 / 0 | 52 / 0 / 0 | 253 / 0 / 0.89 | 0 / 0.89 | 0 / 0.91 | 0 | $0.008 |
+| 2 | 62 / 0 / 1 | 65 / 0 / 4 | 236 / **0** / 0.92 | 0 / 0.93 | 0 / 0.94 | 0 | $0.011 |
+| 3 | 56 / 0 / 1 | 58 / 0 / 2 | 245 / **0** / 0.90 | 0 / 0.91 | 0 / 0.93 | 0 | $0.010 |
+| 4 | 61 / 0 / 1 | 67 / 0 / 3 | 235 / **0** / 0.93 | 0 / 0.93 | 0 / 0.94 | 0 | $0.012 |
+
+Across the four echo runs, the pair check made 0 wrong pairs at `high` and at `medium`. Without
+echo, both runs made 7 wrong candidate pairs at `high`. The whole-list `high` bucket stayed
+perfect in all five runs that returned proposals (`high` proposals: 47, 37, 38, 26 and 47 correct, 0 wrong).
+
+**Recommendation (final; Haiku 5.5 stays the default):**
+
+1. **Fix symbol handling** in the candidate pass (`c#` is not `c`). It is free, and costs 0 of the
+   102 correct pairs.
+2. **The pair check echoes both tags** in every answer, and mismatched answers are dropped.
+   It costs about +$0.001 per run. This is what removes the wrong pairs (7 → 0 on identical
+   inputs, held in 4 of 4 runs).
+3. **Pre-check** the whole-list `high` proposals plus the pair-check `high` verdicts.
+4. **Cannot-link in union-find.** It was not needed in these runs, but it is free insurance
+   against chains.
+5. **`medium` stays unchecked, under "Check these"** (see below).
+6. **Retry the whole-list call once** if it returns no valid group. When it is empty, the pair
+   check over string candidates still runs, as echo run 1 shows: recall 0.89.
+
+Measured result: **0 wrong pre-checked merges, pipeline recall 0.90–0.93**, about $0.011 per
+consolidation run.
+
+**Why `medium` is not pre-checked, although it had 0 wrong in four runs.** Across the four echo
+runs, the pair check accepted 72 pairs at `medium` only:
+
+- 59 were the same concept (`css`~`css3`, `wfh`~`remote work`, `coding`~`programming`).
+- **13 (18%) were judgment calls**: `web performance`~`perf`, `tools`~`Developer-Tools`,
+  `ux design`~`UI/UX`, `fonts`~`Typography`, `tooling`~`dev tools`, `ai coding agents`~`AI
+  agents`.
+- At `high`, judgment calls were 3 of 234 (1.3%).
+
+The ground truth counts a judgment call as neither right nor wrong, so "0 wrong" overstates how
+safe `medium` is. Almost one `medium` row in five is a broader/narrower or overlapping pair that
+the user should decide. Pre-checking them would add only 0.02–0.03 recall. So `medium` rows go
+under "Check these", listed first, with a "Select all" button. Accepting them all takes one click;
+they are just not applied by default. Revisit this once real libraries show how often users accept
+`medium` rows.
+
+**Fallback, no longer needed:** pre-check only whole-list `high` proposals plus agreement pairs. It
+had 0 wrong in every run, at recall 0.83–0.89. It remains the rule for a provider whose pair check
+cannot echo. The narrower-topic veto stays rejected. gpt-5.6-luna stays a user option: 0 wrong,
+recall 0.93 in its rerun, $0.015 per run.
+
+Differences from the local runs, by design:
+
+- The pair check uses a batched structured boolean plus a confidence label (40 pairs per call). It
+  does not use log-probabilities, because the Anthropic API does not return them. This is what the
+  product would ship.
+  - **Local indication only.** On Qwen3-4B, a plumbing test of this batched form over the 28
+    candidate pairs among the top 110 tags accepted 7 pairs: 2 correct, 3 ambiguous and **2
+    wrong**. The per-pair log-probability check, on all 287 candidates, had 0 wrong.
+  - So on a small model the batched boolean is weaker than per-pair probabilities. This is why
+    the Haiku number matters, and why Proposal B (calibrated per-pair probabilities) stays on the
+    table.
+  - A full local run of the batched check (287 pairs) did not finish within 50 minutes on this
+    CPU, so it was stopped.
+- The pairs checked are the string candidates **plus** the whole-list proposals, as in the
+  design. Results are reported both ways.
+- The "current" suggestion prompt is the production text, but the answer goes through a structured
+  output schema so that it parses reliably. The prompt is unchanged, and only the tag choice is
+  scored.
+- Haiku 5.5 runs at `effort: low` with adaptive thinking left on. Thinking tokens bill as output
+  and are included in the token counts.
+
+## Design
+
+### 1. Deterministic normalization
+
+Three cumulative levels, all in `tag_normalize.rs`:
+
+| Level | Rule | Lab: tags after | Wrong merges |
+|-------|------|-----------------|--------------|
+| raw | — | 600 | — |
+| L1 case | lowercase, trim, collapse `-`/`_`/whitespace to one space, no spaces around `/` | 377 | 0 |
+| L2 compact | L1, then drop spaces, `/` and `.` (`self hosted`=`selfhosted`, `next.js`=`nextjs`, `CI/CD`=`cicd`) | 341 | 0 |
+| L3 plural | the last word's plural (`-s`, `-es`, `-ies`) folds into its singular **only if that singular already exists in the library**. Words of three letters or fewer and `-ss` words never fold. | 303 | 0 |
+
+The existence check is what makes plural folding safe. `kubernetes`, `news`, `physics`, `ios` and
+`analytics` never fold, because `kubernete`, `new`, `physic`, `io` and `analytic` are not tags. A
+stemming dictionary is not needed.
+
+Slash tags are not split. `UI/UX` is one tag and only folds with `ui-ux`/`ui ux`/`ui/ux`. Whether it
+equals `ux` is a judgment call for the review step.
+
+**Canonical display form.** Case is preserved and the user can rename the canonical tag. The new
+pipeline never forces lowercase. The lab's naive rule, the most-used spelling, picked odd display
+forms for some groups (`Coding Agents`, `Startup`, `AI-art`). The default is therefore chosen in
+this order:
+
+1. the most-used spelling written with spaces rather than hyphens or underscores
+2. among those, the all-lowercase spelling, unless every use is cased (acronyms and brands such as
+   `AWS`, `GitHub` and `macOS` keep their case when that is how they are mostly written)
+3. on a tie, the shortest spelling
+
+### 2. Canonical tag model
+
+**Recommended (M1): keep `bookmarks.tags TEXT[]` storing canonical names, and add an alias table
+plus a change log.**
+
+```sql
+-- One row per known spelling, keyed by its compact key.
+CREATE TABLE tag_aliases (
+    user_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    alias_key TEXT NOT NULL,          -- compact_key(spelling)
+    alias     TEXT NOT NULL,          -- a spelling seen, for display ("also: GitHub")
+    canonical TEXT NOT NULL,          -- the tag stored on bookmarks
+    source    TEXT NOT NULL,          -- 'normalize' | 'llm' | 'manual'
+    batch_id  UUID REFERENCES tag_change_batches(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, alias_key)
+);
+
+-- One row per rename/merge/delete/cleanup the user applies; the unit of undo.
+CREATE TABLE tag_change_batches (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,         -- 'normalize' | 'llm_merge' | 'rename' | 'merge' | 'delete'
+    summary    JSONB NOT NULL,        -- the merges applied, for the history list
+    undone_at  TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Before-images of the bookmarks a batch touched.
+CREATE TABLE tag_change_snapshots (
+    batch_id    UUID NOT NULL REFERENCES tag_change_batches(id) ON DELETE CASCADE,
+    bookmark_id UUID NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
+    tags_before TEXT[] NOT NULL,
+    tags_after  TEXT[] NOT NULL,
+    PRIMARY KEY (batch_id, bookmark_id)
+);
+
+-- Before-images of the aliases a batch repointed or dropped.
+CREATE TABLE tag_alias_snapshots (
+    batch_id       UUID NOT NULL REFERENCES tag_change_batches(id) ON DELETE CASCADE,
+    alias_key      TEXT NOT NULL,
+    alias          TEXT NOT NULL,
+    canonical      TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    alias_batch_id UUID,                -- the row's batch_id before this batch
+    PRIMARY KEY (batch_id, alias_key)
+);
+```
+
+**Write path.** One function, `TagResolver::resolve(user_id, raw) -> String`, runs on every tag
+write: bookmark create and update, import, and the API used by the CLI, extension and iOS app.
+
+1. Trim, then reject empty or control-character tags (as today).
+2. Look up `compact_key(raw)` in `tag_aliases`. If found, return its `canonical`.
+3. Otherwise try the L3 plural candidates against `tag_aliases`. If found, return that canonical and
+   insert the new spelling as an alias.
+4. Otherwise it is a new tag. Store it as typed and insert `alias_key → itself`.
+
+Bookmarks keep exact canonical strings, so filtering (`tags && $1`), export and the API stay
+unchanged. Clients never need to know aliases exist.
+
+**Merge semantics.** Merging A into B:
+
+- rewrites every bookmark array, replacing A with B and deduplicating
+- repoints every alias whose canonical is A to B
+- adds `key(A) → B`
+- records the batch and snapshots
+
+Rename is a merge into a new name. Delete removes the tag from bookmarks and drops its aliases. All
+three run in one transaction. Every alias row a batch inserts or repoints gets that batch's
+`batch_id`. Before a batch repoints or drops an existing alias, it writes the row's before-image to
+`tag_alias_snapshots`.
+
+**Undo.** Undo is per batch, from the library page's history list (kept 30 days).
+
+- For each snapshot whose bookmark still has `tags_after`, restore `tags_before`.
+- If a bookmark changed since, apply the inverse as a diff instead: re-add the removed tags and
+  remove the added canonical, only if it was not on the bookmark before.
+- Delete the user's aliases whose `batch_id` is this batch (`WHERE user_id = $u AND batch_id = $b`:
+  the ones it inserted or repointed), then reinsert every before-image from `tag_alias_snapshots`,
+  with the batch's `user_id`. Old spellings resolve as they did before
+  the batch: back to A after an undone merge, and again at all after an undone delete.
+- Mark the batch `undone_at`.
+
+Undo is not offered for a batch that a later, still-applied batch depends on. The UI greys it out
+with "undo the newer change first".
+
+**Splitting an alias.** On the library page, any alias can be "split out" into its own tag. This is
+the escape hatch for a wrong deterministic fold.
+
+**Rejected alternative (M2): a `tags` table plus a `bookmark_tags` join table.** It makes renames a
+one-row update and counts cheap, but it touches every bookmark query, import/export, the API and the
+filter SQL. Libraries here have hundreds of tags and thousands of bookmarks, so array rewrites in one
+transaction are milliseconds. M1 gets the same behaviour with additive migrations.
+
+**Migration.** Migration `015_tag_aliases.sql` creates the tables. Existing tags are never merged
+automatically. The one-time normalization job writes proposals that the user applies through the
+review screen; only new writes resolve through aliases. The job runs L1–L3 per user, at deploy for
+every user or lazily on first visit to the library page. Applying its proposals is a `normalize`
+batch: it rewrites tags, seeds `tag_aliases`, and can be undone like any other batch. Until the user
+has reviewed, the library page shows a banner: "600 spellings can merge into 303 tags · Review".
+
+### 3. Reviewed LLM consolidation
+
+Triggered from the library page ("Find duplicates with AI"). It runs as a background job, not inside
+the HTMX request. The page polls the job, so the 60 s client timeout no longer matters. If the job
+and its stored proposals need their own tables, they go in migration `018_tag_consolidation.sql`.
+
+**Input.** The canonical tags after normalization (not raw spellings), each with its bookmark count
+and one sample title, delimited as untrusted data, as today. With 303 tags this measured 6,440
+input tokens (Qwen tokenizer; expect ±20% on Claude/OpenAI). The current consolidation sends up to
+500 raw tags with three titles each, about 22k input tokens.
+
+**Two proposal sources, merged:**
+
+1. *Whole-list call*: the strict schema below. It catches pure synonyms that share no letters
+   (`wfh`/`remote work`).
+2. *String candidates* (`verify.py candidate_reason`): abbreviation subsequence (`js`/`javascript`),
+   initials (`mcp`), numeronyms (`k8s`, `a11y`), substrings (`web dev`/`web development`),
+   edit distance ≤ 2 (`kubernets`) and shared words. They are free and deterministic. In the lab
+   they found 72 of the 102 residual same-concept pairs in 287 candidate pairs.
+
+**Pairwise check (new).** Every candidate pair from either source goes into one batched call to the
+same provider: "do A and B mean the same thing?". The schema is
+`{"pairs":[{"id":int,"same":bool,"confidence":"high|medium|low"}]}`. For 300 pairs that is about
+9k input + 3k output tokens. A structured boolean is used instead of the log-probabilities the
+lab read, because Anthropic's Messages API does not return token log-probabilities. Pairs judged
+`same` become merge groups (union-find), and the canonical tag follows the display-form rule
+above. Only pairs judged `same` with `high` confidence are
+pre-checked on the review screen. This step is what turns a 6%-precision proposal list into a
+usable one in the lab.
+
+**Whole-list call output, strict schema.** The model returns only groups to merge, not an entry per tag, so output
+scales with the number of duplicates instead of the library size:
+
+```json
+{"merges": [
+  {"canonical": "javascript", "members": ["javascript", "js", "java-script", "javscript"], "confidence": "high"}
+]}
+```
+
+The schema is the same for all three providers: OpenAI Responses `text.format` `json_schema`
+`strict: true`; Anthropic `output_config.format` (GA, no beta header, supported on every Claude model
+Boopmark offers); llama.cpp `response_format` for local runs.
+
+**Prompt** (`scripts/tag-lab/consolidate.py`, `INSTRUCTIONS`):
+
+- Merge synonyms, abbreviations, alternate spellings, typos and a product's other names.
+- Do not merge broader/narrower pairs or related-but-distinct topics.
+- Use only listed tags. The canonical tag is a member. Each tag is in at most one group.
+- Confidence is `high`, `medium` or `low`.
+
+The examples in the prompt (`tf`/`terraform`, `aws lambda`/`serverless`) are deliberately outside
+the lab's concept list, so they do not leak the answers.
+
+**Validation**, applied before anything is shown:
+
+- Drop unknown tags and tags already claimed by an earlier group.
+- Drop groups whose canonical is not a member, or that have fewer than two members.
+- Keep the existing length and control-character checks.
+
+Invalid entries are dropped, never guessed.
+
+**Review screen** ([mockup](assets/2026-10-31-tag-management/mockup-review.png)):
+
+- One row per proposed group: member chips with counts, the canonical tag (editable), confidence,
+  bookmarks affected, and a sample title.
+- `high` rows are pre-checked; `medium` and `low` rows are unchecked under "Check these".
+- "Apply N merges" creates one `llm_merge` batch, which can be undone as a unit.
+
+### 4. UI
+
+**Filter bar** ([mockup](assets/2026-10-31-tag-management/mockup-filter.png)):
+
+- Active tags first, as removable chips. Multi-select: chips *add* to the `tags` filter, and the
+  repository already matches with `&&`.
+- Then the top N canonical tags by bookmark count, with counts. N defaults to 10 on desktop and 4 on
+  mobile, and the bar is one row with no wrap.
+- A "More tags (241)" button opens a popover with a search box. It matches canonical names *and*
+  aliases (typing `k8s` finds `kubernetes`), is keyboard navigable, and links to an A–Z browse list.
+- Server-side, `all_tags` is replaced by `top_tags(user, n)` plus `GET /tags/search?q=`, which
+  returns an HTMX fragment. The popover loads lazily.
+
+**Tag library page** ([mockup](assets/2026-10-31-tag-management/mockup-library.png)). This replaces
+Settings → Tag Library and moves to `/tags`, linked from the filter popover and from Settings:
+
+- table of canonical tags: aliases, count, and Rename · Merge into… · Delete
+- filter box, and sort by most used, A–Z or unused
+- bulk select → "Merge selected into…"
+- the "Find duplicates with AI" button (enabled when a provider key is configured)
+- the batch history with Undo
+
+### 5. Save-time suggestions
+
+Current behaviour (`AnthropicEnricher::build_prompt`, `OpenAiEnricher`): the prompt lists every raw
+tag with its count, the reply is free-form JSON, and tags are stored as returned.
+
+Proposed:
+
+1. Send canonical tags only, most used first (303 → about 2k tokens in the lab, shrinking after
+   cleanup). Cap the list at the 300 most used. Above that, add a lexical prefilter on the URL,
+   title and description.
+2. Use a strict schema: `{"existing": [enum of canonical tags], "new": [string, maxItems 1]}`.
+   OpenAI's limits allow 1000 enum values (15,000 characters if more than 250). Anthropic documents
+   no enum count limit but warns that enum casing is not guaranteed, so resolution compares
+   case-insensitively.
+3. Prompt rules: 2–5 tags, prefer the most specific existing tag, never a tag together with its
+   synonym, at most one new tag and only for a central uncovered topic, short lowercase noun phrase.
+4. Every suggested tag goes through `TagResolver::resolve` before it is shown, so even a new tag
+   that is a spelling of an existing one maps to the canonical tag.
+
+**Measured** (`suggest.py`, Qwen3-4B local, 20 seeded bookmarks sampled with a fixed seed; full
+rows in `out/suggest-qwen3-4b.json`):
+
+| Pipeline | Tags stored | Reused an existing tag exactly | New spelling of an existing tag (duplicate) | Brand-new tag | On-topic vs labels | Input tokens / save | Output tokens / save |
+|----------|-------------|-------------------------------|---------------------------------------------|---------------|--------------------|---------------------|----------------------|
+| Current prompt, stored verbatim | 100 | 84% | 3% | 13% | 33/87 (38%) | 3,050 | 59 |
+| Proposed (canonical enum + resolver) | 77 | **100%** | **0%** | **0%** | 27/77 (35%) | 1,980 | 27 |
+
+Reading the numbers:
+
+- **The current pipeline grows the library on almost every save.** 16 of 100 suggested tags would
+  have become new chips: `database` next to `databases`, `tutorial` next to `tutorials`, and new
+  tags such as `research`, `data` and `configuration management`.
+- **The proposed pipeline cannot grow the library by accident.**
+- *On-topic* is the share of judged tags whose concept is one of the bookmark's labeled concepts.
+  The seeded titles name only one or two concepts, so the low absolute numbers say more about the
+  seed than the prompt. The two pipelines are within noise of each other.
+- **Two weaknesses of the small model** under the proposed schema:
+  - It never used `new`. Going from 13% new tags to 0% may over-suppress a legitimately new topic.
+  - It sometimes padded with an off-topic popular tag (`mobile` on unrelated pages).
+
+  Both should be rechecked on a hosted model. If padding persists, change "2 to 5" to "1 to 5",
+  and add a server-side cap that drops any existing tag the model marks `low`.
+- **Synonyms leak until consolidation runs.** One answer stored `terminal`, `cli` and
+  `command line` together, because `cli` and `command line` are separate canonical tags until
+  consolidation merges them. Suggestions improve after consolidation.
+
+### 6. Shared LLM port
+
+All LLM code goes behind one port with vendor adapters, chosen by config. Suggest-on-save and
+consolidation both call it, and the hybrid search spec references the same names. A prototype with
+tests is on this branch.
+
+**Today.** Three feature ports (`LlmEnricher`, `TagConsolidator`, `LlmPromptAssistant`) each have
+their own Anthropic and OpenAI adapters (`anthropic.rs`, `anthropic_tag_consolidator.rs`,
+`openai.rs`) and three routers (`llm_router.rs`). The HTTP, auth, error mapping and JSON extraction
+are written once per feature per vendor. That is why the Anthropic paths still parse free text
+(gap 7) while the OpenAI path uses a schema.
+
+**The port** (`server/src/domain/ports/llm_client.rs`, prototype):
+
+```rust
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub struct StructuredRequest {
+    pub provider: TextProvider, pub api_key: String, pub model: String,
+    pub system: String, pub user: String,
+    pub json_schema: serde_json::Value, pub max_output_tokens: u32,
+}
+pub struct TokenUsage { pub input_tokens: u32, pub output_tokens: u32 }
+pub struct StructuredResponse { pub json: serde_json::Value, pub usage: TokenUsage }
+
+pub trait LlmClient: Send + Sync {
+    fn complete_structured(&self, req: StructuredRequest)
+        -> BoxFuture<'_, Result<StructuredResponse, DomainError>>;
+}
+```
+
+`BoxFuture` is a local alias with the same shape as `futures::future::BoxFuture`, because the
+server does not depend on the `futures` crate. The names and fields are exactly the ones the
+search spec uses.
+
+**Adapters** (`server/src/adapters/llm_client.rs`, prototype):
+
+| Adapter | Vendor feature | Notes |
+|---------|----------------|-------|
+| `AnthropicLlmClient` | Messages API, `output_config.format` `json_schema` | Reads the `text` block after any `thinking` blocks. Errors on `stop_reason` `refusal` or `max_tokens`. Sends `output_config.effort` (configured, default `low`) only to models that accept it (not Haiku 4.5). Sends no `temperature`: Haiku 5.5 rejects non-default sampling parameters. |
+| `OpenAiLlmClient` | Responses API, `text.format` `json_schema` `strict: true` | Reuses `extract_response_text` from `openai.rs`. |
+| `LlamaCppLlmClient` | `llama-server` chat completions, `response_format` `json_schema` (grammar-constrained) | For the lab and offline development. Ignores the key and the model name. |
+| `LlmClientRouter` | — | Picks the adapter by `req.provider` (the user's setting), unless config pins every request to one backend. |
+
+**Schema keywords.** Anthropic structured outputs do not support array-length or numeric
+constraints (`maxItems`, `minLength`, `minimum`, …). Adapters strip these keywords before sending
+(`strip_unenforced`), and the use case enforces them on the parsed result. For example, the
+suggester truncates to 5 tags, keeps at most 1 new tag, and drops anything not in the enum. The
+llama.cpp adapter keeps the full schema, because its grammar can enforce it.
+
+**Config.** `LlmClientConfig::from_env()`:
+
+- `LLM_BACKEND=llamacpp` with `LLAMACPP_BASE_URL` pins everything to a local server.
+- Otherwise requests are routed by provider, and `ANTHROPIC_EFFORT` (default `low`) sets the
+  effort level.
+
+Per-user provider, model and key stay where they are (`llm_settings`) and travel in each request.
+Adding a vendor means adding one adapter and one `TextProvider` variant.
+
+**Feature ports on top.** Each feature port becomes a thin use-case adapter that builds a prompt
+and schema, calls `LlmClient`, and validates the result. None needs vendor code:
+
+| Existing port | On top of `LlmClient` | Status |
+|---------------|-----------------------|--------|
+| `LlmEnricher` (suggest on save) | `LlmClientEnricher`: title, description, `existing` as an enum of canonical tags, at most one `new` | Prototype in `server/src/app/tag_llm.rs`, with tests |
+| `TagConsolidator` | Replaced by two use-case functions: whole-list proposals and `check_merge_pairs` (batched pair check). The old `mapping` contract (one entry per tag, parent tags) is what this spec removes. | `check_merge_pairs` prototyped; whole-list proposals follow the lab's `SCHEMA` |
+| `LlmPromptAssistant` (image prompts) | Same port with the schema `{"prompt": string}`, then the existing `validate_assisted_image_prompt` | Not prototyped. It is outside tag management, but nothing prevents it. |
+
+After migration, `anthropic.rs`, `anthropic_tag_consolidator.rs` and the text half of `openai.rs`
+shrink to nothing, and the three feature routers collapse into `LlmClientRouter`. The prototype is
+additive: nothing in `main.rs` is rewired yet, so current behaviour is unchanged.
+
+**Tests in the prototype** (focused: `cargo test -p boopmark-server llm_client` and `... tag_llm`, 11 tests;
+none call a network):
+
+- request bodies per vendor
+- thinking blocks are skipped
+- refusals and truncation are errors
+- usage is parsed
+- keywords are stripped at depth while `enum` survives
+- config is read from env
+- the router dispatches by provider or pins to one backend
+- both features run through one stub `LlmClient`: the enricher sends an enum schema and drops
+  off-list tags, and the pair check batches 40 per call and ignores duplicate or unknown ids
+
+The lab's `llm_client.py` mirrors the same port in Python, so `hosted_eval.py` sends the requests
+the server would send.
+
+## Model and API choice
+
+### What the "decision APIs" actually are (verified from primary sources, 2026-10-31)
+
+**OpenAI Decisions API: it exists.** Source:
+[developers.openai.com/api/docs/guides/decisions](https://developers.openai.com/api/docs/guides/decisions)
+and the [API reference](https://developers.openai.com/api/reference/resources/decisions/methods/create).
+
+- Endpoint `POST /v1/decisions`. Model `gpt-6-luna`, "the only currently supported model".
+- Request: `model`, `input` (text, or an array of messages and tool calls), and `questions` (1–400
+  per request).
+- Question types:
+  - `predicate`: returns `probability`
+  - `choice`: one of your values, each with an optional description; returns `probabilities` and
+    `confidence`
+  - `score`: 2–10 levels
+- Answers are typed. It does not generate text.
+- The page opens "The Decisions API is now generally available". It claims to be "about 10x faster
+  than the Responses API".
+- Pricing on the guide: uncached input $0.10 per 1M tokens, output tokens not charged.
+- The guide states no maximum number of choices.
+- Several secondary articles from October describe it as a limited preview, and one reports a 403
+  "not enabled" error on a standard key. The primary doc now says GA. Whether Chris's key has
+  access is unverified because no key was available to this run.
+
+**TypeSafe Jev: it exists.** Sources: [docs.typesafe.ai](https://docs.typesafe.ai/),
+[models](https://docs.typesafe.ai/go/models.md), [Choice](https://docs.typesafe.ai/primitives/choice.md),
+and the official agent skill
+[typesafe-ai/skills SKILL.md](https://github.com/typesafe-ai/skills/blob/main/skills/typesafe-ai/SKILL.md).
+
+- A "System One" decision model. Endpoint `POST https://api.typesafe.ai/v1/systemone`, with a
+  `state` (text or JSON) and a map of typed questions.
+- Question types:
+  - `Choice`: up to 255 options, each described; returns `probabilities` and `confidence`
+  - `Score`
+  - `Noul`: the probability that a statement is true
+- Questions are evaluated in parallel and independently over the same state. It never generates
+  text.
+- Models `jev-1.14.0` and `jev-1.13.0` (`jev-latest`). Price $0.042 per 1M input tokens, output free.
+  Context 64k per request and 32k per question.
+- It needs a separate TypeSafe account and key from console.typesafe.ai.
+- No `jev` skill is installed on this host. I evaluated Jev from the vendor docs and the official
+  skill text instead. The skill's own guidance ("select instead of generate", ask about the null
+  case separately, keep options distinct) shaped the Proposal B design below.
+
+**What both share, and why it matters here.** Both are *classifiers with calibrated probabilities*.
+They answer "is A the same tag as B?" or "which of these tags fits?" very cheaply. Neither can
+*propose* a canonical name, invent a needed new tag, or look at 300 tags and find the groups. Each
+question is evaluated in isolation, so the model never sees the whole vocabulary at once, and the
+whole vocabulary is exactly what consolidation needs.
+
+### Proposals
+
+**A. Deterministic + structured-output LLM with a pairwise check + review (recommended).**
+
+- Consolidation makes two calls to the user's configured provider: whole-list proposals, then a
+  batched pairwise check. Both use strict schemas, and string candidates are added for free.
+  Suggestions use the enum schema.
+- It uses the keys and settings users already have (Anthropic or OpenAI) and adds no vendor.
+- Measured on the local 4B model: precision 1.00 after the pairwise check. Recall needs a
+  stronger model. Haiku 5.5 hosted: pipeline recall 0.89 with 23 wrong merges before guards.
+- Default model Claude Haiku 5.5: about $0.004 per consolidation run and $0.0002 per save on paper.
+  See the table below.
+- All calls go through the shared `LlmClient` port ([section 6](#6-shared-llm-port)).
+
+**B (optional). A, with the pairwise check done by a decision API.** It would be a second adapter
+behind a narrow `PairJudge` port, not behind `LlmClient`: decision APIs return probabilities, not
+JSON. Instead of A's batched generative check,
+send each candidate pair as one predicate/Noul question: "A bookmark tagged '{a}' is about the same
+topic as one tagged '{b}'". This is the step the lab emulated with log-probabilities.
+
+- All pairs go in one request: OpenAI allows 400 questions per request; Jev has no question limit
+  within its context.
+- The calibrated probability drives the review defaults: ≥ 0.9 pre-checked, below that under
+  "Check these". The model's self-reported confidence is not used for this.
+- Cost is negligible: about 300 pairs × ~120 tokens (measured locally, with sample titles) = 36k
+  tokens → $0.004 on OpenAI Decisions, $0.0015 on Jev.
+- It is worth adding only if the review load from A is too high, that is, if users have to inspect
+  many unchecked rows. Jev needs a second key; Decisions needs OpenAI access.
+
+**C. Decision API as the main engine.** For suggestions, one Noul/predicate per canonical tag (300
+questions, about 6–7k tokens; $0.0003 on Jev, $0.0007 on Decisions) and take the top 2–5 above a
+threshold. For consolidation, per-tag `Choice` among candidate canonicals.
+
+- It cannot create a needed new tag, so suggestions still need a generative fallback.
+- Consolidation needs a candidate shortlist per tag (Jev's 255-option cap is below a 300-tag
+  library), so it needs candidate generation on top.
+- It is rejected as the core: more moving parts, a new vendor, and the expensive part (seeing the
+  whole vocabulary) is the part it cannot do.
+
+**D. Deterministic only, no LLM.** Layer 1 plus the library page's manual merge.
+
+- It gets 600 → 303 with zero cost and is the baseline everyone gets, including users without a
+  key.
+- It leaves the synonym and abbreviation tail (91 merges in the lab) to manual work.
+
+### Model choice
+
+**Measured:** Qwen3-4B locally, and Claude Haiku 5.5 and gpt-5.6-luna hosted
+([Hosted measurement](#hosted-measurement-claude-haiku-55)). Haiku 5.5's whole-list precision is
+0.81 (1.00 at `high`); its pair check is 0.85 precise with 0.63 recall of the residual. luna is
+more precise (0.97) at similar recall and a 50% higher cost per run.
+
+**Defaults (decided):**
+
+- **Claude Haiku 5.5 (`claude-haiku-5-5`) for both suggestions and merge proposals.**
+  - Run it at `output_config.effort: low`. Haiku 5.5 defaults to `medium` and thinks adaptively,
+    and short tagging calls do not need more.
+  - Send no `temperature`: Haiku 5.5 rejects non-default sampling parameters.
+  - Leave room for thinking in `max_tokens` (1,024 per save, 4,096 per pair batch, 16,000 for
+    the whole-list call).
+- **Why a small model is enough here.** The LLM never decides alone:
+  - Deterministic normalization makes 77% of the merges before any model runs.
+  - The pair check filters the whole-list proposals.
+  - The review screen gates every merge, and undo backs it.
+  - On save, the enum allows only existing canonical tags plus at most one new tag, and the
+    resolver maps that one to an existing tag when it can.
+- **Change `DEFAULT_ANTHROPIC_MODEL`** from `claude-haiku-4-5-20251001` to `claude-haiku-5-5`,
+  and add Haiku 5.5 to `ANTHROPIC_MODEL_OPTIONS`. Haiku 5.5 is 10× cheaper than Haiku 4.5.
+  Existing users keep their saved model.
+- **OpenAI users** keep `gpt-5.6-luna` (similar price class) through the same port.
+- **Escape hatch if Haiku 5.5's recall disappoints.** Offer an opt-in "thorough" run with Claude
+  Sonnet 5.5 on the library page (about $0.09 per run on paper). Precision is protected either way
+  by the pair check and the review screen, so the model only moves recall.
+
+**Paper cost estimates** (list prices on the providers' pricing pages, 2026-10-31; token counts from
+the lab, rounded):
+
+| Model | $/M in, out | Consolidation, proposed (whole-list 6.5k in / 2.5k out + pair check 9k in / 3k out) | Consolidation, current (~22k in / ~5.5k out) | Per save, proposed (measured 2.0k in / 27 out) | Per save, current (measured 3.05k in / 59 out) |
+|-------|-------------|-----|-----|-----|-----|
+| claude-haiku-4-5 (app default) | 1 / 5 | $0.043 | $0.050 | $0.0021 | $0.0033 |
+| **claude-haiku-5-5 (proposed default)** | 0.10 / 0.50 (prompts ≤ 100k tokens) | **$0.004** | $0.005 | **$0.0002** | $0.0003 |
+| claude-sonnet-5-5 (opt-in "thorough") | 2 / 10 | $0.086 | $0.099 | $0.0042 | $0.0067 |
+| claude-sonnet-5 | 2 / 10 | $0.086 | $0.099 | $0.0042 | $0.0067 |
+| claude-opus-5-5 | 4 / 20 | $0.17 | $0.20 | $0.0085 | $0.013 |
+| gpt-5.6-luna (app default) | 0.20 / 1.20 | $0.010 | $0.011 | $0.0004 | $0.0007 |
+| gpt-5.6-terra | 2 / 12 | $0.097 | $0.11 | $0.0043 | $0.0068 |
+| gpt-5.6-sol | 4 / 20 | $0.17 | $0.20 | $0.0085 | $0.013 |
+| OpenAI Decisions (gpt-6-luna), pair check only (36k in) | 0.10 / free | +$0.004 | — | Proposal C: ~$0.0007 | — |
+| TypeSafe Jev, pair check only (36k in) | 0.042 / free | +$0.0015 | — | Proposal C: ~$0.0003 | — |
+
+Every option costs cents per consolidation run and fractions of a cent per save, so cost does not
+decide between them; quality does. The proposed consolidation costs about the same as today's
+while doing more (a pair check plus review). Suggestions get cheaper because the canonical list is
+half the size of the raw list (measured 1,980 vs 3,050 input tokens per save).
+
+## Testing
+
+- Unit: `tag_normalize` (on this branch: 7 tests); the `LlmClient` adapters, router and the two
+  use cases on top (on this branch: 11 tests, no network). Also resolver lookup order,
+  merge/rename/delete/undo on a stub repository, and consolidation validation for unknown tags,
+  claimed tags, a non-member canonical, and singleton groups.
+- Repository: alias upsert and lookup, batch apply and undo in one transaction, and undo with
+  intervening edits (Postgres integration tests like the existing ones).
+- E2E (Playwright, the committed harness): seed a messy library, check the filter bar shows at most
+  N chips plus "More", search `k8s` finds `kubernetes`, a merge on the library page can be undone,
+  and the review screen applies only checked rows.
+- Lab regression: `scripts/tag-lab` can be rerun when prompts change. Zero wrong deterministic
+  merges is a hard gate; LLM precision is tracked.
+
+## Rollout
+
+1. Normalizer, resolver, alias tables and migration, write-path resolution. No UI change except the
+   banner. Biggest win, no LLM.
+2. Filter bar (top N + More + multi-select) and the `/tags` library page with manual merge and undo.
+3. The `LlmClient` port and adapters wired in `main.rs`, `LlmEnricher` moved onto it, the suggestion
+   prompt and enum schema, and the Haiku 5.5 default. Later LLM callers (search included) build on the
+   port from here.
+4. LLM consolidation as a background job with the review screen, on the port. Remove the old
+   one-click button, `TagConsolidator` and its adapters.
+5. Optional: Proposal B verifier, if review load warrants it.
+
+## Spend log
+
+| Run | Provider / model | Calls | Input tokens | Output tokens | $ |
+|-----|------------------|-------|--------------|---------------|---|
+| Whole-list consolidation | local llama.cpp, Qwen3-4B-Instruct-2507 Q4_K_M | 1 | 6,440 | 1,791 | 0 |
+| Pair check on its 84 proposals | local | 84 | 10,082 | 84 | 0 |
+| Pair check on 287 string candidates | local | 287 | 34,200 | 287 | 0 |
+| Save-time suggestions, current prompt | local | 20 | 61,000 | 1,180 | 0 |
+| Save-time suggestions, proposed prompt | local | 20 | 39,600 | 540 | 0 |
+| Port plumbing check: `hosted_eval.py` suggestions (2 bookmarks) and pair check (110 tags) | local | — | — | — | 0 |
+| Hosted run, all steps (helper, 2026-11-01) | Anthropic claude-haiku-5-5, effort low | 70 | 317,304 | 18,539 | **0.041** |
+| Hosted run, all steps (helper, 2026-11-01) | OpenAI gpt-5.6-luna | 69 | 194,187 | 16,843 | **0.059** |
+| Decision APIs | — | 0 | 0 | 0 | 0 |
+| Guard reruns with per-pair details: Haiku, Haiku echo, luna (helper, 2026-11-01) | Anthropic, OpenAI | 28 | 78,652 | 32,141 | **0.033** |
+| Echo replication: 3 Haiku `--pair-echo` runs (helper, 2026-11-01) | Anthropic claude-haiku-5-5 | 29 | 92,437 | 46,690 | **0.033** |
+| **Total paid** | | | | | **$0.165 of the $10 approved** |
+
+## Open items
+
+- **Rerunning the hosted lab** works from a clean clone: macOS system `python3` 3.9+, no Postgres,
+  Rust or pip. `python3 scripts/tag-lab/hosted_eval.py --dry-run` checks the setup without a key.
+  Add `--pair-echo` for the recommended pair check, then run `guards.py` on the result.
+- **`medium` pre-check.** Revisit it with real acceptance data from the review screen.
+- **Decision API access.** The OpenAI Decisions guide says GA, but secondary reports from October
+  describe per-account enablement. Check with one request before building Proposal B on it.
+- **Real library check.** Run the normalizer over Chris's production tag list (read-only
+  `tags_with_counts` export) and hand-check its merges before the migration ships.

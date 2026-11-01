@@ -1,0 +1,1 @@
+{"run": "qwen3-4b", "provider": "llamacpp", "model": "qwen3-4b-instruct-2507-q4km", "input_tokens": 6440, "output_tokens": 1791, "usd": 0.0, "seconds": 573.3}

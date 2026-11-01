@@ -1,0 +1,593 @@
+{
+ "rows": [
+  {
+   "a": "mobile",
+   "b": "ios",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "mobile-dev",
+   "b": "ios",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "swift",
+   "b": "ios",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "react native",
+   "b": "ios",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "android",
+   "b": "ios",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "macos",
+   "b": "ios",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "frontend",
+   "b": "react",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "web development",
+   "b": "react",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ui",
+   "b": "react",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ux",
+   "b": "react",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "user experience",
+   "b": "react",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "design",
+   "b": "react",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "design-system",
+   "b": "react",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "figma",
+   "b": "react",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ux design",
+   "b": "react",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "python3",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.447,
+   "label": "same"
+  },
+  {
+   "a": "pyhton",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.9638,
+   "label": "same"
+  },
+  {
+   "a": "data science",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "machine learning",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "deep learning",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai coding agents",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "large language models",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "llama.cpp",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "claude code",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "claude",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "transformers",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "computer vision",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai safety",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "local ai",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "local llm",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "agents",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "retrieval-augmented-generation",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "vector db",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "vector database",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "vector embeddings",
+   "b": "python",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "embedded systems",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "embedded",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "arduino",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "raspberry pi",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "rpi",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "robotics",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "self-hosting",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "selfhosted",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "homelab",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "operating systems",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "linux",
+   "b": "hardware",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cloud computing",
+   "b": "cloud",
+   "reason": "llm",
+   "p_yes": 0.0054,
+   "label": "same"
+  },
+  {
+   "a": "aws",
+   "b": "cloud",
+   "reason": "llm",
+   "p_yes": 0.001,
+   "label": "different"
+  },
+  {
+   "a": "amazon web services",
+   "b": "cloud",
+   "reason": "llm",
+   "p_yes": 0.0001,
+   "label": "different"
+  },
+  {
+   "a": "cloudflare",
+   "b": "cloud",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "docker",
+   "b": "cloud",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "continuous integration",
+   "b": "cloud",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "dev tools",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0001,
+   "label": "ambiguous"
+  },
+  {
+   "a": "tooling",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "same"
+  },
+  {
+   "a": "cli",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "command line",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "terminal",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "terminal emulator",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "vscode",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "visual studio code",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "git",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "github",
+   "b": "tools",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "api design",
+   "b": "backend",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "microservices",
+   "b": "backend",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "distributed systems",
+   "b": "backend",
+   "reason": "llm",
+   "p_yes": 0.0001,
+   "label": "different"
+  },
+  {
+   "a": "system design",
+   "b": "backend",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cyber-security",
+   "b": "security",
+   "reason": "llm",
+   "p_yes": 0.0008,
+   "label": "same"
+  },
+  {
+   "a": "dns",
+   "b": "security",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "networking",
+   "b": "security",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "personal finance",
+   "b": "productivity",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "finance",
+   "b": "productivity",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "business",
+   "b": "productivity",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "marketing",
+   "b": "productivity",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "management",
+   "b": "productivity",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "leadership",
+   "b": "productivity",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "remote work",
+   "b": "productivity",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "wfh",
+   "b": "productivity",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "product",
+   "b": "productivity",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "blog",
+   "b": "books",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "blogging",
+   "b": "books",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "writing",
+   "b": "books",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "how-to",
+   "b": "books",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cheat-sheets",
+   "b": "books",
+   "reason": "llm",
+   "p_yes": 0.0,
+   "label": "different"
+  }
+ ],
+ "residual_same_pairs": 102
+}

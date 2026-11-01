@@ -1,0 +1,2014 @@
+{
+ "rows": [
+  {
+   "a": "AI agents",
+   "b": "agents",
+   "reason": "substring",
+   "p_yes": 0.0022,
+   "label": "same"
+  },
+  {
+   "a": "AI agents",
+   "b": "ai",
+   "reason": "abbreviation",
+   "p_yes": 0.0003,
+   "label": "different"
+  },
+  {
+   "a": "AI agents",
+   "b": "ai coding agents",
+   "reason": "shared-words",
+   "p_yes": 0.0001,
+   "label": "ambiguous"
+  },
+  {
+   "a": "AI agents",
+   "b": "ts",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "AI-art",
+   "b": "ai",
+   "reason": "abbreviation",
+   "p_yes": 0.0106,
+   "label": "different"
+  },
+  {
+   "a": "Agentic-AI",
+   "b": "ai",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Algorithms",
+   "b": "Go",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Algorithms",
+   "b": "ai",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Algorithms",
+   "b": "algos",
+   "reason": "abbreviation",
+   "p_yes": 0.095,
+   "label": "same"
+  },
+  {
+   "a": "Anthropic",
+   "b": "ai",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Artificial-Intelligence",
+   "b": "ai",
+   "reason": "abbreviation",
+   "p_yes": 0.9485,
+   "label": "same"
+  },
+  {
+   "a": "CI/CD",
+   "b": "c#",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "CI/CD",
+   "b": "c++",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Coding Agents",
+   "b": "agents",
+   "reason": "substring",
+   "p_yes": 0.3497,
+   "label": "ambiguous"
+  },
+  {
+   "a": "Coding Agents",
+   "b": "ai coding agents",
+   "reason": "substring",
+   "p_yes": 0.0719,
+   "label": "same"
+  },
+  {
+   "a": "Coding Agents",
+   "b": "c#",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Coding Agents",
+   "b": "c++",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Coding Agents",
+   "b": "coding",
+   "reason": "substring",
+   "p_yes": 0.0005,
+   "label": "different"
+  },
+  {
+   "a": "Coding Agents",
+   "b": "ts",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Containers",
+   "b": "ai",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Containers",
+   "b": "c#",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Containers",
+   "b": "c++",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Debugging",
+   "b": "db",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Debugging",
+   "b": "debug",
+   "reason": "abbreviation",
+   "p_yes": 0.2503,
+   "label": "same"
+  },
+  {
+   "a": "Developer-Tools",
+   "b": "tools",
+   "reason": "substring",
+   "p_yes": 0.0001,
+   "label": "ambiguous"
+  },
+  {
+   "a": "Electron",
+   "b": "Electronics",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Electron",
+   "b": "econ",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Electronics",
+   "b": "econ",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Embeddings",
+   "b": "vector embeddings",
+   "reason": "substring",
+   "p_yes": 0.3447,
+   "label": "same"
+  },
+  {
+   "a": "Engineering-Management",
+   "b": "management",
+   "reason": "substring",
+   "p_yes": 0.0017,
+   "label": "ambiguous"
+  },
+  {
+   "a": "FP",
+   "b": "functional programming",
+   "reason": "abbreviation",
+   "p_yes": 0.0063,
+   "label": "same"
+  },
+  {
+   "a": "GNU/Linux",
+   "b": "linux",
+   "reason": "substring",
+   "p_yes": 0.0289,
+   "label": "same"
+  },
+  {
+   "a": "GNU/Linux",
+   "b": "ux",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "GitLab",
+   "b": "git",
+   "reason": "abbreviation",
+   "p_yes": 0.0011,
+   "label": "different"
+  },
+  {
+   "a": "GitLab",
+   "b": "github",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Go",
+   "b": "Golang",
+   "reason": "abbreviation",
+   "p_yes": 0.0821,
+   "label": "same"
+  },
+  {
+   "a": "Go",
+   "b": "algos",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Go",
+   "b": "game-development",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Go",
+   "b": "google",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "InfoSec",
+   "b": "ios",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "K8s",
+   "b": "Kubernetes",
+   "reason": "numeronym",
+   "p_yes": 0.9899,
+   "label": "same"
+  },
+  {
+   "a": "Kubernetes",
+   "b": "kubernets",
+   "reason": "typo",
+   "p_yes": 0.0444,
+   "label": "same"
+  },
+  {
+   "a": "LLM",
+   "b": "LLM-evals",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "LLM",
+   "b": "large language models",
+   "reason": "abbreviation",
+   "p_yes": 0.9999,
+   "label": "same"
+  },
+  {
+   "a": "LLM",
+   "b": "llama",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "LLM",
+   "b": "llama.cpp",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "LLM",
+   "b": "local llm",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "LLM-evals",
+   "b": "evals",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "same"
+  },
+  {
+   "a": "MCP",
+   "b": "model context protocol",
+   "reason": "abbreviation",
+   "p_yes": 0.9858,
+   "label": "same"
+  },
+  {
+   "a": "ML",
+   "b": "html",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ML",
+   "b": "html5",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ML",
+   "b": "machine learning",
+   "reason": "abbreviation",
+   "p_yes": 0.0001,
+   "label": "same"
+  },
+  {
+   "a": "ML",
+   "b": "mobile",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ML",
+   "b": "mobile development",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ML",
+   "b": "mobile-dev",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ML",
+   "b": "model context protocol",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Nix",
+   "b": "nixos",
+   "reason": "abbreviation",
+   "p_yes": 0.0107,
+   "label": "ambiguous"
+  },
+  {
+   "a": "OSS",
+   "b": "operating systems",
+   "reason": "abbreviation",
+   "p_yes": 0.0016,
+   "label": "different"
+  },
+  {
+   "a": "Observability",
+   "b": "o11y",
+   "reason": "numeronym",
+   "p_yes": 0.0001,
+   "label": "same"
+  },
+  {
+   "a": "Philosophy",
+   "b": "php",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "React.js",
+   "b": "js",
+   "reason": "substring",
+   "p_yes": 0.0001,
+   "label": "different"
+  },
+  {
+   "a": "React.js",
+   "b": "react",
+   "reason": "abbreviation",
+   "p_yes": 0.0224,
+   "label": "same"
+  },
+  {
+   "a": "Remote Working",
+   "b": "remote work",
+   "reason": "substring",
+   "p_yes": 0.4327,
+   "label": "same"
+  },
+  {
+   "a": "Ruby",
+   "b": "ruby on rails",
+   "reason": "abbreviation",
+   "p_yes": 0.4657,
+   "label": "different"
+  },
+  {
+   "a": "Science",
+   "b": "data science",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Software-Architecture",
+   "b": "architecture",
+   "reason": "substring",
+   "p_yes": 0.0247,
+   "label": "same"
+  },
+  {
+   "a": "Software-Architecture",
+   "b": "swe",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Stable Diffusion",
+   "b": "seo",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "UI/UX",
+   "b": "ui",
+   "reason": "abbreviation",
+   "p_yes": 0.1085,
+   "label": "ambiguous"
+  },
+  {
+   "a": "UI/UX",
+   "b": "ux",
+   "reason": "abbreviation",
+   "p_yes": 0.6813,
+   "label": "ambiguous"
+  },
+  {
+   "a": "Vim",
+   "b": "neovim",
+   "reason": "substring",
+   "p_yes": 0.0001,
+   "label": "ambiguous"
+  },
+  {
+   "a": "Vim",
+   "b": "nvim",
+   "reason": "substring",
+   "p_yes": 0.0003,
+   "label": "ambiguous"
+  },
+  {
+   "a": "Vim",
+   "b": "video games",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Vue",
+   "b": "visual studio code",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "Vue",
+   "b": "vue.js",
+   "reason": "abbreviation",
+   "p_yes": 0.3118,
+   "label": "same"
+  },
+  {
+   "a": "Web Dev",
+   "b": "web development",
+   "reason": "substring",
+   "p_yes": 0.9641,
+   "label": "same"
+  },
+  {
+   "a": "WebAssembly",
+   "b": "wasm",
+   "reason": "abbreviation",
+   "p_yes": 0.8266,
+   "label": "same"
+  },
+  {
+   "a": "a11y",
+   "b": "accessibility",
+   "reason": "numeronym",
+   "p_yes": 0.9674,
+   "label": "same"
+  },
+  {
+   "a": "accessibility",
+   "b": "ai",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "agents",
+   "b": "ai coding agents",
+   "reason": "substring",
+   "p_yes": 0.0006,
+   "label": "ambiguous"
+  },
+  {
+   "a": "agents",
+   "b": "ts",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "ai coding agents",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "ai safety",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "ai",
+   "b": "amazon web services",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "analytics",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "android",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "api design",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "apis",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "architecture",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "arduino",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "automation",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "blockchain",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "email",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "local ai",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "openai",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "rails",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "ruby on rails",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "tailwind",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai",
+   "b": "tailwind-css",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ai coding agents",
+   "b": "coding",
+   "reason": "substring",
+   "p_yes": 0.0001,
+   "label": "different"
+  },
+  {
+   "a": "ai coding agents",
+   "b": "ts",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "amazon web services",
+   "b": "aws",
+   "reason": "abbreviation",
+   "p_yes": 1.0,
+   "label": "same"
+  },
+  {
+   "a": "api design",
+   "b": "apis",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "api design",
+   "b": "design",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "arduino",
+   "b": "ui",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "async rust",
+   "b": "rust",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "blog",
+   "b": "blogging",
+   "reason": "abbreviation",
+   "p_yes": 0.0003,
+   "label": "same"
+  },
+  {
+   "a": "books",
+   "b": "tools",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "c++",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "careers",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "chatgpt",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cheat-sheets",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "claude",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "claude code",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cli",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "climate",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "climate change",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cloud",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cloud computing",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cloudflare",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "coding",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "color",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "colour",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "command line",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "compilers",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "computer vision",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "concurrency",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "continuous integration",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cooking",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cpp",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cryptography",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "csharp",
+   "reason": "abbreviation",
+   "p_yes": 0.032,
+   "label": "same"
+  },
+  {
+   "a": "c#",
+   "b": "css",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "css3",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cuda",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c#",
+   "b": "cyber-security",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "careers",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "chatgpt",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "cheat-sheets",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "claude",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "claude code",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "cli",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "climate",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "climate change",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "cloud",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "cloud computing",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "cloudflare",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "coding",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "color",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "colour",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "command line",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "compilers",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "computer vision",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "concurrency",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "continuous integration",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "cooking",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "cpp",
+   "reason": "abbreviation",
+   "p_yes": 0.9971,
+   "label": "same"
+  },
+  {
+   "a": "c++",
+   "b": "cryptography",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "csharp",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "css",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "css3",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "cuda",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "c++",
+   "b": "cyber-security",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cheat-sheets",
+   "b": "css",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cheat-sheets",
+   "b": "ts",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "claude",
+   "b": "claude code",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "claude",
+   "b": "cloud",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cli",
+   "b": "climate",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cli",
+   "b": "climate change",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cli",
+   "b": "cloud computing",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cli",
+   "b": "command line",
+   "reason": "abbreviation",
+   "p_yes": 0.1251,
+   "label": "same"
+  },
+  {
+   "a": "climate",
+   "b": "climate change",
+   "reason": "substring",
+   "p_yes": 0.0002,
+   "label": "same"
+  },
+  {
+   "a": "cloud",
+   "b": "cloud computing",
+   "reason": "abbreviation",
+   "p_yes": 0.0017,
+   "label": "same"
+  },
+  {
+   "a": "cloud",
+   "b": "cloudflare",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cloud",
+   "b": "colour",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cloudflare",
+   "b": "cuda",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "coding",
+   "b": "cooking",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "color",
+   "b": "colour",
+   "reason": "abbreviation",
+   "p_yes": 0.9963,
+   "label": "same"
+  },
+  {
+   "a": "cooking",
+   "b": "tooling",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cpp",
+   "b": "cryptography",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cpp",
+   "b": "llama.cpp",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "css",
+   "b": "css3",
+   "reason": "abbreviation",
+   "p_yes": 0.0007,
+   "label": "same"
+  },
+  {
+   "a": "css",
+   "b": "tailwind-css",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "cyber-security",
+   "b": "security",
+   "reason": "substring",
+   "p_yes": 0.0008,
+   "label": "same"
+  },
+  {
+   "a": "databases",
+   "b": "db",
+   "reason": "abbreviation",
+   "p_yes": 0.5227,
+   "label": "same"
+  },
+  {
+   "a": "db",
+   "b": "debug",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "db",
+   "b": "distributed systems",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "db",
+   "b": "vector db",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "design",
+   "b": "design-system",
+   "reason": "substring",
+   "p_yes": 0.0471,
+   "label": "different"
+  },
+  {
+   "a": "design",
+   "b": "system design",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "design",
+   "b": "ux design",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "design-system",
+   "b": "dns",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "design-system",
+   "b": "system design",
+   "reason": "shared-words",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "dev tools",
+   "b": "tools",
+   "reason": "substring",
+   "p_yes": 0.0001,
+   "label": "ambiguous"
+  },
+  {
+   "a": "econ",
+   "b": "economics",
+   "reason": "abbreviation",
+   "p_yes": 0.7826,
+   "label": "same"
+  },
+  {
+   "a": "emacs",
+   "b": "email",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "emacs",
+   "b": "evals",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "emacs",
+   "b": "macos",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "embedded",
+   "b": "embedded systems",
+   "reason": "substring",
+   "p_yes": 0.0024,
+   "label": "same"
+  },
+  {
+   "a": "eng-management",
+   "b": "management",
+   "reason": "substring",
+   "p_yes": 0.0134,
+   "label": "ambiguous"
+  },
+  {
+   "a": "finance",
+   "b": "personal finance",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "fonts",
+   "b": "ts",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "functional programming",
+   "b": "programming",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "game dev",
+   "b": "game-development",
+   "reason": "substring",
+   "p_yes": 0.5126,
+   "label": "same"
+  },
+  {
+   "a": "games",
+   "b": "video games",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "same"
+  },
+  {
+   "a": "git",
+   "b": "github",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "html",
+   "b": "html5",
+   "reason": "abbreviation",
+   "p_yes": 0.0001,
+   "label": "same"
+  },
+  {
+   "a": "humor",
+   "b": "humour",
+   "reason": "abbreviation",
+   "p_yes": 0.9991,
+   "label": "same"
+  },
+  {
+   "a": "java",
+   "b": "javascript",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "javascript",
+   "b": "javscript",
+   "reason": "typo",
+   "p_yes": 1.0,
+   "label": "same"
+  },
+  {
+   "a": "javascript",
+   "b": "js",
+   "reason": "abbreviation",
+   "p_yes": 0.9644,
+   "label": "same"
+  },
+  {
+   "a": "javscript",
+   "b": "js",
+   "reason": "abbreviation",
+   "p_yes": 0.973,
+   "label": "same"
+  },
+  {
+   "a": "js",
+   "b": "next-js",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "js",
+   "b": "vue.js",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "kubernets",
+   "b": "ts",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "linux",
+   "b": "ux",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "llama",
+   "b": "llama.cpp",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "llama",
+   "b": "ollama",
+   "reason": "substring",
+   "p_yes": 0.0001,
+   "label": "different"
+  },
+  {
+   "a": "math",
+   "b": "mathematics",
+   "reason": "abbreviation",
+   "p_yes": 0.0362,
+   "label": "same"
+  },
+  {
+   "a": "mobile",
+   "b": "mobile development",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "same"
+  },
+  {
+   "a": "mobile",
+   "b": "mobile-dev",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "same"
+  },
+  {
+   "a": "mobile development",
+   "b": "mobile-dev",
+   "reason": "substring",
+   "p_yes": 0.9999,
+   "label": "same"
+  },
+  {
+   "a": "neovim",
+   "b": "nvim",
+   "reason": "abbreviation",
+   "p_yes": 0.1659,
+   "label": "same"
+  },
+  {
+   "a": "no-code",
+   "b": "unicode",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "no-code",
+   "b": "vscode",
+   "reason": "typo",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "perf",
+   "b": "performance",
+   "reason": "abbreviation",
+   "p_yes": 0.5268,
+   "label": "same"
+  },
+  {
+   "a": "perf",
+   "b": "personal finance",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "perf",
+   "b": "web performance",
+   "reason": "substring",
+   "p_yes": 0.0001,
+   "label": "ambiguous"
+  },
+  {
+   "a": "perf",
+   "b": "web-perf",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "performance",
+   "b": "web performance",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "postgres",
+   "b": "postgresql",
+   "reason": "substring",
+   "p_yes": 0.2775,
+   "label": "same"
+  },
+  {
+   "a": "postgresql",
+   "b": "sql",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "product",
+   "b": "productivity",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "pyhton",
+   "b": "python",
+   "reason": "typo",
+   "p_yes": 0.9638,
+   "label": "same"
+  },
+  {
+   "a": "python",
+   "b": "python3",
+   "reason": "substring",
+   "p_yes": 0.0169,
+   "label": "same"
+  },
+  {
+   "a": "rag",
+   "b": "refactoring",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "rag",
+   "b": "retrieval-augmented-generation",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "same"
+  },
+  {
+   "a": "rag",
+   "b": "rust-lang",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "rails",
+   "b": "ruby on rails",
+   "reason": "abbreviation",
+   "p_yes": 0.1472,
+   "label": "same"
+  },
+  {
+   "a": "raspberry pi",
+   "b": "rpi",
+   "reason": "abbreviation",
+   "p_yes": 1.0,
+   "label": "same"
+  },
+  {
+   "a": "react",
+   "b": "react native",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "react",
+   "b": "refactor",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "react",
+   "b": "refactoring",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "refactor",
+   "b": "refactoring",
+   "reason": "substring",
+   "p_yes": 0.7486,
+   "label": "same"
+  },
+  {
+   "a": "regex",
+   "b": "regular expressions",
+   "reason": "abbreviation",
+   "p_yes": 0.9999,
+   "label": "same"
+  },
+  {
+   "a": "regular expressions",
+   "b": "rpi",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "regular expressions",
+   "b": "rss",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "robotics",
+   "b": "robots",
+   "reason": "typo",
+   "p_yes": 0.0027,
+   "label": "same"
+  },
+  {
+   "a": "robots",
+   "b": "ts",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "rust",
+   "b": "rust-lang",
+   "reason": "abbreviation",
+   "p_yes": 0.0008,
+   "label": "same"
+  },
+  {
+   "a": "self-hosting",
+   "b": "seo",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "selfhosted",
+   "b": "seo",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "software-engineering",
+   "b": "swe",
+   "reason": "abbreviation",
+   "p_yes": 0.9971,
+   "label": "same"
+  },
+  {
+   "a": "sql",
+   "b": "sqlite",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "sql",
+   "b": "sqlite3",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "sqlite",
+   "b": "sqlite3",
+   "reason": "substring",
+   "p_yes": 0.0021,
+   "label": "same"
+  },
+  {
+   "a": "statistics",
+   "b": "stats",
+   "reason": "abbreviation",
+   "p_yes": 0.9992,
+   "label": "same"
+  },
+  {
+   "a": "stats",
+   "b": "ts",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "svelte",
+   "b": "sveltekit",
+   "reason": "substring",
+   "p_yes": 0.0001,
+   "label": "ambiguous"
+  },
+  {
+   "a": "tailwind",
+   "b": "tailwind-css",
+   "reason": "substring",
+   "p_yes": 0.0009,
+   "label": "same"
+  },
+  {
+   "a": "tailwind-css",
+   "b": "ts",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "terminal",
+   "b": "terminal emulator",
+   "reason": "substring",
+   "p_yes": 0.0002,
+   "label": "same"
+  },
+  {
+   "a": "test driven development",
+   "b": "ts",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "testing",
+   "b": "ts",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "testing",
+   "b": "unit testing",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "tests",
+   "b": "ts",
+   "reason": "abbreviation",
+   "p_yes": 0.0001,
+   "label": "different"
+  },
+  {
+   "a": "tests",
+   "b": "type systems",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "tests",
+   "b": "unit-tests",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "ambiguous"
+  },
+  {
+   "a": "tools",
+   "b": "ts",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "transformers",
+   "b": "ts",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "travel",
+   "b": "traveling",
+   "reason": "substring",
+   "p_yes": 0.0048,
+   "label": "same"
+  },
+  {
+   "a": "travel",
+   "b": "travelling",
+   "reason": "substring",
+   "p_yes": 0.0059,
+   "label": "same"
+  },
+  {
+   "a": "traveling",
+   "b": "travelling",
+   "reason": "typo",
+   "p_yes": 0.1952,
+   "label": "same"
+  },
+  {
+   "a": "ts",
+   "b": "type systems",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ts",
+   "b": "typescript",
+   "reason": "abbreviation",
+   "p_yes": 0.0002,
+   "label": "same"
+  },
+  {
+   "a": "ts",
+   "b": "unit-tests",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ts",
+   "b": "web components",
+   "reason": "substring",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ui",
+   "b": "unicode",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ui",
+   "b": "unit testing",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ui",
+   "b": "unit-tests",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "ui",
+   "b": "user experience",
+   "reason": "abbreviation",
+   "p_yes": 0.0001,
+   "label": "different"
+  },
+  {
+   "a": "ui",
+   "b": "user interface",
+   "reason": "abbreviation",
+   "p_yes": 0.762,
+   "label": "same"
+  },
+  {
+   "a": "ui",
+   "b": "ux design",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "user experience",
+   "b": "ux",
+   "reason": "abbreviation",
+   "p_yes": 0.3795,
+   "label": "same"
+  },
+  {
+   "a": "ux",
+   "b": "ux design",
+   "reason": "abbreviation",
+   "p_yes": 0.0171,
+   "label": "same"
+  },
+  {
+   "a": "video",
+   "b": "video games",
+   "reason": "abbreviation",
+   "p_yes": 0.0,
+   "label": "different"
+  },
+  {
+   "a": "web performance",
+   "b": "web-perf",
+   "reason": "substring",
+   "p_yes": 0.9995,
+   "label": "same"
+  }
+ ],
+ "residual_same_pairs": 102
+}

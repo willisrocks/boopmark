@@ -65,4 +65,4 @@ Boopmark is a full-stack bookmark management app using Rust with Axum, SQLx, HTM
 
 ### Tech Stack
 
-Rust, Axum 0.8, SQLx 0.8, Askama 0.12, HTMX 2, Tailwind CSS 4, clap 4, aws-sdk-s3, Docker Compose, Neon (Postgres).
+Rust, Axum 0.8, SQLx 0.8, Askama 0.12, HTMX 2, Tailwind CSS 4, clap 4, aws-sdk-s3, Docker Compose, Postgres (Fly Managed Postgres in production).
