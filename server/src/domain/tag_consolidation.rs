@@ -15,9 +15,14 @@
 //!
 //! The result is only ever stored as proposals; nothing here changes tags.
 
-use crate::domain::tag_alias::{Confidence, NewTagMergeProposal};
+use crate::domain::error::DomainError;
+use crate::domain::tag_alias::{
+    Confidence, NewTagMergeProposal, ProposalSource, ProposalStatus, TagMergeProposal,
+};
 use crate::domain::tag_normalize::{Level, choose_display, clean_tag, group_tags};
+use chrono::{DateTime, Duration, Utc};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use uuid::Uuid;
 
 /// The most tags one run considers, most used first.
 pub const MAX_UNITS: usize = 1_000;
@@ -486,6 +491,195 @@ pub fn build_proposals(
     out.into_iter().map(|(_, p)| p).collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl JobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, DomainError> {
+        match value {
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            other => Err(DomainError::Internal(format!("unknown JobStatus: {other}"))),
+        }
+    }
+}
+
+/// A run still marked running this long after it started died with its
+/// process; a new run may replace it.
+pub const STALE_RUN_MINUTES: i64 = 15;
+
+/// The latest consolidation run of one user.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsolidationJob {
+    pub run_id: Uuid,
+    pub status: JobStatus,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    /// User-facing; never a key, prompt or model answer.
+    pub error: Option<String>,
+    pub proposals: i32,
+    pub pairs_checked: i32,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+impl ConsolidationJob {
+    /// Report a run that outlived [`STALE_RUN_MINUTES`] as failed.
+    pub fn settle(mut self, now: DateTime<Utc>) -> Self {
+        if self.status == JobStatus::Running
+            && now - self.started_at > Duration::minutes(STALE_RUN_MINUTES)
+        {
+            self.status = JobStatus::Failed;
+            self.error = Some("The run stopped before it finished. Start it again.".into());
+        }
+        self
+    }
+}
+
+/// How a run ended, as recorded on its job row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobOutcome {
+    pub status: JobStatus,
+    pub error: Option<String>,
+    pub proposals: i32,
+    pub pairs_checked: i32,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+/// One spelling on a review row, with its bookmark count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewChip {
+    pub tag: String,
+    pub count: i64,
+}
+
+/// One pending proposal as the review screen shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewRow {
+    pub id: Uuid,
+    pub source: ProposalSource,
+    pub confidence: Confidence,
+    pub canonical: String,
+    /// Every spelling the row merges, including the spelling variants of
+    /// its members that applying it also merges.
+    pub chips: Vec<ReviewChip>,
+    /// Uses of the spellings that change: at most this many bookmarks.
+    pub bookmarks: i64,
+    pub sample_title: Option<String>,
+    /// Only `high` rows start checked; the rest wait under "Check these".
+    pub prechecked: bool,
+}
+
+/// The pending deterministic proposals an LLM proposal covers: those whose
+/// canonical is one of its members. Applying the LLM row applies them in the
+/// same batch, so every spelling of a member merges and chains resolve.
+fn covered<'a>(
+    proposal: &TagMergeProposal,
+    pending: &'a [TagMergeProposal],
+) -> impl Iterator<Item = &'a TagMergeProposal> {
+    let members: HashSet<&str> = if proposal.source == ProposalSource::Llm {
+        proposal.members.iter().map(String::as_str).collect()
+    } else {
+        HashSet::new()
+    };
+    pending.iter().filter(move |p| {
+        p.source == ProposalSource::Deterministic
+            && p.status == ProposalStatus::Pending
+            && members.contains(p.canonical.as_str())
+    })
+}
+
+/// The ids to apply for a selection: the selected pending proposals plus
+/// the deterministic ones their LLM rows cover, each once.
+pub fn expand_selection(selected: &[Uuid], pending: &[TagMergeProposal]) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = Vec::new();
+    for proposal in pending.iter().filter(|p| selected.contains(&p.id)) {
+        for id in std::iter::once(proposal.id).chain(covered(proposal, pending).map(|p| p.id)) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// The review screen's rows: "Check these" (`medium`, then `low`) first,
+/// unchecked; then the `high` rows, checked. Within a section, the rows
+/// that change the most bookmarks come first.
+pub fn review_rows(pending: &[TagMergeProposal], samples: &[TagSample]) -> Vec<ReviewRow> {
+    let by_tag: HashMap<&str, &TagSample> = samples.iter().map(|s| (s.tag.as_str(), s)).collect();
+    let mut rows: Vec<ReviewRow> = pending
+        .iter()
+        .filter(|p| p.status == ProposalStatus::Pending)
+        .map(|proposal| {
+            let mut spellings: Vec<&str> = Vec::new();
+            for tag in proposal
+                .members
+                .iter()
+                .chain(covered(proposal, pending).flat_map(|p| &p.members))
+            {
+                if !spellings.contains(&tag.as_str()) {
+                    spellings.push(tag);
+                }
+            }
+            // The canonical first, then the most used.
+            spellings.sort_by_key(|tag| {
+                let count = by_tag.get(tag).map_or(0, |s| s.count);
+                (*tag != proposal.canonical, -count)
+            });
+            let chips: Vec<ReviewChip> = spellings
+                .iter()
+                .map(|tag| ReviewChip {
+                    tag: tag.to_string(),
+                    count: by_tag.get(tag).map_or(0, |s| s.count),
+                })
+                .collect();
+            ReviewRow {
+                id: proposal.id,
+                source: proposal.source,
+                confidence: proposal.confidence,
+                canonical: proposal.canonical.clone(),
+                bookmarks: chips
+                    .iter()
+                    .filter(|c| c.tag != proposal.canonical)
+                    .map(|c| c.count)
+                    .sum(),
+                sample_title: spellings
+                    .iter()
+                    .find_map(|tag| by_tag.get(tag)?.sample_title.clone()),
+                chips,
+                prechecked: proposal.confidence == Confidence::High,
+            }
+        })
+        .collect();
+    let section = |c: Confidence| match c {
+        Confidence::Medium => 0,
+        Confidence::Low => 1,
+        Confidence::High => 2,
+    };
+    rows.sort_by(|a, b| {
+        section(a.confidence)
+            .cmp(&section(b.confidence))
+            .then_with(|| b.bookmarks.cmp(&a.bookmarks))
+            .then_with(|| a.canonical.cmp(&b.canonical))
+    });
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,5 +970,157 @@ mod tests {
             .map(|p| p.canonical)
             .collect();
         assert_eq!(canonicals, ["javascript", "go lang"]);
+    }
+
+    fn proposal(
+        canonical: &str,
+        members: &[&str],
+        source: ProposalSource,
+        confidence: Confidence,
+    ) -> TagMergeProposal {
+        TagMergeProposal {
+            id: Uuid::new_v4(),
+            user_id: Uuid::nil(),
+            canonical: canonical.to_string(),
+            members: s(members),
+            source,
+            confidence,
+            status: ProposalStatus::Pending,
+            batch_id: None,
+            created_at: Utc::now(),
+            decided_at: None,
+        }
+    }
+
+    fn sample(tag: &str, count: i64, title: Option<&str>) -> TagSample {
+        TagSample {
+            tag: tag.to_string(),
+            count,
+            sample_title: title.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn review_lists_check_these_first_and_prechecks_only_high() {
+        use ProposalSource::*;
+        let pending = vec![
+            proposal(
+                "github",
+                &["GitHub", "github"],
+                Deterministic,
+                Confidence::High,
+            ),
+            proposal("javascript", &["javascript", "js"], Llm, Confidence::High),
+            proposal(
+                "remote work",
+                &["remote work", "wfh"],
+                Llm,
+                Confidence::Medium,
+            ),
+            proposal("vim", &["neovim", "vim"], Llm, Confidence::Low),
+        ];
+        let samples = vec![
+            sample("GitHub", 2, None),
+            sample("github", 5, Some("Actions")),
+            sample("javascript", 9, None),
+            sample("js", 4, Some("Closures")),
+            sample("remote work", 3, None),
+            sample("wfh", 1, None),
+            sample("neovim", 2, None),
+            sample("vim", 6, None),
+        ];
+        let rows = review_rows(&pending, &samples);
+        let summary: Vec<(&str, Confidence, bool, i64)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.canonical.as_str(),
+                    r.confidence,
+                    r.prechecked,
+                    r.bookmarks,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("remote work", Confidence::Medium, false, 1),
+                ("vim", Confidence::Low, false, 2),
+                ("javascript", Confidence::High, true, 4),
+                ("github", Confidence::High, true, 2),
+            ]
+        );
+        assert_eq!(rows[2].sample_title.as_deref(), Some("Closures"));
+        assert_eq!(
+            rows[3].chips,
+            vec![
+                ReviewChip {
+                    tag: "github".into(),
+                    count: 5
+                },
+                ReviewChip {
+                    tag: "GitHub".into(),
+                    count: 2
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_llm_row_shows_and_applies_the_spelling_variants_of_its_members() {
+        use ProposalSource::*;
+        let variants = proposal(
+            "github",
+            &["GitHub", "github"],
+            Deterministic,
+            Confidence::High,
+        );
+        let llm = proposal("github", &["github", "gh"], Llm, Confidence::Medium);
+        let other = proposal("rust", &["Rust", "rust"], Deterministic, Confidence::High);
+        let pending = vec![variants.clone(), llm.clone(), other.clone()];
+
+        let rows = review_rows(
+            &pending,
+            &[sample("GitHub", 2, None), sample("gh", 1, None)],
+        );
+        let llm_row = rows.iter().find(|r| r.id == llm.id).unwrap();
+        let tags: Vec<&str> = llm_row.chips.iter().map(|c| c.tag.as_str()).collect();
+        assert_eq!(tags, ["github", "GitHub", "gh"]);
+        assert_eq!(llm_row.bookmarks, 3);
+
+        assert_eq!(
+            expand_selection(&[llm.id], &pending),
+            vec![llm.id, variants.id]
+        );
+        assert_eq!(
+            expand_selection(&[variants.id, llm.id, other.id], &pending),
+            vec![variants.id, llm.id, other.id]
+        );
+        // Unknown ids are not invented.
+        assert!(expand_selection(&[Uuid::new_v4()], &pending).is_empty());
+    }
+
+    #[test]
+    fn a_run_left_running_too_long_reports_failed() {
+        let started = Utc::now() - Duration::minutes(STALE_RUN_MINUTES + 1);
+        let job = ConsolidationJob {
+            run_id: Uuid::nil(),
+            status: JobStatus::Running,
+            started_at: started,
+            finished_at: None,
+            error: None,
+            proposals: 0,
+            pairs_checked: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        let settled = job.clone().settle(Utc::now());
+        assert_eq!(settled.status, JobStatus::Failed);
+        assert!(settled.error.is_some());
+        let fresh = ConsolidationJob {
+            started_at: Utc::now(),
+            ..job
+        };
+        assert_eq!(fresh.settle(Utc::now()).status, JobStatus::Running);
     }
 }

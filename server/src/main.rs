@@ -28,6 +28,7 @@ use app::search::SearchService;
 use app::secrets::SecretBox;
 use app::settings::{ConfiguredImageAiSettingsProvider, SettingsService};
 use app::tag_alias::TagAliasService;
+use app::tag_consolidation::TagConsolidationService;
 use app::tag_llm::LlmClientEnricher;
 use config::{Config, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, StorageBackend};
 use domain::ports::embedder::Embedder;
@@ -196,6 +197,12 @@ async fn main() {
         EnrichmentService::new(metadata_for_enrichment, enricher, settings_service.clone())
             .with_tag_vocabulary(tag_vocabulary),
     );
+    let tag_consolidation_service = Arc::new(TagConsolidationService::new(
+        tag_alias_service.clone(),
+        db.clone(),
+        settings_service.clone(),
+        llm_client.clone(),
+    ));
     let invite_service = Arc::new(InviteService::new(db.clone()));
     let embedder: Arc<dyn Embedder> = Arc::new(
         EmbedderRouter::from_env().unwrap_or_else(|e| panic!("invalid embedding config: {e}")),
@@ -250,6 +257,7 @@ async fn main() {
         config: Arc::new(config.clone()),
         enrichment: enrichment_service,
         tag_aliases: tag_alias_service,
+        tag_consolidation: tag_consolidation_service,
         images_storage,
         image_processing_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         active_image_fix_jobs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),

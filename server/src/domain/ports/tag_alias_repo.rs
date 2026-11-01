@@ -3,6 +3,7 @@ use crate::domain::tag_alias::{
     ChangeKind, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch,
     TagMerge, TagMergeProposal, TagWrite,
 };
+use crate::domain::tag_consolidation::TagSample;
 use uuid::Uuid;
 
 /// Storage for aliases, merge proposals and undoable change batches.
@@ -17,6 +18,10 @@ pub trait TagAliasRepository: Send + Sync {
 
     /// Each distinct tag on the user's bookmarks with its bookmark count.
     async fn tag_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError>;
+
+    /// Each distinct tag with its bookmark count and the title of its most
+    /// recent titled bookmark, for consolidation and the review screen.
+    async fn tag_samples(&self, user_id: Uuid) -> Result<Vec<TagSample>, DomainError>;
 
     /// Resolve bookmark tag writes to canonical tags with
     /// [`crate::domain::tag_alias::resolve_writes`] and remember the new
@@ -44,6 +49,16 @@ pub trait TagAliasRepository: Send + Sync {
         user_id: Uuid,
         status: Option<ProposalStatus>,
     ) -> Result<Vec<TagMergeProposal>, DomainError>;
+
+    /// Change the merge target of a pending proposal (edited on the review
+    /// screen before applying). `NotFound` unless it is the user's and
+    /// pending.
+    async fn set_proposal_canonical(
+        &self,
+        user_id: Uuid,
+        id: Uuid,
+        canonical: &str,
+    ) -> Result<(), DomainError>;
 
     /// Mark pending proposals dismissed. Returns how many changed.
     async fn dismiss_proposals(&self, user_id: Uuid, ids: &[Uuid]) -> Result<u64, DomainError>;

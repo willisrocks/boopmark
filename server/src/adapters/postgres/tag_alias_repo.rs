@@ -6,6 +6,7 @@ use crate::domain::tag_alias::{
     TagAlias, TagChangeBatch, TagChangeSummary, TagIndex, TagMerge, TagMergeProposal, TagWrite,
     merge_mapping, resolve_writes, rewrite_tags, undo_tags,
 };
+use crate::domain::tag_consolidation::TagSample;
 use crate::domain::tag_normalize::{clean_tag, compact_key};
 use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, Postgres, Transaction};
@@ -319,6 +320,30 @@ impl TagAliasRepository for PostgresPool {
         load_tag_counts(&self.pool, user_id).await
     }
 
+    async fn tag_samples(&self, user_id: Uuid) -> Result<Vec<TagSample>, DomainError> {
+        let rows = sqlx::query_as::<_, (String, i64, Option<String>)>(
+            "SELECT tag, COUNT(*),
+                    (ARRAY_AGG(title ORDER BY created_at DESC, id DESC)
+                        FILTER (WHERE title IS NOT NULL AND title <> ''))[1]
+             FROM bookmarks, unnest(tags) AS tag
+             WHERE user_id = $1
+             GROUP BY tag
+             ORDER BY tag",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|(tag, count, sample_title)| TagSample {
+                tag,
+                count,
+                sample_title,
+            })
+            .collect())
+    }
+
     async fn resolve_writes(
         &self,
         user_id: Uuid,
@@ -456,6 +481,29 @@ impl TagAliasRepository for PostgresPool {
         .into_iter()
         .map(proposal_from_row)
         .collect()
+    }
+
+    async fn set_proposal_canonical(
+        &self,
+        user_id: Uuid,
+        id: Uuid,
+        canonical: &str,
+    ) -> Result<(), DomainError> {
+        let updated = sqlx::query(
+            "UPDATE tag_merge_proposals SET canonical = $3
+             WHERE user_id = $1 AND id = $2 AND status = 'pending'",
+        )
+        .bind(user_id)
+        .bind(id)
+        .bind(canonical)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?
+        .rows_affected();
+        if updated == 0 {
+            return Err(DomainError::NotFound);
+        }
+        Ok(())
     }
 
     async fn dismiss_proposals(&self, user_id: Uuid, ids: &[Uuid]) -> Result<u64, DomainError> {

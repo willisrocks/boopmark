@@ -9,6 +9,7 @@ use crate::app::invite::InviteService;
 use crate::app::search::SearchService;
 use crate::app::settings::SettingsService;
 use crate::app::tag_alias::TagAliasService;
+use crate::app::tag_consolidation::TagConsolidationService;
 use crate::config::Config;
 use crate::domain::bookmark::BookmarkFilter;
 use crate::domain::error::DomainError;
@@ -34,6 +35,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub enrichment: Arc<EnrichmentService<FallbackMetadataExtractor, PostgresPool>>,
     pub tag_aliases: Arc<TagAliasService<PostgresPool>>,
+    /// Reviewed LLM consolidation: background runs and the review screen.
+    pub tag_consolidation: Arc<TagConsolidationService<PostgresPool, PostgresPool, PostgresPool>>,
     pub images_storage: ImageStorage,
     pub image_processing_slots: Arc<tokio::sync::Semaphore>,
     pub active_image_fix_jobs: Arc<Mutex<HashSet<Uuid>>>,

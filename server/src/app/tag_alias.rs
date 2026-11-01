@@ -12,9 +12,11 @@ use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::ports::tag_resolver::{ResolveFuture, TagResolver};
 use crate::domain::ports::tag_vocabulary::TagVocabulary;
 use crate::domain::tag_alias::{
-    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMerge,
-    TagMergeProposal, TagWrite, canonical_tag_counts, normalization_proposals, preview_tags,
+    ChangeKind, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch,
+    TagMerge, TagMergeProposal, TagWrite, canonical_tag_counts, normalization_proposals,
+    preview_tags,
 };
+use crate::domain::tag_consolidation::TagSample;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -76,6 +78,19 @@ where
         Ok(())
     }
 
+    /// Store proposals from `source` in place of its pending ones, skipping
+    /// groups the user dismissed. Changes no tag.
+    pub async fn replace_pending_proposals(
+        &self,
+        user_id: Uuid,
+        source: ProposalSource,
+        proposals: &[NewTagMergeProposal],
+    ) -> Result<Vec<TagMergeProposal>, DomainError> {
+        self.repo
+            .replace_pending_proposals(user_id, source, proposals)
+            .await
+    }
+
     /// Apply the chosen pending proposals as one undoable batch.
     pub async fn apply_merge(
         &self,
@@ -114,6 +129,23 @@ where
 
     pub async fn dismiss_proposals(&self, user_id: Uuid, ids: &[Uuid]) -> Result<u64, DomainError> {
         self.repo.dismiss_proposals(user_id, ids).await
+    }
+
+    /// Change a pending proposal's merge target before it is applied.
+    pub async fn set_proposal_canonical(
+        &self,
+        user_id: Uuid,
+        id: Uuid,
+        canonical: &str,
+    ) -> Result<(), DomainError> {
+        self.repo
+            .set_proposal_canonical(user_id, id, canonical)
+            .await
+    }
+
+    /// Each distinct tag with its count and a sample title.
+    pub async fn tag_samples(&self, user_id: Uuid) -> Result<Vec<TagSample>, DomainError> {
+        self.repo.tag_samples(user_id).await
     }
 
     pub async fn list_proposals(
@@ -207,6 +239,10 @@ mod tests {
             Ok(self.counts.clone())
         }
 
+        async fn tag_samples(&self, _user_id: Uuid) -> Result<Vec<TagSample>, DomainError> {
+            unimplemented!("not used by these tests")
+        }
+
         async fn resolve_writes(
             &self,
             _user_id: Uuid,
@@ -247,6 +283,15 @@ mod tests {
             _status: Option<ProposalStatus>,
         ) -> Result<Vec<TagMergeProposal>, DomainError> {
             Ok(Vec::new())
+        }
+
+        async fn set_proposal_canonical(
+            &self,
+            _user_id: Uuid,
+            _id: Uuid,
+            _canonical: &str,
+        ) -> Result<(), DomainError> {
+            unimplemented!("not used by these tests")
         }
 
         async fn dismiss_proposals(

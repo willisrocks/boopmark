@@ -10,4 +10,5 @@ pub mod settings;
 // Merge and undo are called by the /tags page and review screen (later steps).
 #[allow(dead_code)]
 pub mod tag_alias;
+pub mod tag_consolidation;
 pub mod tag_llm;

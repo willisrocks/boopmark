@@ -8,6 +8,7 @@ pub mod session_repo;
 // Merge and undo are called by the /tags page and review screen (later steps).
 #[allow(dead_code)]
 pub mod tag_alias_repo;
+pub mod tag_consolidation_job_repo;
 pub mod user_repo;
 
 use sqlx::PgPool;
