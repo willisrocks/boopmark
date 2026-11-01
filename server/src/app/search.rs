@@ -63,7 +63,7 @@ impl<R: SearchRepository> SearchService<R> {
             return Ok(Vec::new());
         }
         let vector = self.query_vector(&text).await;
-        let query = SearchQuery {
+        let mut query = SearchQuery {
             text,
             tags: filter.tags.filter(|tags| !tags.is_empty()),
             sort: filter.sort.unwrap_or(BookmarkSort::Relevance),
@@ -71,7 +71,16 @@ impl<R: SearchRepository> SearchService<R> {
             offset,
             vector,
         };
-        self.repo.search(user_id, &query).await
+        match self.repo.search(user_id, &query).await {
+            // The vector leg needs pgvector >= 0.8; whatever goes wrong with
+            // it, the lexical legs still answer.
+            Err(e) if query.vector.is_some() => {
+                self.warn_fallback(&format!("the vector leg failed: {e}"));
+                query.vector = None;
+                self.repo.search(user_id, &query).await
+            }
+            result => result,
+        }
     }
 
     /// The query's vector for the vector leg, or `None` to search
@@ -171,6 +180,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingRepo {
         queries: Mutex<Vec<SearchQuery>>,
+        /// Fail every search that has a vector leg.
+        fail_vector: bool,
     }
 
     impl SearchRepository for RecordingRepo {
@@ -180,6 +191,9 @@ mod tests {
             query: &SearchQuery,
         ) -> Result<Vec<SearchHit>, DomainError> {
             self.queries.lock().unwrap().push(query.clone());
+            if self.fail_vector && query.vector.is_some() {
+                return Err(DomainError::Internal("unrecognized parameter".into()));
+            }
             Ok(Vec::new())
         }
         async fn claim_ingest_batch(
@@ -322,6 +336,27 @@ mod tests {
         let q = run_with(embedder, "borrow checker").await;
         assert_eq!(q.vector, None);
         assert_eq!(started.elapsed(), QUERY_EMBED_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn a_failing_vector_leg_falls_back_to_the_lexical_legs() {
+        let repo = Arc::new(RecordingRepo {
+            fail_vector: true,
+            ..Default::default()
+        });
+        let hits = SearchService::new(repo.clone(), Arc::new(StubEmbedder::new(8)))
+            .search(
+                Uuid::new_v4(),
+                BookmarkFilter {
+                    search: Some("rust".into()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(hits.is_ok());
+        let queries = repo.queries.lock().unwrap();
+        assert_eq!(queries.len(), 2);
+        assert!(queries[0].vector.is_some() && queries[1].vector.is_none());
     }
 
     #[tokio::test]
