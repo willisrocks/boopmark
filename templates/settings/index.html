@@ -45,6 +45,14 @@
                     </li>
                     <li>
                         <a
+                            href="#search-index"
+                            data-settings-nav
+                            data-testid="settings-nav-search-index"
+                            class="inline-flex whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium text-gray-400 transition hover:bg-gray-800 hover:text-gray-200 lg:w-full"
+                        >Search Index</a>
+                    </li>
+                    <li>
+                        <a
                             href="#api-access"
                             data-settings-nav
                             data-testid="settings-nav-api-access"
@@ -321,6 +329,16 @@
                         </div>
                         <p id="fix-images-label" class="text-sm text-gray-400"></p>
                     </div>
+                </div>
+            </section>
+
+            <section id="search-index" data-testid="settings-section-search-index" class="scroll-mt-6 rounded-xl border border-gray-700 bg-[#1e2235] p-5 sm:p-6">
+                <div>
+                    <h2 class="text-lg font-semibold text-white">Search Index</h2>
+                    <p class="mt-1 text-sm text-gray-400">Boopmark fetches the article of every saved page in the background, so search finds words in the text, not just the title.</p>
+                </div>
+                <div id="search-index-panel" hx-get="/settings/search-index" hx-trigger="load" hx-swap="outerHTML">
+                    <p class="mt-5 text-sm text-gray-500">Loading…</p>
                 </div>
             </section>
 

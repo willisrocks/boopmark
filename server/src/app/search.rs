@@ -1,9 +1,9 @@
 use crate::domain::bookmark::{BookmarkFilter, BookmarkSort};
 use crate::domain::error::DomainError;
 use crate::domain::ports::embedder::{EmbedKind, Embedder};
-use crate::domain::ports::search_repo::SearchRepository;
+use crate::domain::ports::search_repo::{SearchIndexRepository, SearchRepository};
 use crate::domain::search::{
-    MAX_SEARCH_RESULTS, QueryVector, SearchHit, SearchQuery, semantic_query_text,
+    MAX_SEARCH_RESULTS, QueryVector, SearchHit, SearchIndexStatus, SearchQuery, semantic_query_text,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -118,6 +118,47 @@ impl<R: SearchRepository> SearchService<R> {
         } else {
             tracing::debug!("search: query embedding failed ({reason}); lexical legs only");
         }
+    }
+}
+
+/// Settings → Search index.
+impl<R: SearchRepository + SearchIndexRepository> SearchService<R> {
+    pub async fn index_status(&self, user_id: Uuid) -> Result<SearchIndexStatus, DomainError> {
+        let model_id = self.embedder.enabled().then(|| self.embedder.model_id());
+        self.repo.index_status(user_id, model_id).await
+    }
+
+    /// Queue the user's failed and skipped fetches again; returns how many.
+    pub async fn retry_failed_fetches(&self, user_id: Uuid) -> Result<u64, DomainError> {
+        self.repo.retry_failed_fetches(user_id).await
+    }
+
+    /// Fetch one bookmark's article again.
+    pub async fn refetch(&self, user_id: Uuid, bookmark_id: Uuid) -> Result<(), DomainError> {
+        if self.repo.refetch(user_id, bookmark_id).await? {
+            Ok(())
+        } else {
+            Err(DomainError::NotFound)
+        }
+    }
+
+    /// One line of deploy evidence for the owner: the embedder's `model_id`
+    /// and the installed versions of the search extensions.
+    pub async fn deployment_line(&self) -> Result<String, DomainError> {
+        let versions = self.repo.extension_versions().await?;
+        let version = |name: &str| {
+            versions
+                .iter()
+                .find(|(ext, _)| ext == name)
+                .map_or("not installed", |(_, v)| v.as_str())
+                .to_string()
+        };
+        Ok(format!(
+            "{} · vector {} · pg_trgm {}",
+            self.embedder.model_id(),
+            version("vector"),
+            version("pg_trgm")
+        ))
     }
 }
 

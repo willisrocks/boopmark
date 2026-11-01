@@ -130,6 +130,21 @@ pub struct QueryVector {
     pub values: Vec<f32>,
 }
 
+/// One user's search index, for Settings → Search index.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchIndexStatus {
+    pub total: i64,
+    /// Article text stored.
+    pub fetched: i64,
+    pub pending: i64,
+    /// Failed or skipped: searchable by their metadata only.
+    pub unfetched: i64,
+    /// Embedded by the configured model; `None` with embeddings disabled.
+    pub embedded: Option<i64>,
+    /// The hosts with the most unfetched bookmarks, most first.
+    pub failing_domains: Vec<(String, i64)>,
+}
+
 /// The parts of a `websearch_to_tsquery` query that must hold for every
 /// result, whichever leg found it: quoted phrases and `-exclusions`, as a
 /// websearch string of their own (`coffee "cold brew" -tea` gives

@@ -4,6 +4,7 @@ pub mod auth_shared;
 pub mod bookmarks;
 mod invite;
 mod legal;
+mod search_index;
 mod settings;
 pub(crate) mod shared;
 mod tag_review;
@@ -58,6 +59,7 @@ pub fn routes() -> Router<AppState> {
         .merge(auth::routes())
         .merge(settings::routes())
         .merge(tag_review::routes())
+        .merge(search_index::routes())
 }
 
 async fn home(MaybeUser(user): MaybeUser) -> axum::response::Redirect {

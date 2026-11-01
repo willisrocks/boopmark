@@ -39,6 +39,13 @@
                         hx-on::before-request="var m = document.getElementById('edit-modal'); if (m) m.remove();">
                     Edit
                 </button>
+                <button class="text-xs text-gray-600 hover:text-blue-400"
+                        data-testid="bookmark-refetch"
+                        title="Fetch the article again for search"
+                        hx-post="/bookmarks/{{ bookmark.id }}/refetch"
+                        hx-swap="outerHTML">
+                    Refetch
+                </button>
                 <button class="text-xs text-gray-600 hover:text-red-400"
                         hx-delete="/bookmarks/{{ bookmark.id }}"
                         hx-target="#bookmark-{{ bookmark.id }}"

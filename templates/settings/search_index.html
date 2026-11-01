@@ -1,0 +1,35 @@
+<div id="search-index-panel" data-testid="search-index-panel" class="mt-5 space-y-3 text-sm">
+    {% if let Some(message) = message %}
+    <div class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-emerald-200" role="status" data-testid="search-index-message">{{ message }}</div>
+    {% endif %}
+    <p class="text-gray-200" data-testid="search-index-counts">
+        Indexed {{ fetched }} of {{ total }} articles{% if has_unfetched %} · {{ unfetched }} couldn't be fetched{% endif %}
+    </p>
+    {% if pending != "0" %}
+    <p class="text-gray-400">{{ pending }} waiting to be fetched.</p>
+    {% endif %}
+    {% if let Some(embedded) = embedded %}
+    <p class="text-gray-400" data-testid="search-index-embedded">Searchable by meaning: {{ embedded }} of {{ total }}</p>
+    {% endif %}
+    {% if has_unfetched %}
+    <p class="text-gray-400">Bookmarks that couldn't be fetched are still found by their title, description and tags.</p>
+    {% if !failing_domains.is_empty() %}
+    <ul class="space-y-1 text-gray-400" data-testid="search-index-failing-domains">
+        {% for (host, count) in failing_domains %}
+        <li><span class="text-gray-300">{{ host }}</span> · {{ count }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    <button
+        type="button"
+        data-testid="search-index-retry"
+        class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 sm:w-auto"
+        hx-post="/settings/search-index/retry"
+        hx-target="#search-index-panel"
+        hx-swap="outerHTML"
+    >Retry all</button>
+    {% endif %}
+    {% if let Some(deployment) = deployment %}
+    <p class="font-mono text-xs text-gray-500" data-testid="search-index-deployment">{{ deployment }}</p>
+    {% endif %}
+</div>

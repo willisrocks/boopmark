@@ -1,10 +1,12 @@
 use super::PostgresPool;
 use crate::domain::error::DomainError;
 use crate::domain::ports::embedding_repo::EmbeddingRepository;
-use crate::domain::search::{EmbedJob, EmbeddedChunk};
+use crate::domain::ports::search_repo::SearchIndexRepository;
+use crate::domain::search::{EmbedJob, EmbeddedChunk, SearchIndexStatus};
 use chrono::{DateTime, Utc};
 use std::fmt::Write;
 use std::time::Duration;
+use uuid::Uuid;
 
 fn db_error(e: sqlx::Error) -> DomainError {
     DomainError::Internal(e.to_string())
@@ -148,6 +150,104 @@ impl EmbeddingRepository for PostgresPool {
     }
 }
 
+/// Hosts listed in the Search index panel.
+const FAILING_DOMAINS_SHOWN: i64 = 5;
+
+impl SearchIndexRepository for PostgresPool {
+    async fn index_status(
+        &self,
+        user_id: Uuid,
+        model_id: Option<&str>,
+    ) -> Result<SearchIndexStatus, DomainError> {
+        let (total, fetched, pending, unfetched, embedded): (i64, i64, i64, i64, i64) =
+            sqlx::query_as(
+                "SELECT count(*),
+                        count(*) FILTER (WHERE status = 'fetched'),
+                        count(*) FILTER (WHERE status = 'pending'),
+                        count(*) FILTER (WHERE status IN ('failed', 'skipped')),
+                        count(*) FILTER (WHERE embedded_model = $2)
+                 FROM bookmark_contents WHERE user_id = $1",
+            )
+            .bind(user_id)
+            .bind(model_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(db_error)?;
+        let failing_domains = sqlx::query_as(
+            "SELECT coalesce(b.domain,
+                             lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)')),
+                             b.url) AS host,
+                    count(*)
+             FROM bookmark_contents c JOIN bookmarks b ON b.id = c.bookmark_id
+             WHERE c.user_id = $1 AND c.status IN ('failed', 'skipped')
+             GROUP BY host
+             ORDER BY count(*) DESC, host
+             LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(FAILING_DOMAINS_SHOWN)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)?;
+        Ok(SearchIndexStatus {
+            total,
+            fetched,
+            pending,
+            unfetched,
+            embedded: model_id.map(|_| embedded),
+            failing_domains,
+        })
+    }
+
+    async fn retry_failed_fetches(&self, user_id: Uuid) -> Result<u64, DomainError> {
+        requeue(&self.pool, user_id, None).await
+    }
+
+    async fn refetch(&self, user_id: Uuid, bookmark_id: Uuid) -> Result<bool, DomainError> {
+        Ok(requeue(&self.pool, user_id, Some(bookmark_id)).await? > 0)
+    }
+
+    async fn extension_versions(&self) -> Result<Vec<(String, String)>, DomainError> {
+        sqlx::query_as(
+            "SELECT extname::text, extversion FROM pg_extension
+             WHERE extname IN ('pg_trgm', 'vector') ORDER BY extname",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)
+    }
+}
+
+/// Put fetches back in the ingest queue: one bookmark in any state, or
+/// (`bookmark_id = None`) every failed and skipped one of the user. A fresh
+/// start (attempts 0, no claim token, so a job in flight is dropped), and a
+/// `NOTIFY` wakes the worker. The stored text and chunks stay searchable
+/// until the new result replaces them; unchanged text keeps its chunks.
+async fn requeue(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    bookmark_id: Option<Uuid>,
+) -> Result<u64, DomainError> {
+    let queued: i64 = sqlx::query_scalar(
+        "WITH queued AS (
+             UPDATE bookmark_contents
+             SET status = 'pending', attempts = 0, next_attempt_at = now(),
+                 claim_token = NULL, error = NULL, updated_at = now()
+             WHERE user_id = $1
+               AND CASE WHEN $2::uuid IS NULL THEN status IN ('failed', 'skipped')
+                        ELSE bookmark_id = $2 END
+             RETURNING bookmark_id
+         )
+         SELECT count(*) FROM queued, LATERAL (SELECT pg_notify('bookmark_ingest', '')) n",
+    )
+    .bind(user_id)
+    .bind(bookmark_id)
+    .fetch_one(pool)
+    .await
+    .map_err(db_error)?;
+    Ok(queued as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,7 +271,7 @@ mod embedding_tests {
     use crate::domain::bookmark::{BookmarkFilter, BookmarkSort};
     use crate::domain::chunking::ChunkSource;
     use crate::domain::ports::bookmark_repo::BookmarkRepository;
-    use crate::domain::ports::search_repo::SearchRepository;
+    use crate::domain::ports::search_repo::{SearchIndexRepository, SearchRepository};
     use crate::domain::search::{
         IngestFailure, IngestStatus, MAX_SEARCH_RESULTS, QueryVector, SearchHit, SearchQuery,
     };
@@ -705,6 +805,129 @@ mod embedding_tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!(ids(&hits), [hit.id]);
         assert!(!hits[0].semantic);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a migrated Postgres database with pgvector (DATABASE_URL)"]
+    async fn index_status_retry_and_refetch() {
+        let _serial = SERIAL.lock().await;
+        let pool = pool().await;
+        let repo = PostgresPool::new(pool.clone());
+        let embedder = StubEmbedder::new(DIMS);
+        let owner = user(&pool).await;
+        let other = user(&pool).await;
+        let fetched = bookmark(&repo, owner, "https://ok.example/a", "Fetched", None, &[]).await;
+        let gone = bookmark(&repo, owner, "https://gone.example/1", "Gone 1", None, &[]).await;
+        let gone2 = bookmark(&repo, owner, "https://gone.example/2", "Gone 2", None, &[]).await;
+        let pdf = bookmark(
+            &repo,
+            owner,
+            "https://files.example/x.pdf",
+            "PDF",
+            None,
+            &[],
+        )
+        .await;
+        let waiting = bookmark(
+            &repo,
+            owner,
+            "https://later.example/w",
+            "Waiting",
+            None,
+            &[],
+        )
+        .await;
+        let theirs = bookmark(
+            &repo,
+            other,
+            "https://gone.example/3",
+            "Not mine",
+            None,
+            &[],
+        )
+        .await;
+        let jobs = claim_mine(&pool, &repo, &[owner, other]).await;
+        store(&repo, &jobs[&fetched.id], &passage("text", 100)).await;
+        for (b, status) in [
+            (&gone, IngestStatus::Failed),
+            (&gone2, IngestStatus::Failed),
+            (&pdf, IngestStatus::Skipped),
+            (&theirs, IngestStatus::Failed),
+        ] {
+            let failure = IngestFailure {
+                status,
+                error: "x".into(),
+                retry_at: None,
+            };
+            assert!(
+                repo.record_ingest_failure(&jobs[&b.id], &failure)
+                    .await
+                    .unwrap()
+            );
+        }
+        // Still pending: its retry is due later.
+        let failure = IngestFailure {
+            status: IngestStatus::Pending,
+            error: "HTTP 503".into(),
+            retry_at: Some(Utc::now() + chrono::Duration::hours(1)),
+        };
+        assert!(
+            repo.record_ingest_failure(&jobs[&waiting.id], &failure)
+                .await
+                .unwrap()
+        );
+        embed_all(&pool, &repo, &embedder, &[owner]).await;
+
+        let status = repo
+            .index_status(owner, Some(&embedder.model_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                status.total,
+                status.fetched,
+                status.pending,
+                status.unfetched
+            ),
+            (5, 1, 1, 3)
+        );
+        assert_eq!(status.embedded, Some(4), "every non-pending row");
+        assert_eq!(
+            status.failing_domains,
+            vec![
+                ("gone.example".to_string(), 2),
+                ("files.example".to_string(), 1)
+            ]
+        );
+        assert_eq!(repo.index_status(owner, None).await.unwrap().embedded, None);
+
+        // Retry queues only the user's failed and skipped rows, at once.
+        assert_eq!(repo.retry_failed_fetches(owner).await.unwrap(), 3);
+        let status = repo.index_status(owner, None).await.unwrap();
+        assert_eq!((status.pending, status.unfetched), (4, 0));
+        assert_eq!(repo.index_status(other, None).await.unwrap().unfetched, 1);
+        // Their metadata chunks stay searchable meanwhile.
+        assert_eq!(chunks_of(&pool, gone.id).await.len(), 1);
+
+        // Refetch works on any state, but only on the user's own bookmark.
+        assert!(repo.refetch(owner, fetched.id).await.unwrap());
+        assert!(!repo.refetch(owner, theirs.id).await.unwrap());
+        assert!(!repo.refetch(owner, Uuid::new_v4()).await.unwrap());
+        let refetched: (String, i32) =
+            sqlx::query_as("SELECT status, attempts FROM bookmark_contents WHERE bookmark_id = $1")
+                .bind(fetched.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(refetched, ("pending".to_string(), 0));
+
+        let versions = repo.extension_versions().await.unwrap();
+        let names: Vec<&str> = versions.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["pg_trgm", "vector"]);
+        let service = SearchService::new(Arc::new(repo.clone()), Arc::new(embedder));
+        let line = service.deployment_line().await.unwrap();
+        assert!(line.starts_with("stub:hash@384 · vector 0."), "{line}");
+        assert!(line.contains(" · pg_trgm 1."), "{line}");
     }
 
     async fn release_one(pool: &PgPool, id: Uuid) {
