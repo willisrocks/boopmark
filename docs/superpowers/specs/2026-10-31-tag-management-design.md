@@ -234,6 +234,14 @@ Differences from the local runs, by design:
 - The pair check uses a batched structured boolean plus a confidence label (40 pairs per call). It
   does not use log-probabilities, because the Anthropic API does not return them. This is what the
   product would ship.
+  - **Local indication only.** On Qwen3-4B, a plumbing test of this batched form over the 28
+    candidate pairs among the top 110 tags accepted 7 pairs: 2 correct, 3 ambiguous and **2
+    wrong**. The per-pair log-probability check, on all 287 candidates, had 0 wrong.
+  - So on a small model the batched boolean is weaker than per-pair probabilities. This is why
+    the Haiku number matters, and why Proposal B (calibrated per-pair probabilities) stays on the
+    table.
+  - A full local run of the batched check (287 pairs) did not finish within 50 minutes on this
+    CPU, so it was stopped.
 - The pairs checked are the string candidates **plus** the whole-list proposals, as in the
   design. Results are reported both ways.
 - The "current" suggestion prompt is the production text, but the answer goes through a structured
