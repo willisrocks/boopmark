@@ -1,0 +1,330 @@
+{
+ "source": "anthropic-claude-haiku-5-5-echo-20261101T191224Z.json",
+ "second": "results/openai-gpt-5.6-luna-20261101T190738Z.json",
+ "guards": {
+  "baseline: pair check high": {
+   "accepted": 63,
+   "correct": 62,
+   "wrong": 0,
+   "ambiguous": 1,
+   "pipeline": {
+    "tags": 242,
+    "merges": 358,
+    "correct": 355,
+    "ambiguous": 3,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9149,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 243,
+    "merges": 357,
+    "correct": 357,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9201,
+    "skipped_by_cannot_link": 1
+   },
+   "wrong_pairs": []
+  },
+  "pair check high + echo matches": {
+   "accepted": 63,
+   "correct": 62,
+   "wrong": 0,
+   "ambiguous": 1,
+   "pipeline": {
+    "tags": 242,
+    "merges": 358,
+    "correct": 355,
+    "ambiguous": 3,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9149,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 243,
+    "merges": 357,
+    "correct": 357,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9201,
+    "skipped_by_cannot_link": 1
+   },
+   "wrong_pairs": []
+  },
+  "candidates only (no whole-list pairs)": {
+   "accepted": 52,
+   "correct": 52,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 253,
+    "merges": 347,
+    "correct": 347,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8943,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 253,
+    "merges": 347,
+    "correct": 347,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8943,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "fix: symbol-aware candidates": {
+   "accepted": 63,
+   "correct": 62,
+   "wrong": 0,
+   "ambiguous": 1,
+   "pipeline": {
+    "tags": 242,
+    "merges": 358,
+    "correct": 355,
+    "ambiguous": 3,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9149,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 243,
+    "merges": 357,
+    "correct": 357,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9201,
+    "skipped_by_cannot_link": 1
+   },
+   "wrong_pairs": []
+  },
+  "veto: narrower-topic rule": {
+   "accepted": 54,
+   "correct": 53,
+   "wrong": 0,
+   "ambiguous": 1,
+   "pipeline": {
+    "tags": 250,
+    "merges": 350,
+    "correct": 347,
+    "ambiguous": 3,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8943,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 251,
+    "merges": 349,
+    "correct": 349,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8995,
+    "skipped_by_cannot_link": 1
+   },
+   "wrong_pairs": []
+  },
+  "symbol fix + narrower-topic veto": {
+   "accepted": 54,
+   "correct": 53,
+   "wrong": 0,
+   "ambiguous": 1,
+   "pipeline": {
+    "tags": 250,
+    "merges": 350,
+    "correct": 347,
+    "ambiguous": 3,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8943,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 251,
+    "merges": 349,
+    "correct": 349,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8995,
+    "skipped_by_cannot_link": 1
+   },
+   "wrong_pairs": []
+  },
+  "agreement: pair high AND whole-list proposed it": {
+   "accepted": 47,
+   "correct": 46,
+   "wrong": 0,
+   "ambiguous": 1,
+   "pipeline": {
+    "tags": 256,
+    "merges": 344,
+    "correct": 343,
+    "ambiguous": 1,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.884,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 256,
+    "merges": 344,
+    "correct": 343,
+    "ambiguous": 1,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.884,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "agreement: pair high AND whole-list proposed it high": {
+   "accepted": 35,
+   "correct": 35,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 268,
+    "merges": 332,
+    "correct": 332,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8557,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 268,
+    "merges": 332,
+    "correct": 332,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8557,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "whole-list high OR pair check high": {
+   "accepted": 69,
+   "correct": 65,
+   "wrong": 0,
+   "ambiguous": 4,
+   "pipeline": {
+    "tags": 236,
+    "merges": 364,
+    "correct": 358,
+    "ambiguous": 6,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9227,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 241,
+    "merges": 359,
+    "correct": 359,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9253,
+    "skipped_by_cannot_link": 5
+   },
+   "wrong_pairs": []
+  },
+  "whole-list proposals at high, no pair check": {
+   "accepted": 41,
+   "correct": 38,
+   "wrong": 0,
+   "ambiguous": 3,
+   "pipeline": {
+    "tags": 262,
+    "merges": 338,
+    "correct": 335,
+    "ambiguous": 3,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8634,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 266,
+    "merges": 334,
+    "correct": 334,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.8608,
+    "skipped_by_cannot_link": 4
+   },
+   "wrong_pairs": []
+  },
+  "cross-model: both say high (pairs both were asked)": {
+   "accepted": 57,
+   "correct": 57,
+   "wrong": 0,
+   "ambiguous": 0,
+   "pipeline": {
+    "tags": 248,
+    "merges": 352,
+    "correct": 352,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9072,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 248,
+    "merges": 352,
+    "correct": 352,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9072,
+    "skipped_by_cannot_link": 0
+   },
+   "wrong_pairs": []
+  },
+  "cross-model: both say high, or only this one was asked": {
+   "accepted": 62,
+   "correct": 61,
+   "wrong": 0,
+   "ambiguous": 1,
+   "pipeline": {
+    "tags": 243,
+    "merges": 357,
+    "correct": 354,
+    "ambiguous": 3,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9124,
+    "skipped_by_cannot_link": 0
+   },
+   "pipeline_with_cannot_link": {
+    "tags": 244,
+    "merges": 356,
+    "correct": 356,
+    "ambiguous": 0,
+    "wrong": 0,
+    "precision": 1.0,
+    "recall": 0.9175,
+    "skipped_by_cannot_link": 1
+   },
+   "wrong_pairs": []
+  }
+ }
+}
