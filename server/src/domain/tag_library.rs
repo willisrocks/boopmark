@@ -225,6 +225,9 @@ pub enum MergeRefusal {
     /// A source's spelling resolves to another tag, which the merge would
     /// take it away from.
     SpellingOf { source: String, canonical: String },
+    /// Another tag still on bookmarks shares a source's compact key but
+    /// was not selected; repointing the key would move its future saves.
+    SharedSpelling { source: String, other: String },
 }
 
 fn alias_owner<'a>(aliases: &'a [TagAlias], key: &str) -> Option<&'a str> {
@@ -275,6 +278,21 @@ pub fn resolve_merge_target(
             return Err(MergeRefusal::SpellingOf {
                 source: source.clone(),
                 canonical: owner.to_string(),
+            });
+        }
+        // Before normalization is reviewed, duplicate spellings have no
+        // alias row; check the tags on bookmarks too.
+        let key = compact_key(source);
+        if let Some(other) = rows.iter().find(|r| {
+            r.count > 0
+                && r.name != *source
+                && r.name != target.canonical
+                && !sources.contains(&r.name)
+                && compact_key(&r.name) == key
+        }) {
+            return Err(MergeRefusal::SharedSpelling {
+                source: source.clone(),
+                other: other.name.clone(),
             });
         }
     }
@@ -536,6 +554,22 @@ mod tests {
         );
         assert_eq!(resolve(&["JS"], "javascript"), target("javascript", false));
         assert_eq!(resolve(&["JS", "javascript"], "web"), target("web", false));
+    }
+
+    #[test]
+    fn a_source_sharing_its_spelling_with_an_unselected_tag_is_refused() {
+        // No alias row yet: git-hub and GitHub are both on bookmarks.
+        assert_eq!(
+            resolve(&["git-hub"], "python"),
+            Err(MergeRefusal::SharedSpelling {
+                source: "git-hub".into(),
+                other: "GitHub".into(),
+            })
+        );
+        assert_eq!(
+            resolve(&["git-hub", "GitHub"], "python"),
+            target("python", false)
+        );
     }
 
     #[test]

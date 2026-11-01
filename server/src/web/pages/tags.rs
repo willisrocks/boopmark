@@ -543,6 +543,9 @@ fn plan_merge(
             MergeRefusal::SpellingOf { source, canonical } => format!(
                 "“{source}” is also a spelling of “{canonical}”. Merge it into “{canonical}” first."
             ),
+            MergeRefusal::SharedSpelling { source, other } => format!(
+                "“{other}” is another spelling of “{source}”. Select it too, or merge it first."
+            ),
         },
     )?;
     let members: Vec<String> = request
