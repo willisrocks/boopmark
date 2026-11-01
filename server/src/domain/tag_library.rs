@@ -202,6 +202,81 @@ pub fn alias_preview<'a>(row: &'a TagRow, query: &str, max: usize) -> (Vec<&'a s
     (shown, more)
 }
 
+/// Where a manual rename or merge goes, after checking it against the
+/// current library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeTarget {
+    pub canonical: String,
+    /// The typed name is another spelling of `canonical`, so the merge goes
+    /// there instead of taking that spelling away from it.
+    pub redirected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeRefusal {
+    /// A source is no longer a tag: the page is stale.
+    Stale,
+    /// A source's spelling resolves to another tag, which the merge would
+    /// take it away from.
+    SpellingOf { source: String, canonical: String },
+}
+
+/// The tag that owns `key` now: the alias row if there is one, otherwise
+/// the most used tag with that key.
+fn key_owner<'a>(rows: &'a [TagRow], aliases: &'a [TagAlias], key: &str) -> Option<&'a str> {
+    if let Some(alias) = aliases.iter().find(|a| a.alias_key == key) {
+        return Some(&alias.canonical);
+    }
+    rows.iter()
+        .filter(|r| compact_key(&r.name) == key)
+        .max_by(|a, b| compare(TagSort::MostUsed, b, a))
+        .map(|r| r.name.as_str())
+}
+
+/// Check a manual merge of `sources` into `target` against the library.
+/// A merge repoints the compact keys of its sources and target, so neither
+/// may belong to a tag the user did not name: a target that is another
+/// tag's spelling (`js` when `js` -> `javascript`) is redirected to that tag,
+/// and a source whose spelling belongs elsewhere is refused. Every source
+/// must still be a tag, so a stale page cannot repoint an alias.
+pub fn resolve_merge_target(
+    rows: &[TagRow],
+    aliases: &[TagAlias],
+    sources: &[String],
+    target: &str,
+) -> Result<MergeTarget, MergeRefusal> {
+    if !sources.iter().all(|s| rows.iter().any(|r| &r.name == s)) {
+        return Err(MergeRefusal::Stale);
+    }
+    let target = match key_owner(rows, aliases, &compact_key(target)) {
+        Some(owner) if owner != target && !sources.iter().any(|s| s == owner) => MergeTarget {
+            canonical: owner.to_string(),
+            redirected: true,
+        },
+        _ => MergeTarget {
+            canonical: target.to_string(),
+            redirected: false,
+        },
+    };
+    for source in sources {
+        let owner = aliases
+            .iter()
+            .find(|a| a.alias_key == compact_key(source))
+            .map(|a| a.canonical.as_str());
+        if let Some(owner) = owner
+            && owner != source
+            && owner != target.canonical
+            && !sources.iter().any(|s| s == owner)
+        {
+            return Err(MergeRefusal::SpellingOf {
+                source: source.clone(),
+                canonical: owner.to_string(),
+            });
+        }
+    }
+    Ok(target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +461,80 @@ mod tests {
             (vec!["agentic ai", "AI bots"], 2)
         );
         assert_eq!(alias_preview(&row, "bot", 1), (vec!["AI bots"], 3));
+    }
+
+    fn merge_library() -> (Vec<TagRow>, Vec<TagAlias>) {
+        let aliases = vec![
+            alias("javascript", "javascript"),
+            alias("js", "javascript"),
+            alias("kubernetes", "kubernetes"),
+            alias("k8s", "kubernetes"),
+        ];
+        let rows = library_rows(
+            &counts(&[
+                ("javascript", 5),
+                ("kubernetes", 3),
+                ("python", 4),
+                ("JS", 2),
+                ("GitHub", 9),
+                ("git-hub", 1),
+            ]),
+            &aliases,
+        );
+        (rows, aliases)
+    }
+
+    fn resolve(sources: &[&str], target: &str) -> Result<MergeTarget, MergeRefusal> {
+        let (rows, aliases) = merge_library();
+        let sources: Vec<String> = sources.iter().map(|s| (*s).to_string()).collect();
+        resolve_merge_target(&rows, &aliases, &sources, target)
+    }
+
+    fn target(canonical: &str, redirected: bool) -> Result<MergeTarget, MergeRefusal> {
+        Ok(MergeTarget {
+            canonical: canonical.into(),
+            redirected,
+        })
+    }
+
+    #[test]
+    fn a_target_that_is_another_tags_alias_merges_into_that_tag() {
+        assert_eq!(resolve(&["python"], "JS"), target("javascript", true));
+        assert_eq!(resolve(&["python"], "k8s"), target("kubernetes", true));
+        // No alias row: the most used tag with the same key.
+        assert_eq!(resolve(&["git-hub"], "github"), target("GitHub", true));
+    }
+
+    #[test]
+    fn a_tag_may_take_its_own_spellings_or_a_new_name() {
+        assert_eq!(resolve(&["javascript"], "js"), target("js", false));
+        assert_eq!(
+            resolve(&["kubernetes"], "Kubernetes"),
+            target("Kubernetes", false)
+        );
+        assert_eq!(resolve(&["python"], "Python 3"), target("Python 3", false));
+        assert_eq!(
+            resolve(&["python"], "javascript"),
+            target("javascript", false)
+        );
+    }
+
+    #[test]
+    fn a_source_whose_spelling_belongs_to_another_tag_is_refused() {
+        assert_eq!(
+            resolve(&["JS"], "python"),
+            Err(MergeRefusal::SpellingOf {
+                source: "JS".into(),
+                canonical: "javascript".into(),
+            })
+        );
+        assert_eq!(resolve(&["JS"], "javascript"), target("javascript", false));
+        assert_eq!(resolve(&["JS", "javascript"], "web"), target("web", false));
+    }
+
+    #[test]
+    fn a_source_that_is_no_longer_a_tag_means_the_page_is_stale() {
+        assert_eq!(resolve(&["k8s"], "kube"), Err(MergeRefusal::Stale));
+        assert_eq!(resolve(&["python", "gone"], "x"), Err(MergeRefusal::Stale));
     }
 }

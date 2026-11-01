@@ -69,5 +69,20 @@
     document.body.addEventListener("htmx:afterSwap", (event) => {
         if (event.detail.target.id === "tag-search-results") select(0);
     });
+
+    // Choosing a chip or a popover row swaps the whole bar out of band,
+    // which would drop focus to <body>; move it to the "More tags" button.
+    let refocus = false;
+    document.body.addEventListener("htmx:oobBeforeSwap", (event) => {
+        if (event.detail.target.id === "filter-bar") {
+            refocus = event.detail.target.contains(document.activeElement);
+        }
+    });
+    document.body.addEventListener("htmx:oobAfterSwap", () => {
+        if (refocus) {
+            refocus = false;
+            toggle().focus();
+        }
+    });
 })();
 </script>

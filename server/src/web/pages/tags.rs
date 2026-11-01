@@ -14,10 +14,11 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::tag_alias::{
-    ChangeKind, ProposalSource, ProposalStatus, TagChangeBatch, TagMerge,
+    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMerge,
 };
 use crate::domain::tag_library::{
-    TagRow, TagSort, alias_preview, filter_rows, library_rows, search, sort_rows, top_tags,
+    MergeRefusal, TagRow, TagSort, alias_preview, filter_rows, library_rows, resolve_merge_target,
+    search, sort_rows, top_tags,
 };
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
@@ -29,7 +30,8 @@ use crate::web::state::AppState;
 const TOP_TAGS: usize = 10;
 const SEARCH_LIMIT: usize = 20;
 const ALIAS_PREVIEW: usize = 3;
-const HISTORY_LIMIT: i64 = 20;
+/// The first page of batches; [`recent_batches`] fetches more as needed.
+const HISTORY_PAGE: i64 = 50;
 /// Spec: the batch history keeps undo for 30 days.
 const UNDO_WINDOW_DAYS: i64 = 30;
 
@@ -166,11 +168,18 @@ pub async fn search_tags(
     })
 }
 
-async fn load_rows(state: &AppState, user_id: Uuid) -> Result<Vec<TagRow>, DomainError> {
-    let (counts, aliases) = tokio::try_join!(
+async fn load_tags(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<(Vec<(String, i64)>, Vec<TagAlias>), DomainError> {
+    tokio::try_join!(
         state.tag_aliases.tag_counts(user_id),
         state.tag_aliases.list_aliases(user_id),
-    )?;
+    )
+}
+
+async fn load_rows(state: &AppState, user_id: Uuid) -> Result<Vec<TagRow>, DomainError> {
+    let (counts, aliases) = load_tags(state, user_id).await?;
     Ok(library_rows(&counts, &aliases))
 }
 
@@ -311,7 +320,6 @@ fn merges_summary(merges: &[TagMerge]) -> String {
 }
 
 fn batch_view(batch: &TagChangeBatch) -> BatchView {
-    let undo_cutoff = Utc::now() - Duration::days(UNDO_WINDOW_DAYS);
     BatchView {
         id: batch.id,
         kind: kind_label(batch.kind),
@@ -319,7 +327,30 @@ fn batch_view(batch: &TagChangeBatch) -> BatchView {
         when: batch.created_at.format("%b %d, %Y %H:%M").to_string(),
         bookmarks: plural(batch.summary.bookmarks_changed, "bookmark"),
         undone: batch.undone_at.is_some(),
-        can_undo: batch.undone_at.is_none() && batch.created_at > undo_cutoff,
+        can_undo: batch.undone_at.is_none(),
+    }
+}
+
+/// Every batch inside the undo window, newest first. The repository lists
+/// the newest N, so ask for more until the oldest returned is outside the
+/// window or there are no more.
+async fn recent_batches(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Vec<TagChangeBatch>, DomainError> {
+    let cutoff = Utc::now() - Duration::days(UNDO_WINDOW_DAYS);
+    let mut limit = HISTORY_PAGE;
+    loop {
+        let batches = state.tag_aliases.list_batches(user_id, limit).await?;
+        let complete =
+            (batches.len() as i64) < limit || batches.last().is_some_and(|b| b.created_at < cutoff);
+        if complete {
+            return Ok(batches
+                .into_iter()
+                .filter(|b| b.created_at >= cutoff)
+                .collect());
+        }
+        limit *= 4;
     }
 }
 
@@ -332,7 +363,7 @@ async fn library_body(
     let svc = &state.tag_aliases;
     let (mut rows, batches, pending) = tokio::try_join!(
         load_rows(state, user_id),
-        svc.list_batches(user_id, HISTORY_LIMIT),
+        recent_batches(state, user_id),
         svc.list_proposals(user_id, Some(ProposalStatus::Pending)),
     )?;
     let q = view.q.as_deref().unwrap_or_default().trim().to_string();
@@ -460,8 +491,9 @@ impl MergeForm {
         form
     }
 
-    /// The merge to apply, or the message to show instead.
-    fn merge(&self) -> Result<(ChangeKind, TagMerge), String> {
+    /// The change as typed, checked for shape only; [`plan_merge`] checks it
+    /// against the library.
+    fn request(&self) -> Result<MergeRequest, String> {
         let kind = match self.kind.as_str() {
             "rename" => ChangeKind::Rename,
             "merge" => ChangeKind::Merge,
@@ -471,29 +503,73 @@ impl MergeForm {
         if target.is_empty() {
             return Err("Enter a tag name.".into());
         }
+        // Tags are entered and filtered as comma-separated lists.
+        if target.contains(',') || target.chars().any(char::is_control) {
+            return Err("A tag name cannot contain commas or control characters.".into());
+        }
+        if self.sources.is_empty() {
+            return Err("Choose tags to merge.".into());
+        }
         if kind == ChangeKind::Rename && self.sources.len() != 1 {
             return Err("Rename one tag at a time.".into());
         }
-        let members: Vec<String> = self
-            .sources
-            .iter()
-            .filter(|s| *s != target)
-            .cloned()
-            .collect();
-        if members.is_empty() {
-            return Err(match kind {
-                ChangeKind::Rename => "That is already the tag's name.".into(),
-                _ => "Choose tags to merge into a different tag.".into(),
-            });
-        }
-        Ok((
+        Ok(MergeRequest {
             kind,
-            TagMerge {
-                canonical: target.to_string(),
-                members,
-            },
-        ))
+            target: target.to_string(),
+            sources: self.sources.clone(),
+        })
     }
+}
+
+struct MergeRequest {
+    kind: ChangeKind,
+    target: String,
+    sources: Vec<String>,
+}
+
+/// The merge to apply after checking the request against the current tags
+/// and aliases (see [`resolve_merge_target`]), or the message to show
+/// instead. A target that is another tag's spelling becomes a merge into
+/// that tag.
+fn plan_merge(
+    request: MergeRequest,
+    rows: &[TagRow],
+    aliases: &[TagAlias],
+) -> Result<(ChangeKind, TagMerge, Option<String>), String> {
+    let target = resolve_merge_target(rows, aliases, &request.sources, &request.target).map_err(
+        |refusal| match refusal {
+            MergeRefusal::Stale => {
+                "The tag list changed. Reload the page and try again.".to_string()
+            }
+            MergeRefusal::SpellingOf { source, canonical } => format!(
+                "“{source}” is also a spelling of “{canonical}”. Merge it into “{canonical}” first."
+            ),
+        },
+    )?;
+    let members: Vec<String> = request
+        .sources
+        .into_iter()
+        .filter(|s| *s != target.canonical)
+        .collect();
+    if members.is_empty() {
+        return Err(match request.kind {
+            ChangeKind::Rename if !target.redirected => "That is already the tag's name.".into(),
+            _ => "Choose tags to merge into a different tag.".into(),
+        });
+    }
+    let (kind, redirected_from) = if target.redirected {
+        (ChangeKind::Merge, Some(request.target))
+    } else {
+        (request.kind, None)
+    };
+    Ok((
+        kind,
+        TagMerge {
+            canonical: target.canonical,
+            members,
+        },
+        redirected_from,
+    ))
 }
 
 fn quoted_list(names: &[String]) -> String {
@@ -512,39 +588,54 @@ pub async fn merge(
     body: Bytes,
 ) -> axum::response::Response {
     let form = MergeForm::parse(&body);
-    let flash = match form.merge() {
-        Err(message) => Flash::error(message),
-        Ok((kind, merge)) => {
-            let what = match kind {
-                ChangeKind::Rename => format!(
-                    "Renamed {} to “{}”",
-                    quoted_list(&merge.members),
-                    merge.canonical
-                ),
-                _ => format!(
-                    "Merged {} into “{}”",
-                    quoted_list(&merge.members),
-                    merge.canonical
-                ),
-            };
-            match state
-                .tag_aliases
-                .merge_tags(user.id, kind, std::slice::from_ref(&merge))
-                .await
-            {
-                Ok(Some(batch)) => Flash::ok(
-                    format!(
-                        "{what} on {}.",
-                        plural(batch.summary.bookmarks_changed, "bookmark")
-                    ),
-                    Some(batch.id),
-                ),
-                Ok(None) => Flash::ok("Nothing to change.".into(), None),
-                Err(e) => Flash::from_error(e),
-            }
-        }
-    };
+    let flash = apply_merge_form(&state, user.id, &form)
+        .await
+        .unwrap_or_else(|flash| flash);
     render_body(&state, user.id, &form.view, Some(flash)).await
+}
+
+async fn apply_merge_form(
+    state: &AppState,
+    user_id: Uuid,
+    form: &MergeForm,
+) -> Result<Flash, Flash> {
+    let request = form.request().map_err(Flash::error)?;
+    let (counts, aliases) = load_tags(state, user_id).await.map_err(Flash::from_error)?;
+    let rows = library_rows(&counts, &aliases);
+    let (kind, merge, redirected_from) =
+        plan_merge(request, &rows, &aliases).map_err(Flash::error)?;
+    let what = match (kind, redirected_from) {
+        (ChangeKind::Rename, _) => format!(
+            "Renamed {} to “{}”",
+            quoted_list(&merge.members),
+            merge.canonical
+        ),
+        (_, Some(typed)) => format!(
+            "“{typed}” is another spelling of “{}”, so merged {} into it",
+            merge.canonical,
+            quoted_list(&merge.members)
+        ),
+        (_, None) => format!(
+            "Merged {} into “{}”",
+            quoted_list(&merge.members),
+            merge.canonical
+        ),
+    };
+    match state
+        .tag_aliases
+        .merge_tags(user_id, kind, std::slice::from_ref(&merge))
+        .await
+        .map_err(Flash::from_error)?
+    {
+        Some(batch) => Ok(Flash::ok(
+            format!(
+                "{what} on {}.",
+                plural(batch.summary.bookmarks_changed, "bookmark")
+            ),
+            Some(batch.id),
+        )),
+        None => Ok(Flash::ok("Nothing to change.".into(), None)),
+    }
 }
 
 /// `POST /tags/batches/{id}/undo`: undo one batch as a unit.
@@ -615,25 +706,86 @@ mod tests {
         assert_eq!(one.more_count, 0);
     }
 
+    fn alias(spelling: &str, canonical: &str) -> TagAlias {
+        TagAlias {
+            alias_key: crate::domain::tag_normalize::compact_key(spelling),
+            alias: spelling.into(),
+            canonical: canonical.into(),
+            source: crate::domain::tag_alias::AliasSource::Manual,
+            batch_id: None,
+        }
+    }
+
+    /// `form` planned against a library of javascript (alias js),
+    /// kubernetes (alias k8s), python, rust and a legacy `K8S` tag.
+    fn plan(form: &[u8]) -> Result<(ChangeKind, TagMerge, Option<String>), String> {
+        let aliases = vec![
+            alias("javascript", "javascript"),
+            alias("js", "javascript"),
+            alias("kubernetes", "kubernetes"),
+            alias("k8s", "kubernetes"),
+        ];
+        let counts: Vec<(String, i64)> = [("javascript", 5), ("kubernetes", 3), ("python", 4)]
+            .iter()
+            .map(|(t, c)| ((*t).to_string(), *c))
+            .chain([("rust".to_string(), 2), ("K8S".to_string(), 1)])
+            .collect();
+        let rows = library_rows(&counts, &aliases);
+        plan_merge(MergeForm::parse(form).request()?, &rows, &aliases)
+    }
+
     #[test]
     fn merge_form_collects_repeated_sources_and_validates() {
-        let form =
-            MergeForm::parse(b"kind=merge&source=k8s&source=K8s&target=+kubernetes+&q=k&sort=az");
+        let form = MergeForm::parse(
+            b"kind=merge&source=python&source=rust&target=+scripting+&q=k&sort=az",
+        );
         assert_eq!(form.view.q.as_deref(), Some("k"));
         assert_eq!(form.view.sort.as_deref(), Some("az"));
-        let (kind, merge) = form.merge().unwrap();
+        let (kind, merge, redirected) =
+            plan(b"kind=merge&source=python&source=rust&target=+scripting+").unwrap();
         assert_eq!(kind, ChangeKind::Merge);
-        assert_eq!(merge.canonical, "kubernetes");
-        assert_eq!(merge.members, s(&["k8s", "K8s"]));
+        assert_eq!(merge.canonical, "scripting");
+        assert_eq!(merge.members, s(&["python", "rust"]));
+        assert_eq!(redirected, None);
 
-        let into_itself = MergeForm::parse(b"kind=merge&source=rust&target=rust");
-        assert!(into_itself.merge().is_err());
-        let rename_two = MergeForm::parse(b"kind=rename&source=a&source=b&target=c");
-        assert!(rename_two.merge().is_err());
-        let blank = MergeForm::parse(b"kind=rename&source=a&target=+");
-        assert!(blank.merge().is_err());
-        let rename = MergeForm::parse(b"kind=rename&source=github&target=GitHub");
-        assert_eq!(rename.merge().unwrap().0, ChangeKind::Rename);
+        assert!(plan(b"kind=merge&source=rust&target=rust").is_err());
+        assert!(plan(b"kind=rename&source=python&source=rust&target=c").is_err());
+        assert!(plan(b"kind=rename&source=rust&target=+").is_err());
+        assert!(plan(b"kind=merge&target=rust").is_err());
+        let rename = plan(b"kind=rename&source=rust&target=Rust").unwrap();
+        assert_eq!(rename.0, ChangeKind::Rename);
+        assert_eq!(rename.1.canonical, "Rust");
+    }
+
+    #[test]
+    fn targets_with_commas_or_control_characters_are_refused() {
+        let error = plan(b"kind=rename&source=rust&target=research%2Cnotes").unwrap_err();
+        assert!(error.contains("commas"), "{error}");
+        assert!(plan(b"kind=merge&source=rust&target=a%0Ab").is_err());
+    }
+
+    #[test]
+    fn a_target_that_is_another_tags_alias_merges_into_that_tag() {
+        // js -> javascript: renaming python to JS must not take js away.
+        let (kind, merge, redirected) = plan(b"kind=rename&source=python&target=JS").unwrap();
+        assert_eq!(kind, ChangeKind::Merge);
+        assert_eq!(merge.canonical, "javascript");
+        assert_eq!(merge.members, s(&["python"]));
+        assert_eq!(redirected.as_deref(), Some("JS"));
+
+        let (_, merge, _) = plan(b"kind=merge&source=rust&target=k8s").unwrap();
+        assert_eq!(merge.canonical, "kubernetes");
+
+        // A legacy spelling of an aliased key cannot be moved elsewhere.
+        let error = plan(b"kind=merge&source=K8S&target=rust").unwrap_err();
+        assert!(error.contains("spelling of “kubernetes”"), "{error}");
+    }
+
+    #[test]
+    fn a_stale_page_is_refused() {
+        // `k8s` is an alias now, no longer a tag: the page is out of date.
+        let error = plan(b"kind=rename&source=k8s&target=kube").unwrap_err();
+        assert!(error.contains("Reload"), "{error}");
     }
 
     #[test]
