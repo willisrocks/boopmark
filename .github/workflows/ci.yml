@@ -81,6 +81,11 @@ jobs:
           cargo test -p boopmark-server
           adapters::postgres::bookmark_repo::idempotency_tests::durable_claims_are_atomic_scoped_and_headerless_creates_remain_distinct
           -- --ignored --exact
+      - name: Test tag alias DB
+        run: >-
+          cargo test -p boopmark-server
+          adapters::postgres::tag_alias_repo::tag_alias_postgres_tests::
+          -- --ignored
 
   install-script:
     name: Install script tests

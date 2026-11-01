@@ -823,16 +823,11 @@ mod tag_alias_postgres_tests {
     async fn connect() -> PgPool {
         let database_url = std::env::var("DATABASE_URL")
             .expect("DATABASE_URL is required for the ignored tag alias Postgres tests");
-        let pool = PgPoolOptions::new()
+        PgPoolOptions::new()
             .max_connections(8)
             .connect(&database_url)
             .await
-            .expect("connect to DATABASE_URL");
-        sqlx::migrate!("../migrations")
-            .run(&pool)
-            .await
-            .expect("migrations apply");
-        pool
+            .expect("DATABASE_URL must point at a migrated database")
     }
 
     async fn new_user(pool: &PgPool) -> Uuid {
@@ -847,7 +842,7 @@ mod tag_alias_postgres_tests {
     }
 
     /// Run explicitly with `--ignored` and `DATABASE_URL` pointing at a
-    /// scratch Postgres; the test applies the migrations itself.
+    /// migrated Postgres (CI applies migrations/*.sql with psql first).
     #[tokio::test]
     #[ignore = "requires a Postgres database in DATABASE_URL"]
     async fn tag_alias_propose_apply_undo_round_trip() {
