@@ -13,13 +13,23 @@ Two sources, written to <out>/corpus.jsonl (one bookmark per line):
   readability-style extractor (trafilatura), to measure real ingestion
   failure rates and article sizes. Failures are recorded in <out>/ingest_log.jsonl.
 
-The corpus is not committed; re-run this script to regenerate it:
+The corpus text is not committed. corpus_manifest.jsonl (committed) pins the
+exact documents: id, URL, title, description and the sha256 of the text. To
+rebuild that same corpus, refetching only the listed URLs:
+
+    uv run scripts/search-eval/fetch_corpus.py --out ~/search-eval-data \
+        --from-manifest scripts/search-eval/corpus_manifest.jsonl
+
+Each rebuilt doc carries `"match": true` when its text hashes to the pinned
+value; pages edited since 2026-10-31 come back with `"match": false`.
+To discover a fresh corpus instead (other docs, so the labels won't apply):
 
     uv run scripts/search-eval/fetch_corpus.py --out ~/search-eval-data
 """
 
 import argparse
 import concurrent.futures as cf
+import hashlib
 import json
 import pathlib
 import re
@@ -205,12 +215,62 @@ def build_hn(out: list[dict], log: list[dict], n: int) -> None:
     print(f"hn: {ok}/{len(hits)} extracted")
 
 
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def write_manifest(corpus: pathlib.Path, manifest: pathlib.Path) -> None:
+    keys = ("id", "source", "category", "url", "title", "description")
+    with open(corpus) as src, open(manifest, "w") as out:
+        for line in src:
+            d = json.loads(line)
+            out.write(json.dumps({**{k: d[k] for k in keys},
+                                  "chars": len(d["text"]), "sha256": sha256(d["text"])}) + "\n")
+
+
+def rebuild(manifest: pathlib.Path, out: pathlib.Path) -> None:
+    pinned = [json.loads(line) for line in open(manifest)]
+
+    def text_of(m: dict) -> str | None:
+        if m["source"] == "wikipedia":
+            with httpx.Client(headers={"User-Agent": UA}, timeout=30) as client:
+                page = wiki_page(client, m["title"])
+                time.sleep(0.25)
+            return page["text"] if page else None
+        doc, _ = fetch_article({"url": m["url"], "title": m["title"]})
+        return doc["text"] if doc else None
+
+    with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        texts = list(pool.map(text_of, pinned))
+    n_match = 0
+    with open(out / "corpus.jsonl", "w") as f:
+        for m, text in zip(pinned, texts):
+            if text is None:
+                continue
+            match = sha256(text) == m["sha256"]
+            n_match += match
+            doc = {k: m[k] for k in ("id", "source", "category", "url", "title", "description")}
+            f.write(json.dumps({**doc, "text": text, "match": match}) + "\n")
+    got = sum(t is not None for t in texts)
+    print(f"rebuilt {got}/{len(pinned)} docs, {n_match} identical to the pinned text")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=pathlib.Path)
     ap.add_argument("--hn", type=int, default=220)
+    ap.add_argument("--from-manifest", type=pathlib.Path,
+                    help="refetch exactly the documents pinned in this manifest")
+    ap.add_argument("--write-manifest", type=pathlib.Path,
+                    help="write a manifest for <out>/corpus.jsonl and exit")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.write_manifest:
+        write_manifest(args.out / "corpus.jsonl", args.write_manifest)
+        return
+    if args.from_manifest:
+        rebuild(args.from_manifest, args.out)
+        return
 
     docs: list[dict] = []
     log: list[dict] = []

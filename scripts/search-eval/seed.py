@@ -24,21 +24,36 @@ import pathlib
 import random
 import time
 import urllib.parse
-import uuid
 
 import psycopg
 
 from chunking import chunk_article
+from common import LOCAL_MODEL, MODEL_SLUG, TEXT_CAP_CHARS, bookmark_uuid, load_unscraped
 
-TEXT_CAP_CHARS = 200_000
-LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
-MODEL_SLUG = "bge-small-en-v1.5"
-NS = uuid.UUID("8b0c9a52-56f4-4b8e-9b0e-2f3f2b1a0c11")
+META_SEARCH = """setweight(to_tsvector('english', coalesce(%s, '')), 'A') ||
+                 setweight(to_tsvector('english', coalesce(%s, '')), 'B') ||
+                 setweight(to_tsvector('english', %s), 'C')"""
 
 
-def bookmark_uuid(doc_id: int) -> uuid.UUID:
-    """Stable id so qrels can name bookmarks by corpus id."""
-    return uuid.uuid5(NS, str(doc_id))
+def insert_unscraped(conn, user_id, created_at) -> int:
+    """The real failed links: a bookmark plus a 'failed' contents row whose
+    search vector covers the metadata only (the spec's fallback)."""
+    docs = load_unscraped()
+    for d in docs:
+        created = created_at()
+        conn.execute(
+            """INSERT INTO bookmarks (id, user_id, url, title, domain, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING""",
+            (bookmark_uuid(d["id"]), user_id, d["url"], d["title"],
+             urllib.parse.urlparse(d["url"]).hostname, created, created),
+        )
+        conn.execute(
+            f"""INSERT INTO bookmark_contents (bookmark_id, user_id, status, error, search)
+                VALUES (%s, %s, 'failed', %s, {META_SEARCH})
+                ON CONFLICT (bookmark_id) DO NOTHING""",
+            (bookmark_uuid(d["id"]), user_id, d["fetch_error"], d["title"], "", d["url"]),
+        )
+    return len(docs)
 
 
 def main() -> None:
@@ -86,8 +101,10 @@ def main() -> None:
                  hashlib.sha256(text.encode()).hexdigest(),
                  d["title"], d["description"], d["url"], text),
             )
+        n_failed = insert_unscraped(
+            conn, user_id, lambda: now - dt.timedelta(minutes=rng.randint(0, 2 * 365 * 24 * 60)))
         conn.commit()
-        print(f"seeded {len(docs)} bookmarks + contents for {args.email}")
+        print(f"seeded {len(docs)} bookmarks + contents and {n_failed} failed links for {args.email}")
 
         # Chunk + embed with the local model.
         from fastembed import TextEmbedding

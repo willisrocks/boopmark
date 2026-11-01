@@ -22,8 +22,8 @@ import time
 import psycopg
 
 from chunking import chunk_article
+from common import TEXT_CAP_CHARS, bookmark_uuid, load_unscraped, meta_text
 from embedders import Embedder
-from seed import TEXT_CAP_CHARS, bookmark_uuid
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS eval_chunks (
@@ -50,11 +50,11 @@ def main() -> None:
 
     docs = [json.loads(line) for line in open(args.corpus)]
     rows = []
-    for d in docs:
-        if args.mode == "metadata":
-            rows.append((bookmark_uuid(d["id"]), 0,
-                         f"{d['title']}\n{d['description'] or ''}\n{d['url']}"))
-        else:
+    if args.mode == "metadata":
+        # Every bookmark, including the failed links: this is the fallback leg.
+        rows = [(bookmark_uuid(d["id"]), 0, meta_text(d)) for d in docs + load_unscraped()]
+    else:
+        for d in docs:
             for ord_, (_, embed_input) in enumerate(
                 chunk_article(d["title"], d["description"], d["text"][:TEXT_CAP_CHARS])
             ):

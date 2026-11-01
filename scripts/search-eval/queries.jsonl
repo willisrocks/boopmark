@@ -22,3 +22,27 @@
 {"qid": "q22", "type": "deep", "query": "why air flowing around a wing creates lift", "relevant": [416]}
 {"qid": "q23", "type": "deep", "query": "selling a farm product online from rural Georgia", "relevant": [381]}
 {"qid": "q24", "type": "deep", "query": "e-ink screen helping a parent with memory loss", "relevant": [487]}
+{"qid": "q25", "type": "typo", "query": "byzantine fualt tolerance", "relevant": [39, 51, 41, 38]}
+{"qid": "q26", "type": "typo", "query": "garbage colector", "relevant": [90, 97, 91, 94]}
+{"qid": "q27", "type": "typo", "query": "anchoring efect", "relevant": [272]}
+{"qid": "q28", "type": "typo", "query": "burows wheeler transfrom", "relevant": [142, 144]}
+{"qid": "q29", "type": "typo", "query": "aeropres coffee maker", "relevant": [227]}
+{"qid": "q30", "type": "typo", "query": "Grimsvotn volcano", "relevant": [182]}
+{"qid": "q31", "type": "typo", "query": "Brennisteinsfjoll", "relevant": [172]}
+{"qid": "q32", "type": "typo", "query": "chemex cofee", "relevant": [235]}
+{"qid": "q33", "type": "prefix", "query": "garb collect", "relevant": [90, 97, 91, 94]}
+{"qid": "q34", "type": "prefix", "query": "byzant", "relevant": [39, 51, 41, 38]}
+{"qid": "q35", "type": "prefix", "query": "circad rhyth", "relevant": [296, 295]}
+{"qid": "q36", "type": "prefix", "query": "dynamo", "relevant": [74]}
+{"qid": "q37", "type": "prefix", "query": "meliponi", "relevant": [202]}
+{"qid": "q38", "type": "prefix", "query": "kaprek", "relevant": [17]}
+{"qid": "q39", "type": "unscraped", "query": "CrowdStrike blue screen boot loop", "relevant": [501]}
+{"qid": "q40", "type": "unscraped", "query": "AI lab board ousts its CEO", "relevant": [500, 471]}
+{"qid": "q41", "type": "unscraped", "query": "FTC rule against making subscriptions hard to cancel", "relevant": [514, 535]}
+{"qid": "q42", "type": "unscraped", "query": "Microsoft buying GitHub", "relevant": [523]}
+{"qid": "q43", "type": "unscraped", "query": "Elon Musk offer to buy Twitter", "relevant": [525, 539]}
+{"qid": "q44", "type": "unscraped", "query": "autonomous car killed a pedestrian in Arizona", "relevant": [547]}
+{"qid": "q45", "type": "unscraped", "query": "stealth bomber spotted in satellite imagery", "relevant": [558]}
+{"qid": "q46", "type": "unscraped", "query": "popular third-party Reddit app shutting down", "relevant": [509]}
+{"qid": "q47", "type": "unscraped", "query": "Cloudflare bug leaking uninitialized memory", "relevant": [513]}
+{"qid": "q48", "type": "unscraped", "query": "Stack Overflow acquisition price", "relevant": [549]}
