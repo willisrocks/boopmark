@@ -18,10 +18,11 @@ pub const ARTICLE_TEXT_CAP_CHARS: usize = 200_000;
 pub const SNIPPET_START: char = '\u{2}';
 pub const SNIPPET_STOP: char = '\u{3}';
 
+/// The queue states an ingest attempt can leave behind without an article.
+/// (A stored article is `fetched`; `store_article` sets that itself.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestStatus {
     Pending,
-    Fetched,
     Failed,
     Skipped,
 }
@@ -30,7 +31,6 @@ impl IngestStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
-            Self::Fetched => "fetched",
             Self::Failed => "failed",
             Self::Skipped => "skipped",
         }

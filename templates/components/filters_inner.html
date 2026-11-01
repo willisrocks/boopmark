@@ -22,6 +22,7 @@
                 hx-trigger="change"
                 hx-target="#bookmark-grid"
                 hx-include="[name='search'],[name='tags']">
+            {% if searching %}<option value="relevance" {% if sort == "relevance" %}selected{% endif %}>Relevance</option>{% endif %}
             <option value="newest" {% if sort == "newest" %}selected{% endif %}>Newest First</option>
             <option value="oldest" {% if sort == "oldest" %}selected{% endif %}>Oldest First</option>
             <option value="title" {% if sort == "title" %}selected{% endif %}>Title</option>

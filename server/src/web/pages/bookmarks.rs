@@ -12,6 +12,7 @@ use crate::domain::bookmark::{
     Bookmark, BookmarkFilter, BookmarkSort, CreateBookmark, UpdateBookmark,
 };
 use crate::domain::error::DomainError;
+use crate::domain::search::{MAX_SEARCH_RESULTS, SearchHit, SnippetSegment};
 use crate::web::extractors::AuthUser;
 use crate::web::middleware::auth::is_htmx;
 use crate::web::pages::shared::UserView;
@@ -51,6 +52,8 @@ struct BookmarkView {
     image_url: Option<String>,
     tags: Vec<String>,
     created_at_display: String,
+    /// Why a search matched, with the matched terms highlighted.
+    snippet: Option<Vec<SnippetSegment>>,
 }
 
 impl From<Bookmark> for BookmarkView {
@@ -64,6 +67,16 @@ impl From<Bookmark> for BookmarkView {
             image_url,
             tags: b.tags,
             created_at_display: b.created_at.format("%b %d, %Y").to_string(),
+            snippet: None,
+        }
+    }
+}
+
+impl From<SearchHit> for BookmarkView {
+    fn from(hit: SearchHit) -> Self {
+        Self {
+            snippet: hit.snippet.map(|s| s.segments),
+            ..hit.bookmark.into()
         }
     }
 }
@@ -99,6 +112,8 @@ struct GridPage {
     bookmarks: Vec<BookmarkView>,
     filter_tags: Vec<TagView>,
     sort: String,
+    searching: bool,
+    capped: bool,
     suggest_title: String,
     suggest_description: String,
     #[allow(dead_code)]
@@ -113,6 +128,8 @@ struct BookmarkListWithFilters {
     bookmarks: Vec<BookmarkView>,
     filter_tags: Vec<TagView>,
     sort: String,
+    searching: bool,
+    capped: bool,
 }
 
 #[derive(Template)]
@@ -172,8 +189,22 @@ pub async fn list(
         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
 
-    let sort_str = query.sort.clone().unwrap_or_else(|| "newest".into());
+    let search = query
+        .search
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let searching = search.is_some();
+
+    // A search is in relevance order unless another order is picked; the
+    // search box does not send the sort, so each new query starts there.
+    let sort_str = match query.sort.as_deref() {
+        Some("relevance") if !searching => "newest".to_string(),
+        Some(sort) => sort.to_string(),
+        None if searching => "relevance".to_string(),
+        None => "newest".to_string(),
+    };
     let sort = match sort_str.as_str() {
+        "relevance" => BookmarkSort::Relevance,
         "oldest" => BookmarkSort::Oldest,
         "title" => BookmarkSort::Title,
         "domain" => BookmarkSort::Domain,
@@ -181,14 +212,7 @@ pub async fn list(
     };
 
     let filter = BookmarkFilter {
-        search: query.search.and_then(|s| {
-            let trimmed = s.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        }),
+        search,
         tags: if active_tags.is_empty() {
             None
         } else {
@@ -198,10 +222,26 @@ pub async fn list(
         ..Default::default()
     };
 
-    let bookmarks = with_bookmarks!(&state.bookmarks, svc => svc.list(user.id, filter).await)
-        .unwrap_or_default();
-
-    let bookmark_views: Vec<BookmarkView> = bookmarks.into_iter().map(Into::into).collect();
+    let bookmark_views: Vec<BookmarkView> = if searching {
+        state
+            .search
+            .search(user.id, filter)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "bookmark search failed");
+                Vec::new()
+            })
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    } else {
+        with_bookmarks!(&state.bookmarks, svc => svc.list(user.id, filter).await)
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    };
+    let capped = searching && bookmark_views.len() as i64 >= MAX_SEARCH_RESULTS;
 
     // Query all distinct tags for the filter bar (used by both HTMX and full-page paths).
     let all_tag_names = with_bookmarks!(&state.bookmarks, svc =>
@@ -221,6 +261,8 @@ pub async fn list(
             bookmarks: bookmark_views,
             filter_tags,
             sort: sort_str,
+            searching,
+            capped,
         })
     } else {
         let can_generate_ai_images = with_bookmarks!(&state.bookmarks, svc => {
@@ -232,6 +274,8 @@ pub async fn list(
             bookmarks: bookmark_views,
             filter_tags,
             sort: sort_str,
+            searching,
+            capped,
             suggest_title: String::new(),
             suggest_description: String::new(),
             suggest_preview_image_url: None,
@@ -750,6 +794,60 @@ fn fill_if_blank(current: Option<String>, suggested: Option<String>) -> String {
 mod tests {
     use super::*;
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+
+    fn bookmark(title: &str) -> Bookmark {
+        Bookmark {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            url: "https://example.com/a".into(),
+            title: Some(title.into()),
+            description: None,
+            image_url: None,
+            override_image_url: None,
+            domain: Some("example.com".into()),
+            tags: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn render_list(bookmarks: Vec<BookmarkView>, searching: bool, capped: bool) -> String {
+        BookmarkListWithFilters {
+            bookmarks,
+            filter_tags: vec![],
+            sort: if searching { "relevance" } else { "newest" }.into(),
+            searching,
+            capped,
+        }
+        .render()
+        .unwrap()
+    }
+
+    #[test]
+    fn search_results_render_escaped_snippets_with_marked_terms() {
+        let hit = SearchHit {
+            bookmark: bookmark("Tokio tutorial"),
+            snippet: crate::domain::search::Snippet::from_marked(
+                "tasks <img src=x onerror=alert(1)> hold a \u{2}mutex\u{3} guard",
+            ),
+        };
+        let body = render_list(vec![hit.into()], true, false);
+        assert!(body.contains("data-testid=\"bookmark-card-snippet\""));
+        assert!(body.contains(">mutex</mark>"));
+        assert!(body.contains("&lt;img src=x onerror=alert(1)&gt;"));
+        assert!(!body.contains("<img src=x"));
+        assert!(body.contains("<option value=\"relevance\" selected>Relevance</option>"));
+        assert!(!body.contains("search-cap-notice"));
+    }
+
+    #[test]
+    fn plain_lists_have_no_snippet_or_relevance_option() {
+        let body = render_list(vec![bookmark("Plain").into()], false, false);
+        assert!(!body.contains("bookmark-card-snippet"));
+        assert!(!body.contains("value=\"relevance\""));
+        let capped = render_list(vec![bookmark("Plain").into()], true, true);
+        assert!(capped.contains("Showing the 50 most relevant"));
+    }
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
         let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(width, height, |x, y| {

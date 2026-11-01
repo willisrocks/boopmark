@@ -30,8 +30,9 @@ enum Commands {
         search: Option<String>,
         #[arg(long)]
         tags: Option<String>,
-        #[arg(long, default_value = "newest")]
-        sort: String,
+        /// newest, oldest, title or domain; a search defaults to relevance, a list to newest
+        #[arg(long)]
+        sort: Option<String>,
     },
     /// Search bookmarks
     Search { query: String },
@@ -432,13 +433,21 @@ async fn run(cli: Cli) -> Result<(), String> {
 
         Commands::List { search, tags, sort } => {
             let client = AppConfig::load().client()?;
-            let mut query = format!("?sort={sort}");
+            let mut params = Vec::new();
+            if let Some(s) = sort {
+                params.push(format!("sort={s}"));
+            }
             if let Some(s) = search {
-                query.push_str(&format!("&search={s}"));
+                params.push(format!("search={s}"));
             }
             if let Some(t) = tags {
-                query.push_str(&format!("&tags={t}"));
+                params.push(format!("tags={t}"));
             }
+            let query = if params.is_empty() {
+                String::new()
+            } else {
+                format!("?{}", params.join("&"))
+            };
             let resp = client.get(&format!("/bookmarks{query}")).await?;
             let bookmarks: Vec<Bookmark> = resp.json().await.map_err(|e| e.to_string())?;
             for bm in &bookmarks {
