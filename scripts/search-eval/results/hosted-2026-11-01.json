@@ -1,0 +1,1325 @@
+{
+ "date": "2026-11-01T19:17:35+00:00",
+ "corpus": {
+  "rebuilt": 489,
+  "pinned": 490,
+  "edited": [
+   254,
+   347,
+   355,
+   400,
+   404,
+   409,
+   489
+  ],
+  "missing": [
+   376
+  ],
+  "queries": 48
+ },
+ "spend": {
+  "openai:text-embedding-3-small": {
+   "calls": 34,
+   "tokens": 1354960,
+   "usd": 0.027099
+  },
+  "openai:text-embedding-3-large": {
+   "calls": 34,
+   "tokens": 1354960,
+   "usd": 0.176145
+  }
+ },
+ "spend_total_usd": 0.203244,
+ "aborted": null,
+ "query_latency": {
+  "fastembed:BAAI/bge-small-en-v1.5": {
+   "p50_ms": 24.975916981929913,
+   "max_ms": 175.48312502913177,
+   "n": 10
+  },
+  "openai:text-embedding-3-small": {
+   "p50_ms": 186.81827100226656,
+   "max_ms": 227.79104200890288,
+   "n": 10
+  },
+  "openai:text-embedding-3-large": {
+   "p50_ms": 285.7181250001304,
+   "max_ms": 357.172833988443,
+   "n": 10
+  }
+ },
+ "models": {
+  "fastembed:BAAI/bge-small-en-v1.5 (384d)": {
+   "main/fallback": {
+    "vector (chunks)": {
+     "recall": 0.9435763888888888,
+     "mrr": 0.953125,
+     "ndcg": 0.9231717809784532,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9595332651218379,
+      "natural": 0.8125685632352752,
+      "prefix": 0.819609186058814,
+      "typo": 0.9306274570617926,
+      "unscraped": 0.9919720789148188
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.8776041666666666,
+     "mrr": 0.9069444444444444,
+     "ndcg": 0.8547899189672877,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 0.9538662191964322,
+      "keyword": 0.7130601494752965,
+      "natural": 0.7543918168050779,
+      "prefix": 0.8083908175891258,
+      "typo": 0.8943183576231707,
+      "unscraped": 0.9613147192765459
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9435763888888888,
+     "mrr": 0.9479166666666666,
+     "ndcg": 0.9167052611630233,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9899238757926789,
+      "natural": 0.8364589262375597,
+      "prefix": 0.819609186058814,
+      "typo": 0.9306274570617926,
+      "unscraped": 0.9181580296291103
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9592013888888888,
+     "mrr": 0.9357638888888888,
+     "ndcg": 0.9149413309649221,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9836138176829295,
+      "natural": 0.8060850509635971,
+      "prefix": 0.9283737567043544,
+      "typo": 0.8681274570617926,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.9539930555555556,
+     "mrr": 0.953125,
+     "ndcg": 0.9303360869206468,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9595332651218379,
+      "natural": 0.7944749305557985,
+      "prefix": 0.9040640826155781,
+      "typo": 0.9306274570617926,
+      "unscraped": 0.9919720789148188
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9539930555555556,
+     "mrr": 0.9479166666666666,
+     "ndcg": 0.925317256031728,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9899238757926789,
+      "natural": 0.8260863011661418,
+      "prefix": 0.9040640826155781,
+      "typo": 0.9306274570617926,
+      "unscraped": 0.9181580296291103
+     }
+    }
+   },
+   "main/no-fallback (original 24)": {
+    "vector (chunks)": {
+     "recall": 0.9600694444444444,
+     "mrr": 0.9479166666666666,
+     "ndcg": 0.9179104135404309,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9595332651218379,
+      "natural": 0.8125685632352752
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.859375,
+     "mrr": 0.8625,
+     "ndcg": 0.8129759788628979,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 0.9538662191964322,
+      "keyword": 0.7130601494752965,
+      "natural": 0.7654525214234462
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9600694444444444,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9357332277786162,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9899238757926789,
+      "natural": 0.8364589262375597
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9496527777777778,
+     "mrr": 0.96875,
+     "ndcg": 0.9225025909355367,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9836138176829295,
+      "natural": 0.8060850509635971
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.9600694444444444,
+     "mrr": 0.9270833333333334,
+     "ndcg": 0.9111253012856272,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9595332651218379,
+      "natural": 0.7944749305557985
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9600694444444444,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9318434933768346,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9899238757926789,
+      "natural": 0.8260863011661418
+     }
+    }
+   },
+   "fallback_gap": {
+    "vector (chunks)": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9919720789148188,
+     "sim_none": 0.17804301950683937,
+     "sim_fallback": 0.7248444544854927,
+     "sim_full": 0.9330284606084176
+    },
+    "vector (metadata only)": {
+     "real_none": 0.0,
+     "real_fallback": 0.9613147192765459,
+     "sim_none": 0.1708256370539989,
+     "sim_fallback": 0.8489532187012395,
+     "sim_full": 0.8489532187012395
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9181580296291103,
+     "sim_none": 0.17466404122173212,
+     "sim_fallback": 0.6878663460202473,
+     "sim_full": 0.9337239624664816
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.17466404122173212,
+     "sim_fallback": 0.6652512849441939,
+     "sim_full": 0.9089058250713024
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9919720789148188,
+     "sim_none": 0.17285670697113042,
+     "sim_fallback": 0.7178182682975023,
+     "sim_full": 0.9276059201355572
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9181580296291103,
+     "sim_none": 0.17466404122173212,
+     "sim_fallback": 0.6826800334845383,
+     "sim_full": 0.9321619257976507
+    }
+   }
+  },
+  "openai:text-embedding-3-small (1536d)": {
+   "main/fallback": {
+    "vector (chunks)": {
+     "recall": 0.9496527777777778,
+     "mrr": 0.96875,
+     "ndcg": 0.9350222240794435,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9301365907128409,
+      "natural": 0.8420516058265274,
+      "prefix": 0.7986076947307752,
+      "typo": 1.0,
+      "unscraped": 1.0
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.9236111111111112,
+     "mrr": 0.9427083333333334,
+     "ndcg": 0.9000971160339978,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.7740953277868666,
+      "natural": 0.8313052645468632,
+      "prefix": 0.8193815061229032,
+      "typo": 0.9335296335395568,
+      "unscraped": 0.9919720789148188
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9513888888888888,
+     "mrr": 0.96875,
+     "ndcg": 0.9293465216033041,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9824220112534772,
+      "natural": 0.8531303647396323,
+      "prefix": 0.7986076947307752,
+      "typo": 1.0,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9722222222222222,
+     "mrr": 0.9444444444444444,
+     "ndcg": 0.9278679530351603,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9761119531437278,
+      "natural": 0.831498243321181,
+      "prefix": 0.90992239610801,
+      "typo": 0.9375,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.9600694444444444,
+     "mrr": 0.96875,
+     "ndcg": 0.9493960816256035,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9301365907128409,
+      "natural": 0.8248192604784722,
+      "prefix": 0.9394470731221386,
+      "typo": 1.0,
+      "unscraped": 1.0
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9618055555555556,
+     "mrr": 0.96875,
+     "ndcg": 0.9443166240817281,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9824220112534772,
+      "natural": 0.8390779923636514,
+      "prefix": 0.9394470731221386,
+      "typo": 1.0,
+      "unscraped": 0.9261859507142916
+     }
+    }
+   },
+   "main/no-fallback (original 24)": {
+    "vector (chunks)": {
+     "recall": 0.9409722222222222,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.920392524476193,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9301365907128409,
+      "natural": 0.8420516058265274
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.9097222222222222,
+     "mrr": 0.9097222222222222,
+     "ndcg": 0.8734102722497203,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.7740953277868666,
+      "natural": 0.8381310266094691
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9444444444444444,
+     "mrr": 1.0,
+     "ndcg": 0.9397969733929596,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9824220112534772,
+      "natural": 0.8531303647396323
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9444444444444444,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9298444942456968,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9761119531437278,
+      "natural": 0.831498243321181
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.9409722222222222,
+     "mrr": 0.9375,
+     "ndcg": 0.9139303949706723,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9301365907128409,
+      "natural": 0.8248192604784722
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9444444444444444,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9345273337519668,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9824220112534772,
+      "natural": 0.8390779923636514
+     }
+    }
+   },
+   "fallback_gap": {
+    "vector (chunks)": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.17600760821203043,
+     "sim_fallback": 0.8402746473946506,
+     "sim_full": 0.9449023956552106
+    },
+    "vector (metadata only)": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9919720789148188,
+     "sim_none": 0.20157622070293904,
+     "sim_fallback": 0.891981597951076,
+     "sim_full": 0.891981597951076
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.1708212956763215,
+     "sim_fallback": 0.8013118265343523,
+     "sim_full": 0.9437760190291992
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.1708212956763215,
+     "sim_fallback": 0.7818153124297031,
+     "sim_full": 0.9361593908403499
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.1736608714399148,
+     "sim_fallback": 0.8363670081780643,
+     "sim_full": 0.9589012840572363
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.1736608714399148,
+     "sim_fallback": 0.7992440609700475,
+     "sim_full": 0.959364893917262
+    }
+   }
+  },
+  "openai:text-embedding-3-small (512d)": {
+   "main/fallback": {
+    "vector (chunks)": {
+     "recall": 0.921875,
+     "mrr": 0.9548611111111112,
+     "ndcg": 0.9025990696871666,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.907819801084892,
+      "natural": 0.8246785129361629,
+      "prefix": 0.6398037236495593,
+      "typo": 0.9636359723833665,
+      "unscraped": 1.0
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.9036458333333334,
+     "mrr": 0.9496527777777778,
+     "ndcg": 0.8874706581788437,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.7665099605762915,
+      "natural": 0.7927933306549718,
+      "prefix": 0.8213885786682055,
+      "typo": 0.9062287039372863,
+      "unscraped": 0.9919720789148188
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9409722222222222,
+     "mrr": 0.9375,
+     "ndcg": 0.901522666747732,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9824220112534772,
+      "natural": 0.8429293663343992,
+      "prefix": 0.6398037236495593,
+      "typo": 0.9636359723833665,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9670138888888888,
+     "mrr": 0.9513888888888888,
+     "ndcg": 0.9212587794211268,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9761119531437278,
+      "natural": 0.8155624342520958,
+      "prefix": 0.9294380909548804,
+      "typo": 0.9011359723833665,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.9427083333333334,
+     "mrr": 0.9756944444444444,
+     "ndcg": 0.9329166440334419,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.907819801084892,
+      "natural": 0.8074461675881077,
+      "prefix": 0.9081928364418441,
+      "typo": 0.9636359723833665,
+      "unscraped": 1.0
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9618055555555556,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9324364860262712,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9824220112534772,
+      "natural": 0.8288769939584182,
+      "prefix": 0.9081928364418441,
+      "typo": 0.9636359723833665,
+      "unscraped": 0.9261859507142916
+     }
+    }
+   },
+   "main/no-fallback (original 24)": {
+    "vector (chunks)": {
+     "recall": 0.9166666666666666,
+     "mrr": 0.9722222222222222,
+     "ndcg": 0.9073685510008213,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.907819801084892,
+      "natural": 0.8246785129361629
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.890625,
+     "mrr": 0.90625,
+     "ndcg": 0.8574871036471211,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.7665099605762915,
+      "natural": 0.801568973721874
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9548611111111112,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9359715989909972,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9824220112534772,
+      "natural": 0.8429293663343992
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9444444444444444,
+     "mrr": 0.9722222222222222,
+     "ndcg": 0.9238685658447899,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9761119531437278,
+      "natural": 0.8155624342520958
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.9166666666666666,
+     "mrr": 0.9513888888888888,
+     "ndcg": 0.9009064214953005,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.907819801084892,
+      "natural": 0.8074461675881077
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9548611111111112,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9307019593500043,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9824220112534772,
+      "natural": 0.8288769939584182
+     }
+    }
+   },
+   "fallback_gap": {
+    "vector (chunks)": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.16258132935494418,
+     "sim_fallback": 0.8228268295071357,
+     "sim_full": 0.906965698537212
+    },
+    "vector (metadata only)": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9919720789148188,
+     "sim_none": 0.17989564864396515,
+     "sim_fallback": 0.866690440334605,
+     "sim_full": 0.866690440334605
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.16438866360554588,
+     "sim_fallback": 0.7834073687618874,
+     "sim_full": 0.9099317177132683
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.17600760821203043,
+     "sim_fallback": 0.7828379229490867,
+     "sim_full": 0.9221729988329578
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.1690139614257198,
+     "sim_fallback": 0.835005930181295,
+     "sim_full": 0.9405435250399655
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.1708212956763215,
+     "sim_fallback": 0.7986515961138565,
+     "sim_full": 0.945099530702059
+    }
+   }
+  },
+  "openai:text-embedding-3-large (3072d)": {
+   "main/fallback": {
+    "vector (chunks)": {
+     "recall": 0.9713541666666666,
+     "mrr": 0.96875,
+     "ndcg": 0.9573759170348515,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.9124616362008303,
+      "prefix": 0.8006622586349104,
+      "typo": 0.997861510244586,
+      "unscraped": 1.0
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.9331597222222222,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9220458058121873,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.785762823161733,
+      "natural": 0.9350792299025921,
+      "prefix": 0.772780406455472,
+      "typo": 0.9873612265767465,
+      "unscraped": 0.9806573596382729
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9661458333333334,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.939076323626858,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.8968794150089855,
+      "prefix": 0.8006622586349104,
+      "typo": 0.997861510244586,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9869791666666666,
+     "mrr": 0.9444444444444444,
+     "ndcg": 0.9406773789709189,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9872647501901431,
+      "natural": 0.8719614837027196,
+      "prefix": 0.9415426661415042,
+      "typo": 0.935361510244586,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.9921875,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9772044815558548,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.8934601264615202,
+      "prefix": 0.9877930394119021,
+      "typo": 0.997861510244586,
+      "unscraped": 1.0
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9869791666666666,
+     "mrr": 0.96875,
+     "ndcg": 0.9598328514034855,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.8828270426330046,
+      "prefix": 0.9877930394119021,
+      "typo": 0.997861510244586,
+      "unscraped": 0.9261859507142916
+     }
+    }
+   },
+   "main/no-fallback (original 24)": {
+    "vector (chunks)": {
+     "recall": 0.984375,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9652990993294467,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.9124616362008303
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.9288194444444444,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9131688679689774,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.785762823161733,
+      "natural": 0.9350792299025921
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9739583333333334,
+     "mrr": 1.0,
+     "ndcg": 0.9594557663825048,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.8968794150089855
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9739583333333334,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9482711085273117,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9872647501901431,
+      "natural": 0.8719614837027196
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.984375,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9581735331772053,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.8934601264615202
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9739583333333334,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.954186126741512,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.8828270426330046
+     }
+    }
+   },
+   "fallback_gap": {
+    "vector (chunks)": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.20570404632747408,
+     "sim_fallback": 0.8544297725364001,
+     "sim_full": 0.9301679096092985
+    },
+    "vector (metadata only)": {
+     "real_none": 0.02184074368181642,
+     "real_fallback": 0.9806573596382729,
+     "sim_none": 0.20593777934399693,
+     "sim_fallback": 0.8735343410988289,
+     "sim_full": 0.8735343410988289
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.1916943673398379,
+     "sim_fallback": 0.8074212914387559,
+     "sim_full": 0.9195226667643371
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.1916943673398379,
+     "sim_fallback": 0.8403617859182582,
+     "sim_full": 0.9473004445421149
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.19954357497142777,
+     "sim_fallback": 0.9006874175470264,
+     "sim_full": 0.976222710295199
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.18650805480412896,
+     "sim_fallback": 0.8577905344586025,
+     "sim_full": 0.9680520361319022
+    }
+   }
+  },
+  "openai:text-embedding-3-large (1024d)": {
+   "main/fallback": {
+    "vector (chunks)": {
+     "recall": 0.9635416666666666,
+     "mrr": 0.96875,
+     "ndcg": 0.9538477296662489,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.9127460316932731,
+      "prefix": 0.7740040729002636,
+      "typo": 0.9963660804049572,
+      "unscraped": 1.0
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.9331597222222222,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9217283863099274,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.7849606803863928,
+      "natural": 0.9322267106023795,
+      "prefix": 0.772780406455472,
+      "typo": 0.9862450395542371,
+      "unscraped": 0.9831554629583622
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9635416666666666,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9394421200864546,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.9179317242518243,
+      "prefix": 0.7740040729002636,
+      "typo": 0.9963660804049572,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9895833333333334,
+     "mrr": 0.9444444444444444,
+     "ndcg": 0.9443754486473463,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9872647501901431,
+      "natural": 0.8962439436967076,
+      "prefix": 0.9366974400147805,
+      "typo": 0.9338660804049572,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.984375,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9736132420565548,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.893408243923577,
+      "prefix": 0.9611348536772554,
+      "typo": 0.9963660804049572,
+      "unscraped": 1.0
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.984375,
+     "mrr": 0.96875,
+     "ndcg": 0.9601986478630822,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.9038793518758433,
+      "prefix": 0.9611348536772554,
+      "typo": 0.9963660804049572,
+      "unscraped": 0.9261859507142916
+     }
+    }
+   },
+   "main/no-fallback (original 24)": {
+    "vector (chunks)": {
+     "recall": 0.9791666666666666,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9654057476391127,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.9127460316932731
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.9288194444444444,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9118652149219235,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.7849606803863928,
+      "natural": 0.9322267106023795
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9791666666666666,
+     "mrr": 1.0,
+     "ndcg": 0.9673503823485694,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.9179317242518243
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9791666666666666,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9573770310250571,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9872647501901431,
+      "natural": 0.8962439436967076
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.9791666666666666,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9581540772254766,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.893408243923577
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9791666666666666,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9620807427075766,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9935748082998925,
+      "natural": 0.9038793518758433
+     }
+    }
+   },
+   "fallback_gap": {
+    "vector (chunks)": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.20751138057807578,
+     "sim_fallback": 0.8566558309104474,
+     "sim_full": 0.9354602896204459
+    },
+    "vector (metadata only)": {
+     "real_none": 0.023719771276929622,
+     "real_fallback": 0.9831554629583622,
+     "sim_none": 0.2093512542303573,
+     "sim_fallback": 0.8695639558665035,
+     "sim_full": 0.8695639558665035
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.1935017015904396,
+     "sim_fallback": 0.7991968534404356,
+     "sim_full": 0.9275967727866263
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.1935017015904396,
+     "sim_fallback": 0.8321373479199379,
+     "sim_full": 0.954424110673109
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.20135090922202947,
+     "sim_fallback": 0.8987577967709257,
+     "sim_full": 0.9813469512911535
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.18831538905473066,
+     "sim_fallback": 0.8495660964602822,
+     "sim_full": 0.9761261421541914
+    }
+   }
+  },
+  "openai:text-embedding-3-large (512d)": {
+   "main/fallback": {
+    "vector (chunks)": {
+     "recall": 0.9583333333333334,
+     "mrr": 0.96875,
+     "ndcg": 0.9423959075114637,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9774295981771421,
+      "natural": 0.9162886883478598,
+      "prefix": 0.7019102533074792,
+      "typo": 0.9918670822918312,
+      "unscraped": 1.0
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.9227430555555556,
+     "mrr": 0.9479166666666666,
+     "ndcg": 0.9081920009686414,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.7972469465899413,
+      "natural": 0.8950055777708203,
+      "prefix": 0.731730008332017,
+      "typo": 0.9686909475102209,
+      "unscraped": 0.9817529590353944
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.9557291666666666,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9283918344683614,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9899238757926789,
+      "natural": 0.9138981376233503,
+      "prefix": 0.7019102533074792,
+      "typo": 0.9918670822918312,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.9921875,
+     "mrr": 0.9444444444444444,
+     "ndcg": 0.9400316135733627,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9836138176829295,
+      "natural": 0.8879880400748538,
+      "prefix": 0.9245887002649427,
+      "typo": 0.9293670822918312,
+      "unscraped": 0.9261859507142916
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.9817708333333334,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9659501330243213,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9774295981771421,
+      "natural": 0.8892324960671809,
+      "prefix": 0.9309283458313588,
+      "typo": 0.9918670822918312,
+      "unscraped": 1.0
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.9817708333333334,
+     "mrr": 0.96875,
+     "ndcg": 0.9543842762133499,
+     "zero": 0.0,
+     "n": 48,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9899238757926789,
+      "natural": 0.8998457652473693,
+      "prefix": 0.9309283458313588,
+      "typo": 0.9918670822918312,
+      "unscraped": 0.9261859507142916
+     }
+    }
+   },
+   "main/no-fallback (original 24)": {
+    "vector (chunks)": {
+     "recall": 0.9895833333333334,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9620252242654472,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9774295981771421,
+      "natural": 0.9162886883478598
+     }
+    },
+    "vector (metadata only)": {
+     "recall": 0.9288194444444444,
+     "mrr": 0.9375,
+     "ndcg": 0.9014907844194572,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.7972469465899413,
+      "natural": 0.8950055777708203
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "recall": 0.984375,
+     "mrr": 1.0,
+     "ndcg": 0.9647729320482876,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9899238757926789,
+      "natural": 0.9138981376233503
+     }
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "recall": 0.984375,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9532162118522579,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9836138176829295,
+      "natural": 0.8879880400748538
+     }
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "recall": 0.984375,
+     "mrr": 0.9583333333333334,
+     "ndcg": 0.9518791521601926,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9774295981771421,
+      "natural": 0.8892324960671809
+     }
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "recall": 0.984375,
+     "mrr": 0.9791666666666666,
+     "ndcg": 0.9595032924072948,
+     "zero": 0.0,
+     "n": 24,
+     "ndcg_by_type": {
+      "deep": 1.0,
+      "keyword": 0.9899238757926789,
+      "natural": 0.8998457652473693
+     }
+    }
+   },
+   "fallback_gap": {
+    "vector (chunks)": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.20467180481448247,
+     "sim_fallback": 0.8500058898732636,
+     "sim_full": 0.9313744141447554
+    },
+    "vector (metadata only)": {
+     "real_none": 0.02184074368181642,
+     "real_fallback": 0.9817529590353944,
+     "sim_none": 0.2031426838357793,
+     "sim_fallback": 0.8572153748404935,
+     "sim_full": 0.8572153748404935
+    },
+    "hybrid: fts AND, ts_rank weighted + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.19066212582684633,
+     "sim_fallback": 0.7971739014996894,
+     "sim_full": 0.9196516950554443
+    },
+    "hybrid: fts AND+ (unaccent; unknown words -> prefix | typo fix) + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.1935017015904396,
+     "sim_fallback": 0.8317294713547662,
+     "sim_full": 0.9505480198046262
+    },
+    "hybrid: trgm word_similarity, title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 1.0,
+     "sim_none": 0.20135090922202947,
+     "sim_fallback": 0.8978196829990666,
+     "sim_full": 0.9765204205313757
+    },
+    "hybrid: fts AND, ts_rank weighted + trgm title+description + vector": {
+     "real_none": 0.06131471927654584,
+     "real_fallback": 0.9261859507142916,
+     "sim_none": 0.18831538905473066,
+     "sim_fallback": 0.8491582198951105,
+     "sim_full": 0.9712996113944136
+    }
+   }
+  }
+ }
+}
