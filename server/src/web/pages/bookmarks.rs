@@ -771,7 +771,7 @@ mod tests {
     fn render_list(bookmarks: Vec<BookmarkView>, searching: bool, capped: bool) -> String {
         BookmarkListWithFilters {
             bookmarks,
-            filter_tags: vec![],
+            filter: FilterBar::new(&[], &[]),
             sort: if searching { "relevance" } else { "newest" }.into(),
             searching,
             capped,
