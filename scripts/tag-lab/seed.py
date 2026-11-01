@@ -122,8 +122,7 @@ def generate(n_bookmarks, rng):
             "concepts": concepts,
         })
 
-    # Coverage pass: give each unused spelling a bookmark. Replacing a spelling can drop the
-    # last copy of another (600 of 627 used with the default seed); see the docstring.
+    # Coverage pass: give each unused spelling a bookmark (incomplete; see the docstring).
     used = {t for b in bookmarks for t in b["tags"]}
     groups_of = {}
     for g, cs in GROUPS.items():

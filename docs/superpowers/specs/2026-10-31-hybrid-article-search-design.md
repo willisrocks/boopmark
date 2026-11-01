@@ -141,8 +141,7 @@ SELECT count(*) FROM bookmarks;   -- 334 at the move
 ```
 
 Neon's hosts end in `neon.tech`, which identifies the provider from the
-`DATABASE_URL` host if the secret is ever shown. AGENTS.md now says "Fly
-Managed Postgres in production".
+`DATABASE_URL` host if the secret is ever shown.
 
 ### Extensions on both providers (primary docs, checked 2026-11-01)
 
@@ -724,7 +723,11 @@ CREATE INDEX idx_bookmark_chunks_hnsw_384 ON bookmark_chunks
     `bookmark_chunks.model = Embedder::model_id()`, not only on the
     dimension, so a re-embed to another model of the same size never ranks
     old-model chunks against a new-model query. Until a bookmark is
-    re-embedded it is found through the lexical legs only.
+    re-embedded it is found through the lexical legs only. A re-embed to a
+    model of the same size leaves stale chunks in that size's HNSW index,
+    which the iterative scan skips at some cost until the backfill ends;
+    add `AND model = '<id>'` to the new model's partial index if that
+    matters.
 - **Self-hosting / dev / CI** need a Postgres with pgvector:
   - `docker-compose.yml`: `postgres:16-alpine` → `pgvector/pgvector:pg16`
     (it includes contrib, so `pg_trgm` too);
@@ -967,7 +970,7 @@ trg AS (
 ),
 nn AS (
     -- 1024 = Embedder::dims(), inlined by the repository so the partial index matches;
-    -- $6 = Embedder::model_id(), so chunks from an older model of the same size never match
+    -- $6 = Embedder::model_id()
     SELECT bookmark_id, embedding::halfvec(1024) <=> $3::halfvec(1024) AS dist
     FROM bookmark_chunks
     WHERE user_id = $1 AND model = $6 AND vector_dims(embedding) = 1024
@@ -977,13 +980,12 @@ vec AS (
     SELECT bookmark_id, row_number() OVER (ORDER BY min(dist), bookmark_id) AS r
     FROM nn GROUP BY bookmark_id ORDER BY min(dist), bookmark_id LIMIT 50
 )
-SELECT u.bookmark_id, sum(1.0 / (60 + u.r)) AS score
-FROM (SELECT bookmark_id, r FROM lex UNION ALL SELECT bookmark_id, r FROM trg
-      UNION ALL SELECT bookmark_id, r FROM vec) u
-JOIN bookmark_contents c ON c.bookmark_id = u.bookmark_id
--- $7 = the query's quoted phrases and -exclusions only, or NULL when it has none
-WHERE $7::text IS NULL OR c.search @@ websearch_to_tsquery('english', $7)
-GROUP BY u.bookmark_id
+SELECT bookmark_id, sum(1.0 / (60 + r)) AS score
+FROM (SELECT * FROM lex UNION ALL SELECT * FROM trg UNION ALL SELECT * FROM vec) u
+GROUP BY bookmark_id
+-- $7 = the query's quoted phrases and -exclusions only; omitted when it has none
+HAVING EXISTS (SELECT 1 FROM bookmark_contents c WHERE c.bookmark_id = u.bookmark_id
+               AND c.search @@ websearch_to_tsquery('english', $7))
 ORDER BY score DESC, bookmark_id
 LIMIT $4 OFFSET $5;
 ```
@@ -991,9 +993,10 @@ LIMIT $4 OFFSET $5;
 - **Quotes and `-exclusion` constrain the whole result.** The repository
   extracts the quoted phrases and `-terms` from the query into `$7`
   (`"rust async" tokio -tea` → `"rust async" -tea`) and the fused result
-  keeps only bookmarks whose `search` matches it. So `coffee -tea` never
-  returns a bookmark about tea through the trigram or vector leg. A query
-  without operators passes `NULL` and is unfiltered. This is not measured:
+  keeps only bookmarks whose `search` matches it, checked once per fused
+  bookmark. So `coffee -tea` never returns a bookmark about tea through the
+  trigram or vector leg. For a query without operators the repository
+  leaves the `HAVING` clause out. This is not measured:
   no eval query uses operators.
 - **Tags filter.** Join `bookmarks` in each leg with `AND b.tags && $tags`.
   This is not measured, but it is cheap: GIN on `tags`, applied after the
@@ -1067,8 +1070,7 @@ The search input in `templates/components/header.html` keeps its
   embedded_model = NULL` (plus a partial HNSW index if the new size has
   none). The worker then
   re-embeds from the stored text, with **no refetch**, and replaces each
-  bookmark's chunks with ones tagged with the new `model`. Meanwhile the
-  vector leg skips old-model chunks. The text is kept for
+  bookmark's chunks with ones tagged with the new `model`. The text is kept for
   exactly this reason.
 
 ### Cost

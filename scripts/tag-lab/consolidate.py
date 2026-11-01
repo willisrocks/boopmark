@@ -12,7 +12,7 @@ Providers:
 
 Usage:
   python3 consolidate.py --provider llamacpp --model qwen3-4b --run qwen3-4b
-Writes out/<run>.groups.json, out/<run>.raw.json (the response only, not committed) and appends to
+Writes out/<run>.groups.json, out/<run>.raw.json (the model's answer, not committed) and appends to
 out/spend.jsonl.
 """
 import argparse
@@ -184,7 +184,7 @@ def main():
 
     pin, pout = PRICES.get(args.model, (0.0, 0.0))
     cost = 0.0 if args.provider == "llamacpp" else (tin * pin + tout * pout) / 1e6
-    (OUT / f"{args.run}.raw.json").write_text(json.dumps({"response": text}, indent=1))
+    (OUT / f"{args.run}.raw.json").write_text(text)
     (OUT / f"{args.run}.groups.json").write_text(json.dumps(final, indent=1))
     with open(OUT / "spend.jsonl", "a") as f:
         f.write(json.dumps({"run": args.run, "provider": args.provider, "model": args.model,

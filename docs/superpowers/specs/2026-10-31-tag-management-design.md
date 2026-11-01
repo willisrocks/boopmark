@@ -128,7 +128,7 @@ and answered each question from code or measurements; there was no human gate.
 Everything here is on this branch under `scripts/tag-lab/` and is reproducible.
 
 - `concepts.py`: the ground truth. 212 concepts, each listing the raw spellings a messy library
-  accumulates (627 spellings, of which the seed uses 600), plus 52 concept pairs where merging is a judgment call (`UI/UX` vs
+  accumulates (627 spellings), plus 52 concept pairs where merging is a judgment call (`UI/UX` vs
   `ux`, `vim` vs `neovim`, `local ai` vs `local llm`). It deliberately includes traps:
   - plural lookalikes: `ios`, `news`, `physics`, `kubernetes`, `aws`, `analytics`
   - near misses: `java`/`javascript`, `go`/`google`, `react`/`react native`, `claude`/`claude code`,
@@ -528,7 +528,6 @@ CREATE TABLE tag_change_snapshots (
 -- Before-images of the aliases a batch repointed or dropped.
 CREATE TABLE tag_alias_snapshots (
     batch_id       UUID NOT NULL REFERENCES tag_change_batches(id) ON DELETE CASCADE,
-    user_id        UUID NOT NULL,
     alias_key      TEXT NOT NULL,
     alias          TEXT NOT NULL,
     canonical      TEXT NOT NULL,
@@ -567,8 +566,9 @@ three run in one transaction. Every alias row a batch inserts or repoints gets t
 - For each snapshot whose bookmark still has `tags_after`, restore `tags_before`.
 - If a bookmark changed since, apply the inverse as a diff instead: re-add the removed tags and
   remove the added canonical, only if it was not on the bookmark before.
-- Delete the aliases whose `batch_id` is this batch (the ones it inserted or repointed), then
-  reinsert every before-image from `tag_alias_snapshots`. Old spellings resolve as they did before
+- Delete the user's aliases whose `batch_id` is this batch (`WHERE user_id = $u AND batch_id = $b`:
+  the ones it inserted or repointed), then reinsert every before-image from `tag_alias_snapshots`,
+  with the batch's `user_id`. Old spellings resolve as they did before
   the batch: back to A after an undone merge, and again at all after an undone delete.
 - Mark the batch `undone_at`.
 

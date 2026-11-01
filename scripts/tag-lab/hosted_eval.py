@@ -296,7 +296,8 @@ def step_pairs(ask, truth, det, samples, proposals, echo=False):
                 if echo:
                     a, b = batch[i][0].lower(), batch[i][1].lower()
                     ok = {str(item.get("a", "")).strip().lower(), str(item.get("b", "")).strip().lower()} == {a, b}
-                verdicts[start + i] = (bool(item.get("same")), item.get("confidence"), ok)
+                # A verdict whose echo names another pair is not trusted as "same".
+                verdicts[start + i] = (bool(item.get("same")) and ok is not False, item.get("confidence"), ok)
 
     residual = sum(1 for i, a in enumerate(canon) for b in canon[i + 1:] if label(truth, a, b) == "same")
     rows = []
@@ -307,7 +308,7 @@ def step_pairs(ask, truth, det, samples, proposals, echo=False):
                      "answered": i in verdicts})
 
     def accepted(levels, source=None):
-        acc = [r for r in rows if r["same"] and r["confidence"] in levels and r["echo_ok"] is not False
+        acc = [r for r in rows if r["same"] and r["confidence"] in levels
                and (source is None or r["source"] == source or r["source"] == "both")]
         c = sum(r["label"] == "same" for r in acc)
         w = sum(r["label"] == "different" for r in acc)
