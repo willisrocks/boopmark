@@ -33,10 +33,40 @@ const CANONICAL_FIELD: &str = "canonical:";
 /// showed, so the apply merges exactly those.
 const SHOWN_FIELD: &str = "shown:";
 
+/// A spelling chip. HTML collapses whitespace, so a spelling with leading,
+/// trailing or repeated whitespace (" js ") shows each whitespace character
+/// as ␠ and carries the exact spelling, quoted, as its tooltip; otherwise it
+/// would look the same as "js".
+struct ChipView {
+    label: String,
+    title: Option<String>,
+    count: i64,
+}
+
+impl From<ReviewChip> for ChipView {
+    fn from(chip: ReviewChip) -> Self {
+        let tag = chip.tag.as_str();
+        let hidden = tag.trim() != tag
+            || tag.contains("  ")
+            || tag.chars().any(|c| c.is_whitespace() && c != ' ');
+        Self {
+            label: if hidden {
+                tag.chars()
+                    .map(|c| if c.is_whitespace() { '␠' } else { c })
+                    .collect()
+            } else {
+                chip.tag.clone()
+            },
+            title: hidden.then(|| format!("“{tag}”")),
+            count: chip.count,
+        }
+    }
+}
+
 struct RowView {
     id: String,
     canonical: String,
-    chips: Vec<ReviewChip>,
+    chips: Vec<ChipView>,
     /// The chips as a JSON list, posted back with the row.
     shown: String,
     bookmarks: i64,
@@ -55,7 +85,7 @@ impl From<ReviewRow> for RowView {
                 &row.chips.iter().map(|c| c.tag.as_str()).collect::<Vec<_>>(),
             )
             .unwrap_or_default(),
-            chips: row.chips,
+            chips: row.chips.into_iter().map(ChipView::from).collect(),
             bookmarks: row.bookmarks,
             sample_title: row.sample_title,
             confidence: row.confidence.as_str(),
@@ -419,6 +449,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn chips_show_whitespace_that_html_would_collapse() {
+        let chip = |tag: &str| {
+            let view = ChipView::from(ReviewChip {
+                tag: tag.into(),
+                count: 1,
+            });
+            (view.label, view.title)
+        };
+        assert_eq!(chip("js"), ("js".into(), None));
+        assert_eq!(chip("remote work"), ("remote work".into(), None));
+        assert_eq!(chip(" js "), ("␠js␠".into(), Some("“ js ”".into())));
+        assert_eq!(
+            chip("remote  work"),
+            ("remote␠␠work".into(), Some("“remote  work”".into()))
+        );
+        assert_eq!(chip("a\tb"), ("a␠b".into(), Some("“a\tb”".into())));
     }
 
     #[test]

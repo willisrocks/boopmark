@@ -13,7 +13,7 @@
     <div class="min-w-0 flex-1 space-y-2">
         <div class="flex flex-wrap gap-1.5" data-testid="review-row-members">
             {% for chip in row.chips %}
-            <span class="inline-flex items-center gap-1 rounded-full bg-gray-800 px-2.5 py-0.5 text-xs text-gray-200">{{ chip.tag }}<span class="text-gray-500">{{ chip.count }}</span></span>
+            <span data-testid="review-chip" class="inline-flex items-center gap-1 rounded-full bg-gray-800 px-2.5 py-0.5 text-xs text-gray-200"{% if let Some(title) = chip.title %} title="{{ title }}"{% endif %}>{{ chip.label }}<span class="text-gray-500">{{ chip.count }}</span></span>
             {% endfor %}
         </div>
         <label class="flex flex-wrap items-center gap-2 text-sm text-gray-400">

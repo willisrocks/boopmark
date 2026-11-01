@@ -157,3 +157,39 @@ test("without a provider key the AI run is disabled but spelling variants still 
   await page.getByTestId("review-run-normalize").click();
   await expect(page.getByTestId("review-notice")).toBeVisible();
 });
+
+test("a spelling that differs only by spaces shows its spaces", async ({ page }) => {
+  await signIn(page);
+  await clearSuggestions(page);
+  // HTML collapses spaces, so without a marker " zig " would look like "zig".
+  const records = ["zig", " zig "].map((tag, i) => ({
+    id: crypto.randomUUID(),
+    url: `https://tags.example.com/zig-${i}`,
+    title: `Zig ${i}`,
+    tags: [tag],
+  }));
+  const response = await page.request.post(
+    "/api/v1/bookmarks/import?format=jsonl&mode=restore&strategy=upsert",
+    {
+      multipart: {
+        file: {
+          name: "zig.jsonl",
+          mimeType: "application/x-ndjson",
+          buffer: Buffer.from(records.map((r) => JSON.stringify(r)).join("\n")),
+        },
+      },
+    },
+  );
+  expect(response.status()).toBe(200);
+
+  await page.goto("/tags/review");
+  await page.getByTestId("review-run-normalize").click();
+  const chips = row(page, "zig").getByTestId("review-chip");
+  await expect(chips).toHaveCount(2);
+  const padded = chips.filter({ hasText: "␠zig␠" });
+  await expect(padded).toHaveCount(1);
+  await expect(padded).toHaveAttribute("title", "“ zig ”");
+  const plain = chips.filter({ hasNotText: "␠" });
+  await expect(plain).toHaveCount(1);
+  await expect(plain).not.toHaveAttribute("title");
+});
