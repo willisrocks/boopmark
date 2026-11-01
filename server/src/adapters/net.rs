@@ -326,6 +326,42 @@ pub async fn guarded_request(
     Err(GuardedGetError::TooManyRedirects)
 }
 
+/// The media type of a `Content-Type` value, without parameters, lowercased.
+pub fn mime_type(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+}
+
+#[derive(Debug)]
+pub enum CappedReadError {
+    TooBig,
+    Read(reqwest::Error),
+}
+
+/// Read a response body, giving up as soon as it exceeds `max` bytes (by
+/// its `Content-Length`, or while streaming).
+pub async fn read_capped(
+    mut resp: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, CappedReadError> {
+    let declared = resp.content_length().map(|len| len as usize);
+    if declared.is_some_and(|len| len > max) {
+        return Err(CappedReadError::TooBig);
+    }
+    let mut body = Vec::with_capacity(declared.unwrap_or(0).min(max));
+    while let Some(chunk) = resp.chunk().await.map_err(CappedReadError::Read)? {
+        if body.len() + chunk.len() > max {
+            return Err(CappedReadError::TooBig);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 /// Hands out request slots per host, `interval` apart, so a batch of links
 /// to one site (an import, a redirect chain) does not hammer it.
 pub struct HostThrottle {

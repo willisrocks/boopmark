@@ -1,6 +1,6 @@
 use crate::adapters::net::{
-    GuardedGetError, Lookup, SystemLookup, UrlGuard, guarded_client_builder, guarded_get,
-    guarded_request,
+    CappedReadError, GuardedGetError, Lookup, SystemLookup, UrlGuard, guarded_client_builder,
+    guarded_get, guarded_request, mime_type, read_capped,
 };
 use crate::domain::error::DomainError;
 use crate::domain::ports::image_fetcher::{FetchedImage, ImageFetcher};
@@ -42,7 +42,7 @@ impl GuardedImageFetcher {
     async fn download(&self, url: &str) -> Result<FetchedImage, DomainError> {
         let url = Url::parse(url)
             .map_err(|e| DomainError::InvalidInput(format!("invalid image URL: {e}")))?;
-        let mut resp = guarded_get(&self.client, self.guard, None, url)
+        let resp = guarded_get(&self.client, self.guard, None, url)
             .await
             .map_err(fetch_error)?;
         if !resp.status().is_success() {
@@ -55,13 +55,7 @@ impl GuardedImageFetcher {
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .map(|v| {
-                v.split(';')
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_ascii_lowercase()
-            })
+            .map(mime_type)
             .unwrap_or_default();
         if !content_type.starts_with("image/") {
             return Err(DomainError::InvalidInput(format!(
@@ -73,23 +67,12 @@ impl GuardedImageFetcher {
                 }
             )));
         }
-        if resp
-            .content_length()
-            .is_some_and(|len| len > MAX_IMAGE_BYTES as u64)
-        {
-            return Err(too_big());
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = resp
-            .chunk()
+        let bytes = read_capped(resp, MAX_IMAGE_BYTES)
             .await
-            .map_err(|e| DomainError::Internal(format!("image read error: {e}")))?
-        {
-            if bytes.len() + chunk.len() > MAX_IMAGE_BYTES {
-                return Err(too_big());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+            .map_err(|e| match e {
+                CappedReadError::TooBig => too_big(),
+                CappedReadError::Read(e) => DomainError::Internal(format!("image read error: {e}")),
+            })?;
         Ok(FetchedImage {
             bytes,
             content_type,
@@ -106,8 +89,12 @@ impl GuardedImageFetcher {
         let head = guarded_request(&self.client, self.guard, None, url.clone(), |c, u| {
             c.head(u)
         });
-        if head.await.is_ok_and(|r| r.status().is_success()) {
-            return true;
+        match head.await {
+            Ok(resp) if resp.status().is_success() => return true,
+            // An error status: the host may only dislike HEAD.
+            Ok(_) => {}
+            // Refused or unreachable: a second request would fail the same way.
+            Err(_) => return false,
         }
         guarded_request(&self.client, self.guard, None, url, |c, u| {
             c.get(u).header(reqwest::header::RANGE, "bytes=0-0")

@@ -134,10 +134,15 @@ async fn main() {
             ));
             (
                 Bookmarks::Local(Arc::new(
-                    BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
-                        .with_image_fetcher(image_fetcher.clone())
-                        .with_image_generator(image_generator.clone())
-                        .with_tag_resolver(tag_resolver.clone()),
+                    BookmarkService::new(
+                        db.clone(),
+                        metadata,
+                        storage,
+                        screenshot.clone(),
+                        image_fetcher.clone(),
+                    )
+                    .with_image_generator(image_generator.clone())
+                    .with_tag_resolver(tag_resolver.clone()),
                 )),
                 images,
             )
@@ -174,10 +179,15 @@ async fn main() {
             ));
             (
                 Bookmarks::S3(Arc::new(
-                    BookmarkService::new(db.clone(), metadata, storage, screenshot.clone())
-                        .with_image_fetcher(image_fetcher.clone())
-                        .with_image_generator(image_generator.clone())
-                        .with_tag_resolver(tag_resolver.clone()),
+                    BookmarkService::new(
+                        db.clone(),
+                        metadata,
+                        storage,
+                        screenshot.clone(),
+                        image_fetcher.clone(),
+                    )
+                    .with_image_generator(image_generator.clone())
+                    .with_tag_resolver(tag_resolver.clone()),
                 )),
                 images,
             )

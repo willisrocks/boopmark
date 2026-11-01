@@ -238,7 +238,8 @@ impl SearchRepository for PostgresPool {
                      WHERE c.user_id = w.user_id AND c.status = 'pending'
                        AND c.next_attempt_at <= now() AND c.attempts < $3
                      ORDER BY c.next_attempt_at, c.bookmark_id
-                     LIMIT $1
+                     -- Each user's share of the batch; `picked` takes users in turn.
+                     LIMIT ceil($1::numeric / (SELECT count(*) FROM waiting))::bigint
                      FOR UPDATE OF c SKIP LOCKED
                  ) d
              ),

@@ -1,7 +1,7 @@
 use crate::adapters::metadata::html::{is_cloudflare_challenge, is_cloudflare_challenge_response};
 use crate::adapters::net::{
-    GuardedGetError, HostThrottle, Lookup, SystemLookup, UrlGuard, guarded_client_builder,
-    guarded_get,
+    CappedReadError, GuardedGetError, HostThrottle, Lookup, SystemLookup, UrlGuard,
+    guarded_client_builder, guarded_get, mime_type, read_capped,
 };
 use crate::domain::error::CF_CHALLENGE_MSG;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher, FetchedArticle};
@@ -62,7 +62,7 @@ impl HtmlArticleFetcher {
     async fn fetch_article(&self, url: &str) -> Result<FetchedArticle, ArticleFetchError> {
         let parsed = Url::parse(url)
             .map_err(|e| ArticleFetchError::Permanent(format!("invalid URL: {e}")))?;
-        let mut resp = guarded_get(&self.client, self.guard, Some(&self.throttle), parsed)
+        let resp = guarded_get(&self.client, self.guard, Some(&self.throttle), parsed)
             .await
             .map_err(|e| match e {
                 GuardedGetError::Blocked(blocked) => {
@@ -93,25 +93,13 @@ impl HtmlArticleFetcher {
                 "not an HTML page: {content_type}"
             )));
         }
-        if resp
-            .content_length()
-            .is_some_and(|len| len > MAX_HTML_BYTES as u64)
-        {
-            return Err(too_big());
-        }
-
         let final_url = resp.url().to_string();
-        let mut body = Vec::with_capacity(
-            resp.content_length()
-                .map_or(0, |len| len as usize)
-                .min(MAX_HTML_BYTES),
-        );
-        while let Some(chunk) = resp.chunk().await.map_err(request_error)? {
-            if body.len() + chunk.len() > MAX_HTML_BYTES {
-                return Err(too_big());
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let body = read_capped(resp, MAX_HTML_BYTES)
+            .await
+            .map_err(|e| match e {
+                CappedReadError::TooBig => too_big(),
+                CappedReadError::Read(e) => request_error(e),
+            })?;
         let html_bytes = body.len();
         let url_for_parse = final_url.clone();
         // Decoding, the challenge check and extraction all scan the page, so
@@ -147,12 +135,7 @@ impl ArticleFetcher for HtmlArticleFetcher {
 }
 
 fn is_html(content_type: &str) -> bool {
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
+    let mime = mime_type(content_type);
     mime == "text/html" || mime == "application/xhtml+xml"
 }
 

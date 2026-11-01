@@ -200,11 +200,10 @@ pub async fn list(
         // relevance order; an unknown value falls back to the default.
         sort: query.sort.as_deref().and_then(BookmarkSort::parse),
         ..Default::default()
-    };
-    let searching = filter.search_text().is_some();
-    let sort_str = BookmarkSort::resolve(filter.sort, searching)
-        .as_str()
-        .to_string();
+    }
+    .normalized();
+    let searching = filter.search.is_some();
+    let sort_str = filter.sort.unwrap_or_default().as_str().to_string();
 
     // Query all distinct tags for the filter bar (used by both HTMX and
     // full-page paths) while the list is fetched.

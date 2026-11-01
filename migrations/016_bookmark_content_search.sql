@@ -42,6 +42,9 @@ CREATE INDEX idx_bookmark_contents_search ON bookmark_contents USING GIN(search)
 CREATE INDEX idx_bookmark_contents_meta_trgm ON bookmark_contents USING GIN(meta_text gin_trgm_ops);
 CREATE INDEX idx_bookmark_contents_queue ON bookmark_contents(next_attempt_at)
     WHERE status = 'pending';
+-- A claim looks at each waiting user's next rows.
+CREATE INDEX idx_bookmark_contents_user_queue ON bookmark_contents(user_id, next_attempt_at, bookmark_id)
+    WHERE status = 'pending';
 
 -- Keep bookmark_contents in step with every write to bookmarks, in the same
 -- transaction: a new bookmark or a changed URL is (re)queued for ingest,
