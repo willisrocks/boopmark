@@ -1,4 +1,5 @@
 use super::PostgresPool;
+use super::tag_alias_repo::{lock_user_tags, repoint_aliases};
 use crate::domain::bookmark::*;
 use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::{
@@ -550,8 +551,9 @@ impl BookmarkRepository for PostgresPool {
         &self,
         user_id: Uuid,
         updates: &[(Uuid, Vec<String>)],
+        alias_targets: &[(String, String)],
     ) -> Result<u64, DomainError> {
-        if updates.is_empty() {
+        if updates.is_empty() && alias_targets.is_empty() {
             return Ok(0);
         }
 
@@ -560,6 +562,7 @@ impl BookmarkRepository for PostgresPool {
             .begin()
             .await
             .map_err(|e| DomainError::Internal(e.to_string()))?;
+        lock_user_tags(&mut tx, user_id).await?;
 
         let mut rows: u64 = 0;
         for (id, new_tags) in updates {
@@ -576,7 +579,7 @@ impl BookmarkRepository for PostgresPool {
             .map_err(|e| DomainError::Internal(e.to_string()))?;
             rows += r.rows_affected();
         }
-
+        repoint_aliases(&mut tx, user_id, alias_targets).await?;
         tx.commit()
             .await
             .map_err(|e| DomainError::Internal(e.to_string()))?;

@@ -6,6 +6,9 @@
 -- One row per rename/merge/delete the user applies; the unit of undo.
 CREATE TABLE tag_change_batches (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Commit order within a user: assigned while the per-user tag lock is
+    -- held, unlike created_at, which is the transaction start time.
+    seq BIGSERIAL NOT NULL UNIQUE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     kind TEXT NOT NULL CHECK (kind IN ('normalize', 'llm_merge', 'rename', 'merge', 'delete')),
     -- The merges applied, for the history list.
@@ -14,8 +17,7 @@ CREATE TABLE tag_change_batches (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_tag_change_batches_user_created
-    ON tag_change_batches(user_id, created_at DESC);
+CREATE INDEX idx_tag_change_batches_user_seq ON tag_change_batches(user_id, seq DESC);
 
 -- One row per known spelling, keyed by its compact key.
 CREATE TABLE tag_aliases (

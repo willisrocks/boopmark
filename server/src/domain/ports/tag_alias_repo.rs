@@ -1,15 +1,16 @@
 use crate::domain::error::DomainError;
 use crate::domain::tag_alias::{
-    ChangeKind, NewTagAlias, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias,
-    TagChangeBatch, TagMerge, TagMergeProposal,
+    ChangeKind, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch,
+    TagMerge, TagMergeProposal, TagWrite,
 };
 use uuid::Uuid;
 
 /// Storage for aliases, merge proposals and undoable change batches.
 ///
-/// Every method is scoped to `user_id`. The merge and undo methods each run
-/// in one transaction with the affected bookmark rows locked, so a batch is
-/// applied or undone completely or not at all.
+/// Every method is scoped to `user_id`. Methods that write tags or aliases
+/// (resolve, apply, undo) are serialized per user, and the merge and undo
+/// methods each run in one transaction, so a batch is applied or undone
+/// completely or not at all.
 #[trait_variant::make(Send)]
 pub trait TagAliasRepository: Send + Sync {
     async fn list_aliases(&self, user_id: Uuid) -> Result<Vec<TagAlias>, DomainError>;
@@ -17,14 +18,15 @@ pub trait TagAliasRepository: Send + Sync {
     /// Each distinct tag on the user's bookmarks with its bookmark count.
     async fn tag_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError>;
 
-    /// Insert aliases whose key is not known yet, and return the stored row
-    /// for every requested key. A key a concurrent writer inserted first
-    /// keeps that writer's canonical.
-    async fn insert_aliases_if_absent(
+    /// Resolve bookmark tag writes to canonical tags with
+    /// [`crate::domain::tag_alias::resolve_writes`] and remember the new
+    /// aliases, in one transaction serialized with every other tag change
+    /// of this user. Returns the resolved tags per write, in order.
+    async fn resolve_writes(
         &self,
         user_id: Uuid,
-        aliases: &[NewTagAlias],
-    ) -> Result<Vec<TagAlias>, DomainError>;
+        writes: &[TagWrite],
+    ) -> Result<Vec<Vec<String>>, DomainError>;
 
     /// Replace the user's pending proposals from `source` with `proposals`.
     /// A proposal whose member set the user already dismissed is skipped.
@@ -56,12 +58,14 @@ pub trait TagAliasRepository: Send + Sync {
     ) -> Result<TagChangeBatch, DomainError>;
 
     /// Apply merges that did not come from proposals (manual merge, rename).
+    /// Returns `None`, recording no batch, when nothing would change, so a
+    /// retried or double-submitted merge does not add an empty batch.
     async fn apply_merges(
         &self,
         user_id: Uuid,
         kind: ChangeKind,
         merges: &[TagMerge],
-    ) -> Result<TagChangeBatch, DomainError>;
+    ) -> Result<Option<TagChangeBatch>, DomainError>;
 
     /// Undo an applied batch. Fails with `InvalidInput` if it is already
     /// undone or a later, still-applied batch touched the same bookmarks or

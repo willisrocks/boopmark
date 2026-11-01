@@ -25,6 +25,29 @@ pub fn compute_new_tags(current: &[String], mapping: &HashMap<String, Vec<String
     acc.into_iter().collect()
 }
 
+/// Where each consolidated tag's aliases should point afterwards, so the
+/// next save does not bring back a spelling this run removed. A tag mapped
+/// to several outputs points at its own lowercase form when that survives,
+/// otherwise at its first mapped output.
+fn alias_targets(tags: &[String], mapping: &HashMap<String, Vec<String>>) -> Vec<(String, String)> {
+    tags.iter()
+        .filter_map(|tag| {
+            let outputs = compute_new_tags(std::slice::from_ref(tag), mapping);
+            let lower = tag.to_lowercase();
+            let target = if outputs.contains(&lower) {
+                lower
+            } else {
+                mapping
+                    .get(&lower)?
+                    .iter()
+                    .map(|v| v.trim().to_lowercase())
+                    .find(|v| outputs.contains(v))?
+            };
+            (target != *tag).then(|| (tag.clone(), target))
+        })
+        .collect()
+}
+
 const MAX_CONSOLIDATION_MAPPING_ENTRIES: usize = 500;
 const MAX_CONSOLIDATION_VALUES_PER_TAG: usize = 32;
 const MAX_CONSOLIDATED_TAG_CHARS: usize = 100;
@@ -127,6 +150,27 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn tag_alias_targets_follow_the_consolidation() {
+        let mapping = map(&[
+            ("js", &["javascript"]),
+            ("react", &["react", "frontend"]),
+            ("vue", &["frontend", "vue.js"]),
+        ]);
+        let tags: Vec<String> = ["JS", "react", "GitHub", "rust", "vue"]
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        assert_eq!(
+            alias_targets(&tags, &mapping),
+            vec![
+                ("JS".to_string(), "javascript".to_string()),
+                ("GitHub".to_string(), "github".to_string()),
+                ("vue".to_string(), "frontend".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -379,7 +423,11 @@ where
         }
 
         // 5. Apply.
-        let bookmarks_changed = self.bookmarks.update_tags_bulk(user_id, &updates).await?;
+        let tags: Vec<String> = samples.iter().map(|s| s.tag.clone()).collect();
+        let bookmarks_changed = self
+            .bookmarks
+            .update_tags_bulk(user_id, &updates, &alias_targets(&tags, &mapping))
+            .await?;
 
         Ok(ConsolidationStats {
             bookmarks_changed,
@@ -564,6 +612,7 @@ mod service_tests {
             &self,
             user_id: Uuid,
             updates: &[(Uuid, Vec<String>)],
+            _alias_targets: &[(String, String)],
         ) -> Result<u64, DomainError> {
             let mut bookmarks = self.bookmarks.lock().unwrap();
             let mut rows = 0u64;

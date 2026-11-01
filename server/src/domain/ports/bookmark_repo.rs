@@ -86,11 +86,14 @@ pub trait BookmarkRepository: Send + Sync {
     async fn tag_samples(&self, user_id: Uuid) -> Result<Vec<TagSample>, DomainError>;
     /// Returns (id, tags) for every bookmark belonging to this user.
     async fn list_id_tags(&self, user_id: Uuid) -> Result<Vec<(Uuid, Vec<String>)>, DomainError>;
-    /// Replaces tags on the given bookmarks (must all belong to user_id) in a single
-    /// transaction. Returns the count of rows actually written.
+    /// Replaces tags on the given bookmarks (must all belong to user_id) and repoints
+    /// every tag alias whose canonical is `alias_targets[i].0` to `.1`, in a single
+    /// transaction serialized with the user's other tag changes. Returns the count of
+    /// bookmark rows actually written.
     async fn update_tags_bulk(
         &self,
         user_id: Uuid,
         updates: &[(Uuid, Vec<String>)],
+        alias_targets: &[(String, String)],
     ) -> Result<u64, DomainError>;
 }

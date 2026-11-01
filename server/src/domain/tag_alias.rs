@@ -271,6 +271,8 @@ pub struct Resolution {
 /// 5. otherwise a new tag, stored as typed
 ///
 /// The index learns the result, so later tags in the same write see it.
+/// A key with several existing spellings is a duplicate awaiting review:
+/// it resolves to one of those spellings but is never pinned as an alias.
 pub fn resolve_tag(raw: &str, index: &mut TagIndex) -> Resolution {
     let key = compact_key(raw);
     if let Some(canonical) = index.aliases.get(&key) {
@@ -279,17 +281,19 @@ pub fn resolve_tag(raw: &str, index: &mut TagIndex) -> Resolution {
             record: None,
         };
     }
+    if let Some(spellings) = index.existing.get(&key).filter(|s| s.len() > 1) {
+        let canonical = if spellings.iter().any(|(s, _)| s == raw) {
+            raw.to_string()
+        } else {
+            choose_display(spellings)
+        };
+        return Resolution {
+            canonical,
+            record: None,
+        };
+    }
 
     let canonical = if index.is_existing_spelling(&key, raw) {
-        // Two existing spellings with one key are duplicates awaiting a
-        // proposal. Keep this one, and do not pin the key to either.
-        let ambiguous = index.existing.get(&key).is_some_and(|s| s.len() > 1);
-        if ambiguous {
-            return Resolution {
-                canonical: raw.to_string(),
-                record: None,
-            };
-        }
         raw.to_string()
     } else if let Some(canonical) = index.canonical_for_key(&key) {
         canonical
@@ -321,9 +325,10 @@ pub fn resolve_tag(raw: &str, index: &mut TagIndex) -> Resolution {
 }
 
 /// Resolve the tags of one write. Tags in `keep` (the bookmark's current
-/// tags, on an edit) are kept verbatim so re-saving never rewrites existing
-/// data. Empty and control-character tags are dropped, and duplicates after
-/// resolution are removed, keeping the first.
+/// tags, on an edit) are kept verbatim, compared before any trimming, so
+/// re-saving never rewrites existing data. Other empty and control-character
+/// tags are dropped, and duplicates after resolution are removed, keeping
+/// the first.
 pub fn resolve_tags(
     raw: &[String],
     keep: &[String],
@@ -332,10 +337,10 @@ pub fn resolve_tags(
     let mut out: Vec<String> = Vec::with_capacity(raw.len());
     let mut records = Vec::new();
     for tag in raw {
-        let Some(tag) = clean_tag(tag) else { continue };
-        let canonical = if keep.iter().any(|k| k == tag) {
-            tag.to_string()
+        let canonical = if keep.contains(tag) {
+            tag.clone()
         } else {
+            let Some(tag) = clean_tag(tag) else { continue };
             let resolution = resolve_tag(tag, index);
             records.extend(resolution.record);
             resolution.canonical
@@ -347,20 +352,49 @@ pub fn resolve_tags(
     (out, records)
 }
 
+/// The tags of one bookmark write: as submitted, and the ones already on
+/// the bookmark (empty for a new bookmark), which are never rewritten.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TagWrite {
+    pub tags: Vec<String>,
+    pub keep: Vec<String>,
+}
+
+/// Resolve several writes against one index, in order, so an import sees
+/// the spellings earlier records introduced. Returns the resolved tags per
+/// write and every alias to remember.
+pub fn resolve_writes(
+    writes: &[TagWrite],
+    index: &mut TagIndex,
+) -> (Vec<Vec<String>>, Vec<NewTagAlias>) {
+    let mut records = Vec::new();
+    let resolved = writes
+        .iter()
+        .map(|write| {
+            let (tags, new) = resolve_tags(&write.tags, &write.keep, index);
+            records.extend(new);
+            tags
+        })
+        .collect();
+    (resolved, records)
+}
+
 /// Validate a set of merges and flatten it into `spelling -> final tag`.
 ///
-/// Members and canonicals are trimmed. A spelling may be merged into only
-/// one tag. Chains are followed (`a -> b` plus `b -> c` maps `a` to `c`),
-/// and cycles are rejected. A merge with nothing to rewrite is an error.
+/// Members are matched exactly as stored on bookmarks (untrimmed), so a
+/// stray `" rust "` can be merged into `rust`. The canonical is trimmed and
+/// must be a valid tag. A spelling may be merged into only one tag. Chains
+/// are followed (`a -> b` plus `b -> c` maps `a` to `c`), and cycles are
+/// rejected. A merge with nothing to rewrite is an error.
 pub fn merge_mapping(merges: &[TagMerge]) -> Result<BTreeMap<String, String>, DomainError> {
     let mut direct: BTreeMap<String, String> = BTreeMap::new();
     for merge in merges {
         let canonical = clean_tag(&merge.canonical)
             .ok_or_else(|| DomainError::InvalidInput("merge target is not a valid tag".into()))?;
         for member in &merge.members {
-            let member = clean_tag(member).ok_or_else(|| {
-                DomainError::InvalidInput("merge member is not a valid tag".into())
-            })?;
+            if member.is_empty() {
+                return Err(DomainError::InvalidInput("merge member is empty".into()));
+            }
             if member == canonical {
                 continue;
             }
@@ -438,10 +472,15 @@ pub fn normalization_proposals(tag_counts: &[(String, i64)]) -> Vec<NewTagMergeP
     group_tags(tag_counts, Level::Plural)
         .into_iter()
         .filter(|group| group.members.len() > 1)
-        .map(|group| NewTagMergeProposal {
-            canonical: group.canonical,
-            members: group.members,
-            confidence: Confidence::High,
+        .filter_map(|group| {
+            // A stray-whitespace spelling can win the display rule; the
+            // merge target is its trimmed form.
+            let canonical = clean_tag(&group.canonical)?.to_string();
+            Some(NewTagMergeProposal {
+                canonical,
+                members: group.members,
+                confidence: Confidence::High,
+            })
         })
         .collect()
 }
@@ -542,8 +581,51 @@ mod tests {
         let resolution = resolve_tag("github", &mut index);
         assert_eq!(resolution.canonical, "github");
         assert_eq!(resolution.record, None);
-        // A third spelling picks the display form of the existing ones.
-        assert_eq!(resolve(&mut index, "Github"), "GitHub");
+        // A third spelling picks the display form of the existing ones,
+        // without pinning the key before the user reviews the duplicate.
+        let resolution = resolve_tag("Github", &mut index);
+        assert_eq!(resolution.canonical, "GitHub");
+        assert_eq!(resolution.record, None);
+        assert_eq!(resolve(&mut index, "github"), "github");
+    }
+
+    #[test]
+    fn kept_tags_are_compared_before_trimming() {
+        let mut index = TagIndex::new(&[alias("rust", "Rust")], &counts(&[(" rust ", 1)]));
+        let (tags, records) = resolve_tags(
+            &s(&[" rust ", "bad\u{1}tag", "rust"]),
+            &s(&[" rust ", "bad\u{1}tag"]),
+            &mut index,
+        );
+        assert_eq!(tags, [" rust ", "bad\u{1}tag", "Rust"]);
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn resolve_writes_shares_one_index_across_an_import() {
+        let mut index = TagIndex::new(&[], &counts(&[("Rust", 2)]));
+        let writes = [
+            TagWrite {
+                tags: s(&["Zig", "rust"]),
+                keep: vec![],
+            },
+            TagWrite {
+                tags: s(&["zig", "rust"]),
+                keep: s(&["rust"]),
+            },
+        ];
+        let (resolved, records) = resolve_writes(&writes, &mut index);
+        assert_eq!(resolved, vec![s(&["Zig", "Rust"]), s(&["Zig", "rust"])]);
+        assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn merge_members_match_the_stored_spelling_exactly() {
+        let mapping = merge_mapping(&[merge(" rust ", &[" rust ", "Rust "])]).unwrap();
+        assert_eq!(mapping.len(), 2);
+        assert_eq!(mapping[" rust "], "rust");
+        assert_eq!(mapping["Rust "], "rust");
+        assert!(merge_mapping(&[merge("rust", &[""])]).is_err());
     }
 
     #[test]

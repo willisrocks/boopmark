@@ -2,13 +2,13 @@ use super::PostgresPool;
 use crate::domain::error::DomainError;
 use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::tag_alias::{
-    AliasSource, ChangeKind, Confidence, NewTagAlias, NewTagMergeProposal, ProposalSource,
-    ProposalStatus, TagAlias, TagChangeBatch, TagChangeSummary, TagMerge, TagMergeProposal,
-    merge_mapping, rewrite_tags, undo_tags,
+    AliasSource, ChangeKind, Confidence, NewTagMergeProposal, ProposalSource, ProposalStatus,
+    TagAlias, TagChangeBatch, TagChangeSummary, TagIndex, TagMerge, TagMergeProposal, TagWrite,
+    merge_mapping, resolve_writes, rewrite_tags, undo_tags,
 };
 use crate::domain::tag_normalize::compact_key;
 use chrono::{DateTime, Utc};
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgConnection, PgExecutor, Postgres, Transaction};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
@@ -116,14 +116,94 @@ fn sorted(members: &[String]) -> Vec<String> {
     members
 }
 
-/// Apply merges inside `tx`: rewrite bookmark tags, repoint and add aliases,
-/// and record the batch with before-images of everything it changed.
+/// Serialize every tag change of one user (write-path resolution, apply,
+/// undo, the legacy consolidation) for the rest of the transaction.
+pub(super) async fn lock_user_tags(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<(), DomainError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('boopmark.tags:' || $1::text, 0))")
+        .bind(user_id)
+        .execute(conn)
+        .await
+        .map(|_| ())
+        .map_err(db_err)
+}
+
+async fn load_aliases<'e>(
+    executor: impl PgExecutor<'e>,
+    user_id: Uuid,
+) -> Result<Vec<TagAlias>, DomainError> {
+    sqlx::query_as::<_, AliasRow>(
+        "SELECT alias_key, alias, canonical, source, batch_id FROM tag_aliases
+         WHERE user_id = $1
+         ORDER BY canonical, alias",
+    )
+    .bind(user_id)
+    .fetch_all(executor)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .map(alias_from_row)
+    .collect()
+}
+
+async fn load_tag_counts<'e>(
+    executor: impl PgExecutor<'e>,
+    user_id: Uuid,
+) -> Result<Vec<(String, i64)>, DomainError> {
+    sqlx::query_as::<_, (String, i64)>(
+        "SELECT tag, COUNT(*) FROM bookmarks, unnest(tags) AS tag
+         WHERE user_id = $1
+         GROUP BY tag
+         ORDER BY tag",
+    )
+    .bind(user_id)
+    .fetch_all(executor)
+    .await
+    .map_err(db_err)
+}
+
+/// Repoint every alias whose canonical is a key of `targets` to its value,
+/// without recording a batch. Used by the legacy one-click consolidation,
+/// which rewrites tags without undo; the caller holds the per-user lock.
+pub(super) async fn repoint_aliases(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    targets: &[(String, String)],
+) -> Result<(), DomainError> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let (from, to): (Vec<&str>, Vec<&str>) = targets
+        .iter()
+        .map(|(f, t)| (f.as_str(), t.as_str()))
+        .unzip();
+    sqlx::query(
+        "UPDATE tag_aliases a SET canonical = t.target, batch_id = NULL
+         FROM UNNEST($2::text[], $3::text[]) AS t(source, target)
+         WHERE a.user_id = $1 AND a.canonical = t.source",
+    )
+    .bind(user_id)
+    .bind(&from)
+    .bind(&to)
+    .execute(conn)
+    .await
+    .map(|_| ())
+    .map_err(db_err)
+}
+
+/// Apply merges inside `tx`, which holds the per-user lock: rewrite bookmark
+/// tags, repoint and add aliases, and record the batch with before-images of
+/// everything it changed. With `skip_if_unchanged`, nothing is recorded and
+/// `None` is returned when no bookmark and no alias would change.
 async fn apply_merges_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
     kind: ChangeKind,
     merges: &[TagMerge],
-) -> Result<TagChangeBatch, DomainError> {
+    skip_if_unchanged: bool,
+) -> Result<Option<TagChangeBatch>, DomainError> {
     let mapping = merge_mapping(merges)?;
     let sources: Vec<String> = mapping.keys().cloned().collect();
 
@@ -145,6 +225,51 @@ async fn apply_merges_tx(
             (after != before).then_some((id, before, after))
         })
         .collect();
+
+    // Aliases: every alias of a merged tag now points at its target, and
+    // every merged spelling and target gets a key of its own.
+    let repointed = sqlx::query_as::<_, AliasRow>(
+        "SELECT alias_key, alias, canonical, source, batch_id FROM tag_aliases
+         WHERE user_id = $1 AND canonical = ANY($2)",
+    )
+    .bind(user_id)
+    .bind(&sources)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let mut desired: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for (key, alias, canonical, _, _) in repointed {
+        desired.insert(key, (alias, mapping[&canonical].clone()));
+    }
+    for (source, target) in &mapping {
+        desired.insert(compact_key(source), (source.clone(), target.clone()));
+    }
+    for target in mapping.values() {
+        desired.insert(compact_key(target), (target.clone(), target.clone()));
+    }
+
+    let keys: Vec<String> = desired.keys().cloned().collect();
+    let mut current: HashMap<String, AliasImage> = sqlx::query_as::<_, AliasImage>(
+        "SELECT alias_key, alias, canonical, source, batch_id, created_at FROM tag_aliases
+         WHERE user_id = $1 AND alias_key = ANY($2)",
+    )
+    .bind(user_id)
+    .bind(&keys)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .map(|image| (image.alias_key.clone(), image))
+    .collect();
+    desired.retain(|key, (_, canonical)| {
+        current
+            .get(key)
+            .is_none_or(|b| b.canonical.as_ref() != Some(canonical))
+    });
+
+    if skip_if_unchanged && changes.is_empty() && desired.is_empty() {
+        return Ok(None);
+    }
 
     let summary = TagChangeSummary {
         merges: merges.to_vec(),
@@ -188,51 +313,9 @@ async fn apply_merges_tx(
         .map_err(db_err)?;
     }
 
-    // Aliases: every alias of a merged tag now points at its target, and
-    // every merged spelling and target gets a key of its own.
-    let repointed = sqlx::query_as::<_, AliasRow>(
-        "SELECT alias_key, alias, canonical, source, batch_id FROM tag_aliases
-         WHERE user_id = $1 AND canonical = ANY($2)
-         FOR UPDATE",
-    )
-    .bind(user_id)
-    .bind(&sources)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(db_err)?;
-    let mut desired: BTreeMap<String, (String, String)> = BTreeMap::new();
-    for (key, alias, canonical, _, _) in repointed {
-        desired.insert(key, (alias, mapping[&canonical].clone()));
-    }
-    for (source, target) in &mapping {
-        desired.insert(compact_key(source), (source.clone(), target.clone()));
-    }
-    let targets: HashSet<&String> = mapping.values().collect();
-    for target in targets {
-        desired.insert(compact_key(target), (target.clone(), target.clone()));
-    }
-
-    let keys: Vec<String> = desired.keys().cloned().collect();
-    let current: HashMap<String, AliasImage> = sqlx::query_as::<_, AliasImage>(
-        "SELECT alias_key, alias, canonical, source, batch_id, created_at FROM tag_aliases
-         WHERE user_id = $1 AND alias_key = ANY($2)
-         FOR UPDATE",
-    )
-    .bind(user_id)
-    .bind(&keys)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(db_err)?
-    .into_iter()
-    .map(|image| (image.alias_key.clone(), image))
-    .collect();
-
     let alias_source = kind.alias_source().as_str();
     for (key, (alias, canonical)) in &desired {
-        let before = current.get(key);
-        if before.is_some_and(|b| b.canonical.as_ref() == Some(canonical)) {
-            continue;
-        }
+        let before = current.remove(key);
         sqlx::query(
             "INSERT INTO tag_change_alias_snapshots
                 (batch_id, alias_key, alias_before, canonical_before, source_before,
@@ -241,11 +324,11 @@ async fn apply_merges_tx(
         )
         .bind(batch.id)
         .bind(key)
-        .bind(before.and_then(|b| b.alias.as_ref()))
-        .bind(before.and_then(|b| b.canonical.as_ref()))
-        .bind(before.and_then(|b| b.source.as_ref()))
-        .bind(before.and_then(|b| b.batch_id))
-        .bind(before.and_then(|b| b.created_at))
+        .bind(before.as_ref().and_then(|b| b.alias.as_ref()))
+        .bind(before.as_ref().and_then(|b| b.canonical.as_ref()))
+        .bind(before.as_ref().and_then(|b| b.source.as_ref()))
+        .bind(before.as_ref().and_then(|b| b.batch_id))
+        .bind(before.as_ref().and_then(|b| b.created_at))
         .execute(&mut **tx)
         .await
         .map_err(db_err)?;
@@ -267,74 +350,54 @@ async fn apply_merges_tx(
         .map_err(db_err)?;
     }
 
-    Ok(batch)
+    Ok(Some(batch))
 }
 
 impl TagAliasRepository for PostgresPool {
     async fn list_aliases(&self, user_id: Uuid) -> Result<Vec<TagAlias>, DomainError> {
-        sqlx::query_as::<_, AliasRow>(
-            "SELECT alias_key, alias, canonical, source, batch_id FROM tag_aliases
-             WHERE user_id = $1
-             ORDER BY canonical, alias",
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_err)?
-        .into_iter()
-        .map(alias_from_row)
-        .collect()
+        load_aliases(&self.pool, user_id).await
     }
 
     async fn tag_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
-        sqlx::query_as::<_, (String, i64)>(
-            "SELECT tag, COUNT(*) FROM bookmarks, unnest(tags) AS tag
-             WHERE user_id = $1
-             GROUP BY tag
-             ORDER BY tag",
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_err)
+        load_tag_counts(&self.pool, user_id).await
     }
 
-    async fn insert_aliases_if_absent(
+    async fn resolve_writes(
         &self,
         user_id: Uuid,
-        aliases: &[NewTagAlias],
-    ) -> Result<Vec<TagAlias>, DomainError> {
-        if aliases.is_empty() {
-            return Ok(Vec::new());
+        writes: &[TagWrite],
+    ) -> Result<Vec<Vec<String>>, DomainError> {
+        if writes.iter().all(|w| w.tags.is_empty()) {
+            return Ok(writes.iter().map(|_| Vec::new()).collect());
         }
-        let keys: Vec<&str> = aliases.iter().map(|a| a.alias_key.as_str()).collect();
-        let spellings: Vec<&str> = aliases.iter().map(|a| a.alias.as_str()).collect();
-        let canonicals: Vec<&str> = aliases.iter().map(|a| a.canonical.as_str()).collect();
-        sqlx::query(
-            "INSERT INTO tag_aliases (user_id, alias_key, alias, canonical, source)
-             SELECT $1, k, a, c, $5 FROM UNNEST($2::text[], $3::text[], $4::text[]) AS t(k, a, c)
-             ON CONFLICT (user_id, alias_key) DO NOTHING",
-        )
-        .bind(user_id)
-        .bind(&keys)
-        .bind(&spellings)
-        .bind(&canonicals)
-        .bind(AliasSource::Normalize.as_str())
-        .execute(&self.pool)
-        .await
-        .map_err(db_err)?;
-        sqlx::query_as::<_, AliasRow>(
-            "SELECT alias_key, alias, canonical, source, batch_id FROM tag_aliases
-             WHERE user_id = $1 AND alias_key = ANY($2)",
-        )
-        .bind(user_id)
-        .bind(&keys)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_err)?
-        .into_iter()
-        .map(alias_from_row)
-        .collect()
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        lock_user_tags(&mut tx, user_id).await?;
+        let aliases = load_aliases(&mut *tx, user_id).await?;
+        let counts = load_tag_counts(&mut *tx, user_id).await?;
+        let (resolved, records) = resolve_writes(writes, &mut TagIndex::new(&aliases, &counts));
+        if !records.is_empty() {
+            let keys: Vec<&str> = records.iter().map(|a| a.alias_key.as_str()).collect();
+            let spellings: Vec<&str> = records.iter().map(|a| a.alias.as_str()).collect();
+            let canonicals: Vec<&str> = records.iter().map(|a| a.canonical.as_str()).collect();
+            // The lock makes conflicts impossible; DO NOTHING only guards
+            // against a key repeated within one batch of records.
+            sqlx::query(
+                "INSERT INTO tag_aliases (user_id, alias_key, alias, canonical, source)
+                 SELECT $1, k, a, c, $5
+                 FROM UNNEST($2::text[], $3::text[], $4::text[]) AS t(k, a, c)
+                 ON CONFLICT (user_id, alias_key) DO NOTHING",
+            )
+            .bind(user_id)
+            .bind(&keys)
+            .bind(&spellings)
+            .bind(&canonicals)
+            .bind(AliasSource::Normalize.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(resolved)
     }
 
     async fn replace_pending_proposals(
@@ -438,6 +501,7 @@ impl TagAliasRepository for PostgresPool {
             return Err(DomainError::InvalidInput("no proposals selected".into()));
         }
         let mut tx = self.pool.begin().await.map_err(db_err)?;
+        lock_user_tags(&mut tx, user_id).await?;
         let proposals = sqlx::query_as::<_, ProposalRow>(&format!(
             "SELECT {PROPOSAL_COLUMNS} FROM tag_merge_proposals
              WHERE user_id = $1 AND id = ANY($2)
@@ -470,7 +534,9 @@ impl TagAliasRepository for PostgresPool {
             ChangeKind::Normalize
         };
         let merges: Vec<TagMerge> = proposals.iter().map(TagMergeProposal::merge).collect();
-        let batch = apply_merges_tx(&mut tx, user_id, kind, &merges).await?;
+        let batch = apply_merges_tx(&mut tx, user_id, kind, &merges, false)
+            .await?
+            .expect("a batch is always recorded for proposals");
         sqlx::query(
             "UPDATE tag_merge_proposals
              SET status = 'applied', batch_id = $3, decided_at = now()
@@ -491,9 +557,10 @@ impl TagAliasRepository for PostgresPool {
         user_id: Uuid,
         kind: ChangeKind,
         merges: &[TagMerge],
-    ) -> Result<TagChangeBatch, DomainError> {
+    ) -> Result<Option<TagChangeBatch>, DomainError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
-        let batch = apply_merges_tx(&mut tx, user_id, kind, merges).await?;
+        lock_user_tags(&mut tx, user_id).await?;
+        let batch = apply_merges_tx(&mut tx, user_id, kind, merges, true).await?;
         tx.commit().await.map_err(db_err)?;
         Ok(batch)
     }
@@ -504,6 +571,7 @@ impl TagAliasRepository for PostgresPool {
         batch_id: Uuid,
     ) -> Result<TagChangeBatch, DomainError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
+        lock_user_tags(&mut tx, user_id).await?;
         let batch = sqlx::query_as::<_, BatchRow>(&format!(
             "SELECT {BATCH_COLUMNS} FROM tag_change_batches
              WHERE id = $1 AND user_id = $2
@@ -526,7 +594,7 @@ impl TagAliasRepository for PostgresPool {
             "SELECT EXISTS (
                  SELECT 1 FROM tag_change_batches later
                  WHERE later.user_id = $1 AND later.undone_at IS NULL
-                   AND later.created_at > $3
+                   AND later.seq > (SELECT seq FROM tag_change_batches WHERE id = $2)
                    AND (EXISTS (SELECT 1 FROM tag_change_snapshots ls
                                 JOIN tag_change_snapshots mine
                                   ON mine.bookmark_id = ls.bookmark_id AND mine.batch_id = $2
@@ -538,7 +606,6 @@ impl TagAliasRepository for PostgresPool {
         )
         .bind(user_id)
         .bind(batch.id)
-        .bind(batch.created_at)
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -658,7 +725,7 @@ impl TagAliasRepository for PostgresPool {
         sqlx::query_as::<_, BatchRow>(&format!(
             "SELECT {BATCH_COLUMNS} FROM tag_change_batches
              WHERE user_id = $1
-             ORDER BY created_at DESC
+             ORDER BY seq DESC
              LIMIT $2"
         ))
         .bind(user_id)
@@ -726,15 +793,27 @@ mod tag_alias_postgres_tests {
         values.iter().map(|v| (*v).to_string()).collect()
     }
 
-    /// Run explicitly with `--ignored` and `DATABASE_URL` pointing at a
-    /// scratch Postgres; the test applies the migrations itself.
-    #[tokio::test]
-    #[ignore = "requires a Postgres database in DATABASE_URL"]
-    async fn tag_alias_propose_apply_undo_round_trip() {
+    async fn resolve(
+        svc: &TagAliasService<PostgresPool>,
+        user_id: Uuid,
+        tags: &[&str],
+        keep: &[&str],
+    ) -> Vec<String> {
+        let write = TagWrite {
+            tags: s(tags),
+            keep: s(keep),
+        };
+        svc.resolve_writes(user_id, &[write])
+            .await
+            .expect("resolve tags")
+            .remove(0)
+    }
+
+    async fn connect() -> PgPool {
         let database_url = std::env::var("DATABASE_URL")
-            .expect("DATABASE_URL is required for the ignored tag alias Postgres test");
+            .expect("DATABASE_URL is required for the ignored tag alias Postgres tests");
         let pool = PgPoolOptions::new()
-            .max_connections(4)
+            .max_connections(8)
             .connect(&database_url)
             .await
             .expect("connect to DATABASE_URL");
@@ -742,19 +821,30 @@ mod tag_alias_postgres_tests {
             .run(&pool)
             .await
             .expect("migrations apply");
+        pool
+    }
+
+    async fn new_user(pool: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, email, name) VALUES ($1, $2, 'tag alias test')")
+            .bind(id)
+            .bind(format!("tag-alias-{id}@example.test"))
+            .execute(pool)
+            .await
+            .expect("insert user");
+        id
+    }
+
+    /// Run explicitly with `--ignored` and `DATABASE_URL` pointing at a
+    /// scratch Postgres; the test applies the migrations itself.
+    #[tokio::test]
+    #[ignore = "requires a Postgres database in DATABASE_URL"]
+    async fn tag_alias_propose_apply_undo_round_trip() {
+        let pool = connect().await;
         let repo = Arc::new(PostgresPool::new(pool.clone()));
         let svc = TagAliasService::new(repo.clone());
-
-        let user = Uuid::new_v4();
-        let other = Uuid::new_v4();
-        for id in [user, other] {
-            sqlx::query("INSERT INTO users (id, email, name) VALUES ($1, $2, 'tag alias test')")
-                .bind(id)
-                .bind(format!("tag-alias-{id}@example.test"))
-                .execute(&pool)
-                .await
-                .expect("insert user");
-        }
+        let user = new_user(&pool).await;
+        let other = new_user(&pool).await;
 
         // A messy legacy library, written without the resolver.
         let b_github_cased = bookmark(&pool, user, &["GitHub", "rust"]).await;
@@ -854,13 +944,13 @@ mod tag_alias_postgres_tests {
             Some("coding agents")
         );
         assert_eq!(
-            svc.resolve_tags(
+            resolve(
+                &svc,
                 user,
-                &s(&["github", "Octocat", "coding-agent", "Coding Agents"]),
+                &["github", "Octocat", "coding-agent", "Coding Agents"],
                 &[]
             )
-            .await
-            .unwrap(),
+            .await,
             s(&["GitHub", "coding agents"])
         );
 
@@ -887,9 +977,7 @@ mod tag_alias_postgres_tests {
         // Every alias row is exactly as before, so old spellings resolve as before.
         assert_eq!(aliases(&pool, user).await, aliases_before);
         assert_eq!(
-            svc.resolve_tags(user, &s(&["Octocat", "GITHUB"]), &[])
-                .await
-                .unwrap(),
+            resolve(&svc, user, &["Octocat", "GITHUB"], &[]).await,
             s(&["github"])
         );
         assert_eq!(
@@ -916,7 +1004,22 @@ mod tag_alias_postgres_tests {
                 }],
             )
             .await
-            .expect("rename");
+            .expect("rename")
+            .expect("the rename changes tags");
+        // A retried rename changes nothing and records no empty batch.
+        assert!(
+            svc.merge_tags(
+                user,
+                ChangeKind::Rename,
+                &[TagMerge {
+                    canonical: "Git Hub".into(),
+                    members: s(&["GitHub"]),
+                }],
+            )
+            .await
+            .expect("retried rename")
+            .is_none()
+        );
         assert!(matches!(
             svc.undo_batch(user, first.id).await,
             Err(DomainError::InvalidInput(_))
@@ -939,6 +1042,114 @@ mod tag_alias_postgres_tests {
             .execute(&pool)
             .await
             .expect("cleanup users");
+        pool.close().await;
+    }
+
+    /// Concurrent writes of new spellings agree on one canonical, never
+    /// touch the tags already on a bookmark, and a double-submitted manual
+    /// merge records one batch.
+    #[tokio::test]
+    #[ignore = "requires a Postgres database in DATABASE_URL"]
+    async fn tag_alias_concurrent_writes_and_merges_are_serialized() {
+        let pool = connect().await;
+        let svc = Arc::new(TagAliasService::new(Arc::new(PostgresPool::new(
+            pool.clone(),
+        ))));
+        let user = new_user(&pool).await;
+        bookmark(&pool, user, &["Rust"]).await;
+
+        let spellings = ["Zig", "zig", "ZIG", "zig-lang", "Zig Lang", "zigs"];
+        let tasks: Vec<_> = spellings
+            .iter()
+            .map(|spelling| {
+                let svc = svc.clone();
+                let write = TagWrite {
+                    tags: s(&["Rust", "rusts", spelling]),
+                    keep: s(&["Rust"]),
+                };
+                tokio::spawn(async move { svc.resolve_writes(user, &[write]).await })
+            })
+            .collect();
+        let mut results = Vec::new();
+        for task in tasks {
+            results.push(task.await.unwrap().expect("resolve").remove(0));
+        }
+        for tags in &results {
+            assert_eq!(tags[0], "Rust", "a kept tag was rewritten: {tags:?}");
+        }
+        let zig: HashSet<&String> = results
+            .iter()
+            .zip(spellings)
+            .filter(|(_, spelling)| compact_key(spelling) == "zig" || *spelling == "zigs")
+            .map(|(tags, _)| tags.last().unwrap())
+            .collect();
+        assert_eq!(
+            zig.len(),
+            1,
+            "spellings of one new tag diverged: {results:?}"
+        );
+        let zig = (*zig.iter().next().unwrap()).clone();
+        let stored: Vec<String> = sqlx::query_scalar(
+            "SELECT canonical FROM tag_aliases WHERE user_id = $1 AND alias_key IN ('zig', 'zigs')",
+        )
+        .bind(user)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(stored.iter().all(|c| *c == zig), "{stored:?} vs {zig}");
+
+        bookmark(&pool, user, &["zig-lang"]).await;
+        let merge = vec![TagMerge {
+            canonical: "zig".into(),
+            members: s(&["zig-lang"]),
+        }];
+        let (left, right) = tokio::join!(
+            svc.merge_tags(user, ChangeKind::Merge, &merge),
+            svc.merge_tags(user, ChangeKind::Merge, &merge),
+        );
+        let recorded = [left.unwrap(), right.unwrap()]
+            .into_iter()
+            .flatten()
+            .count();
+        assert_eq!(recorded, 1);
+        assert_eq!(svc.list_batches(user, 10).await.unwrap().len(), 1);
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
+        pool.close().await;
+    }
+
+    /// The legacy one-click consolidation repoints aliases with its tag
+    /// rewrite, so the next save does not bring the old spelling back.
+    #[tokio::test]
+    #[ignore = "requires a Postgres database in DATABASE_URL"]
+    async fn tag_alias_legacy_bulk_update_repoints_aliases() {
+        use crate::domain::ports::bookmark_repo::BookmarkRepository;
+
+        let pool = connect().await;
+        let repo = Arc::new(PostgresPool::new(pool.clone()));
+        let svc = TagAliasService::new(repo.clone());
+        let user = new_user(&pool).await;
+        let id = bookmark(&pool, user, &["GitHub"]).await;
+        assert_eq!(resolve(&svc, user, &["git-hub"], &[]).await, s(&["GitHub"]));
+
+        repo.update_tags_bulk(
+            user,
+            &[(id, s(&["github"]))],
+            &[("GitHub".into(), "github".into())],
+        )
+        .await
+        .expect("bulk update");
+        assert_eq!(resolve(&svc, user, &["git-hub"], &[]).await, s(&["github"]));
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
         pool.close().await;
     }
 }

@@ -8,14 +8,11 @@
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::tag_alias_repo::TagAliasRepository;
-use crate::domain::ports::tag_resolver::TagResolver;
+use crate::domain::ports::tag_resolver::{ResolveFuture, TagResolver};
 use crate::domain::tag_alias::{
-    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagIndex, TagMerge,
-    TagMergeProposal, normalization_proposals, resolve_tags,
+    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMerge,
+    TagMergeProposal, TagWrite, normalization_proposals,
 };
-use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -31,53 +28,15 @@ where
         Self { repo }
     }
 
-    /// Resolve the tags of one bookmark write to canonical tags and remember
-    /// any new spelling as an alias. See [`TagResolver::resolve_tags`].
-    pub async fn resolve_tags(
+    /// Resolve bookmark tag writes to canonical tags and remember any new
+    /// spelling as an alias, in one pass serialized with the user's other
+    /// tag changes. See [`TagResolver::resolve_tags`].
+    pub async fn resolve_writes(
         &self,
         user_id: Uuid,
-        tags: &[String],
-        keep: &[String],
-    ) -> Result<Vec<String>, DomainError> {
-        if tags.is_empty() {
-            return Ok(Vec::new());
-        }
-        let aliases = self.repo.list_aliases(user_id).await?;
-        let counts = self.repo.tag_counts(user_id).await?;
-        let mut index = TagIndex::new(&aliases, &counts);
-        let (resolved, records) = resolve_tags(tags, keep, &mut index);
-        if records.is_empty() {
-            return Ok(resolved);
-        }
-
-        // A concurrent write may have claimed one of these keys first. Its
-        // alias row is the one stored, so use its canonical instead.
-        let stored = self
-            .repo
-            .insert_aliases_if_absent(user_id, &records)
-            .await?;
-        let stored: HashMap<&str, &str> = stored
-            .iter()
-            .map(|a| (a.alias_key.as_str(), a.canonical.as_str()))
-            .collect();
-        let replaced: HashMap<&str, &str> = records
-            .iter()
-            .filter_map(|r| {
-                let winner = stored.get(r.alias_key.as_str())?;
-                (*winner != r.canonical).then_some((r.canonical.as_str(), *winner))
-            })
-            .collect();
-        if replaced.is_empty() {
-            return Ok(resolved);
-        }
-        let mut out: Vec<String> = Vec::with_capacity(resolved.len());
-        for tag in &resolved {
-            let tag = replaced.get(tag.as_str()).map_or(tag.as_str(), |w| w);
-            if !out.iter().any(|t| t == tag) {
-                out.push(tag.to_string());
-            }
-        }
-        Ok(out)
+        writes: &[TagWrite],
+    ) -> Result<Vec<Vec<String>>, DomainError> {
+        self.repo.resolve_writes(user_id, writes).await
     }
 
     /// The on-demand normalization job: group the user's existing tags by
@@ -106,13 +65,14 @@ where
 
     /// Merge tags directly, without a proposal: a manual merge
     /// (`ChangeKind::Merge`) or a rename, which is a merge into a new name
-    /// (`ChangeKind::Rename`). One undoable batch.
+    /// (`ChangeKind::Rename`). One undoable batch, or `None` when nothing
+    /// would change (a retried or double-submitted request).
     pub async fn merge_tags(
         &self,
         user_id: Uuid,
         kind: ChangeKind,
         merges: &[TagMerge],
-    ) -> Result<TagChangeBatch, DomainError> {
+    ) -> Result<Option<TagChangeBatch>, DomainError> {
         if !matches!(kind, ChangeKind::Merge | ChangeKind::Rename) {
             return Err(DomainError::InvalidInput(format!(
                 "{} is not a manual merge",
@@ -159,33 +119,24 @@ impl<R> TagResolver for TagAliasService<R>
 where
     R: TagAliasRepository + Send + Sync + 'static,
 {
-    fn resolve_tags(
-        &self,
-        user_id: Uuid,
-        tags: Vec<String>,
-        keep: Vec<String>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, DomainError>> + Send + '_>> {
-        Box::pin(async move { TagAliasService::resolve_tags(self, user_id, &tags, &keep).await })
+    fn resolve_tags(&self, user_id: Uuid, writes: Vec<TagWrite>) -> ResolveFuture<'_> {
+        Box::pin(async move { self.resolve_writes(user_id, &writes).await })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tag_alias::{
-        AliasSource, Confidence, NewTagAlias, NewTagMergeProposal, TagChangeSummary,
-    };
+    use crate::domain::tag_alias::{Confidence, NewTagMergeProposal, TagChangeSummary};
     use std::sync::Mutex;
 
     /// In-memory stand-in for the repository: aliases, tag counts and the
-    /// proposals the service stores. Merge methods are not exercised here;
-    /// the Postgres test covers them.
+    /// proposals the service stores. Resolution, merge and undo live in the
+    /// repository; the Postgres test covers them.
     #[derive(Default)]
     struct StubRepo {
         aliases: Mutex<Vec<TagAlias>>,
         counts: Vec<(String, i64)>,
-        /// Rows a "concurrent writer" stored before this call's insert.
-        racing: Vec<TagAlias>,
         proposals: Mutex<Vec<(ProposalSource, NewTagMergeProposal)>>,
         merged: Mutex<Vec<(ChangeKind, Vec<TagMerge>)>>,
     }
@@ -210,29 +161,12 @@ mod tests {
             Ok(self.counts.clone())
         }
 
-        async fn insert_aliases_if_absent(
+        async fn resolve_writes(
             &self,
             _user_id: Uuid,
-            aliases: &[NewTagAlias],
-        ) -> Result<Vec<TagAlias>, DomainError> {
-            let mut stored = self.aliases.lock().unwrap();
-            stored.extend(self.racing.iter().cloned());
-            for alias in aliases {
-                if !stored.iter().any(|a| a.alias_key == alias.alias_key) {
-                    stored.push(TagAlias {
-                        alias_key: alias.alias_key.clone(),
-                        alias: alias.alias.clone(),
-                        canonical: alias.canonical.clone(),
-                        source: AliasSource::Normalize,
-                        batch_id: None,
-                    });
-                }
-            }
-            Ok(stored
-                .iter()
-                .filter(|a| aliases.iter().any(|n| n.alias_key == a.alias_key))
-                .cloned()
-                .collect())
+            writes: &[TagWrite],
+        ) -> Result<Vec<Vec<String>>, DomainError> {
+            Ok(writes.iter().map(|w| w.tags.clone()).collect())
         }
 
         async fn replace_pending_proposals(
@@ -290,9 +224,9 @@ mod tests {
             _user_id: Uuid,
             kind: ChangeKind,
             merges: &[TagMerge],
-        ) -> Result<TagChangeBatch, DomainError> {
+        ) -> Result<Option<TagChangeBatch>, DomainError> {
             self.merged.lock().unwrap().push((kind, merges.to_vec()));
-            Ok(batch(kind))
+            Ok(Some(batch(kind)))
         }
 
         async fn undo_batch(
@@ -323,65 +257,6 @@ mod tests {
     fn service(repo: StubRepo) -> (TagAliasService<StubRepo>, Arc<StubRepo>) {
         let repo = Arc::new(repo);
         (TagAliasService::new(repo.clone()), repo)
-    }
-
-    #[tokio::test]
-    async fn resolves_new_spellings_and_remembers_them() {
-        let (svc, repo) = service(StubRepo {
-            counts: counts(&[("GitHub", 9), ("coding agents", 4)]),
-            ..Default::default()
-        });
-        let user = Uuid::new_v4();
-        let tags = svc
-            .resolve_tags(user, &s(&["github", "coding-agent", "Zig"]), &[])
-            .await
-            .unwrap();
-        assert_eq!(tags, ["GitHub", "coding agents", "Zig"]);
-        let stored = repo.aliases.lock().unwrap().clone();
-        assert_eq!(stored.len(), 3);
-
-        // The next save resolves through the remembered aliases.
-        let tags = svc.resolve_tags(user, &s(&["ZIG"]), &[]).await.unwrap();
-        assert_eq!(tags, ["Zig"]);
-    }
-
-    #[tokio::test]
-    async fn existing_tags_on_the_bookmark_are_left_alone() {
-        let (svc, repo) = service(StubRepo {
-            counts: counts(&[("GitHub", 9), ("github", 1)]),
-            ..Default::default()
-        });
-        let tags = svc
-            .resolve_tags(Uuid::new_v4(), &s(&["github", "Rust"]), &s(&["github"]))
-            .await
-            .unwrap();
-        assert_eq!(tags, ["github", "Rust"]);
-        assert!(
-            repo.aliases
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|a| a.alias_key != "github")
-        );
-    }
-
-    #[tokio::test]
-    async fn a_concurrent_writers_alias_wins() {
-        let (svc, _) = service(StubRepo {
-            racing: vec![TagAlias {
-                alias_key: "zig".into(),
-                alias: "zig".into(),
-                canonical: "zig".into(),
-                source: AliasSource::Normalize,
-                batch_id: None,
-            }],
-            ..Default::default()
-        });
-        let tags = svc
-            .resolve_tags(Uuid::new_v4(), &s(&["Zig", "zig"]), &[])
-            .await
-            .unwrap();
-        assert_eq!(tags, ["zig"]);
     }
 
     #[tokio::test]

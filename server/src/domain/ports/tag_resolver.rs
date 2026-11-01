@@ -1,18 +1,19 @@
 use crate::domain::error::DomainError;
+use crate::domain::tag_alias::TagWrite;
 use std::future::Future;
 use std::pin::Pin;
 use uuid::Uuid;
 
-/// Resolves the tags of one bookmark write to the user's canonical tags.
+/// The resolved tags per write, in write order.
+pub type ResolveFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<Vec<String>>, DomainError>> + Send + 'a>>;
+
+/// Resolves bookmark tag writes to the user's canonical tags.
 ///
-/// `tags` are the tags as submitted. `keep` are tags already on the bookmark
-/// (on an edit); they are returned unchanged so re-saving never rewrites
-/// existing data. The result is cleaned and deduplicated.
+/// Each [`TagWrite`] carries the submitted tags and the tags already on the
+/// bookmark; the latter are returned unchanged so re-saving never rewrites
+/// existing data. Results are cleaned, deduplicated and in write order. An
+/// import passes all its writes in one call.
 pub trait TagResolver: Send + Sync {
-    fn resolve_tags(
-        &self,
-        user_id: Uuid,
-        tags: Vec<String>,
-        keep: Vec<String>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, DomainError>> + Send + '_>>;
+    fn resolve_tags(&self, user_id: Uuid, writes: Vec<TagWrite>) -> ResolveFuture<'_>;
 }

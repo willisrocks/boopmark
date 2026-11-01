@@ -44,8 +44,10 @@ Each step ends with `cargo test -p boopmark-server` green and a commit.
 3. **Migration** — `migrations/015_tag_aliases.sql`: `tag_change_batches`, `tag_aliases`,
    `tag_change_snapshots`, `tag_change_alias_snapshots`, `tag_merge_proposals`. Additive only.
 4. **Port + Postgres adapter** — `domain/ports/tag_alias_repo.rs` and
-   `adapters/postgres/tag_alias_repo.rs`: alias list/insert-if-absent, tag counts, replace pending
+   `adapters/postgres/tag_alias_repo.rs`: alias list, locked batch resolution (`resolve_writes`), tag counts, replace pending
    proposals, list/dismiss proposals, `apply_proposals`, `apply_merges`, `undo_batch`, list batches.
+   Resolution, apply, undo and the legacy bulk update take a per-user advisory lock; batches are
+   ordered by a `seq` assigned under it.
    Merge and undo each run in one transaction with the bookmark rows locked.
 5. **Service** — `app/tag_alias.rs`: `TagAliasService` with `resolve_tags`, `propose_normalization`,
    `apply_merge(user, proposal_ids)`, `merge_tags`, `undo_batch`, list/dismiss. Implements the

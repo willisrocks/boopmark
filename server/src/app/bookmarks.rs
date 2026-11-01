@@ -8,6 +8,7 @@ use crate::domain::ports::metadata::MetadataExtractor;
 use crate::domain::ports::screenshot::ScreenshotProvider;
 use crate::domain::ports::storage::ObjectStorage;
 use crate::domain::ports::tag_resolver::TagResolver;
+use crate::domain::tag_alias::TagWrite;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -86,10 +87,14 @@ where
         keep: &[String],
     ) -> Result<Option<Vec<String>>, DomainError> {
         match (&self.tag_resolver, tags) {
-            (Some(resolver), Some(tags)) => resolver
-                .resolve_tags(user_id, tags, keep.to_vec())
-                .await
-                .map(Some),
+            (Some(resolver), Some(tags)) => {
+                let write = TagWrite {
+                    tags,
+                    keep: keep.to_vec(),
+                };
+                let resolved = resolver.resolve_tags(user_id, vec![write]).await?;
+                Ok(resolved.into_iter().next())
+            }
             (_, tags) => Ok(tags),
         }
     }
@@ -157,7 +162,6 @@ where
         mut input: CreateBookmark,
         prefer_ai_image: bool,
     ) -> Result<CreateBookmark, DomainError> {
-        input.tags = self.resolve_tags(user_id, input.tags, &[]).await?;
         let mut scraped_image_url = None;
         if needs_metadata(&input) {
             let metadata_result = self.metadata.extract(&input.url).await;
@@ -209,6 +213,9 @@ where
             input.domain = parsed.host_str().map(|h| h.to_string());
         }
 
+        // Resolve last: metadata and image work can take seconds, and a merge
+        // applied meanwhile should already be visible to this write.
+        input.tags = self.resolve_tags(user_id, input.tags, &[]).await?;
         Ok(input)
     }
 
@@ -466,6 +473,36 @@ where
             errors: vec![],
         };
 
+        // Resolve every imported tag write in one pass against one index, so
+        // later records see the spellings earlier ones introduced. Restore
+        // reproduces an export exactly, so its tags are stored as exported.
+        let mut records = records;
+        if matches!(mode, ImportMode::Import)
+            && let Some(resolver) = &self.tag_resolver
+        {
+            let mut targets = Vec::new();
+            let mut writes = Vec::new();
+            for (idx, record) in records.iter().enumerate() {
+                if url::Url::parse(&record.url).is_err() {
+                    continue;
+                }
+                let keep = match self.repo.find_by_url(user_id, &record.url).await? {
+                    Some(_) if matches!(strategy, ImportStrategy::Skip) => continue,
+                    Some(existing) => existing.tags,
+                    None => Vec::new(),
+                };
+                targets.push(idx);
+                writes.push(TagWrite {
+                    tags: record.tags.clone(),
+                    keep,
+                });
+            }
+            let resolved = resolver.resolve_tags(user_id, writes).await?;
+            for (idx, tags) in targets.into_iter().zip(resolved) {
+                records[idx].tags = tags;
+            }
+        }
+
         for (idx, record) in records.into_iter().enumerate() {
             let row = idx + 1; // 1-based row numbers in all error messages
             if url::Url::parse(&record.url).is_err() {
@@ -481,9 +518,6 @@ where
                     Some(existing) => match strategy {
                         ImportStrategy::Skip => result.skipped += 1,
                         ImportStrategy::Upsert => {
-                            let tags = self
-                                .resolve_tags(user_id, Some(record.tags), &existing.tags)
-                                .await?;
                             self.repo
                                 .update(
                                     existing.id,
@@ -491,7 +525,7 @@ where
                                     UpdateBookmark {
                                         title: record.title,
                                         description: record.description,
-                                        tags,
+                                        tags: Some(record.tags),
                                     },
                                 )
                                 .await?;
@@ -499,7 +533,6 @@ where
                         }
                     },
                     None => {
-                        let tags = self.resolve_tags(user_id, Some(record.tags), &[]).await?;
                         self.repo
                             .create(
                                 user_id,
@@ -509,7 +542,7 @@ where
                                     description: record.description,
                                     image_url: None,
                                     domain: None,
-                                    tags,
+                                    tags: Some(record.tags),
                                 },
                             )
                             .await?;
@@ -525,8 +558,6 @@ where
                         continue;
                     };
 
-                    // Restore reproduces an export exactly, so its tags are
-                    // stored as exported rather than resolved.
                     let now = chrono::Utc::now();
                     // Derive both timestamps from whichever is present to
                     // avoid impossible ordering (created_at > updated_at):
@@ -1430,6 +1461,7 @@ mod tests {
                 &self,
                 user_id: Uuid,
                 updates: &[(Uuid, Vec<String>)],
+                _alias_targets: &[(String, String)],
             ) -> Result<u64, DomainError> {
                 let mut bookmarks = self.bookmarks.lock().unwrap();
                 let mut rows = 0u64;
@@ -1998,25 +2030,33 @@ mod tests {
 
         /// Maps `github` to `GitHub` unless the bookmark already has it,
         /// like the real resolver does for an existing alias.
-        struct GitHubResolver;
+        #[derive(Default)]
+        struct GitHubResolver {
+            calls: std::sync::atomic::AtomicUsize,
+        }
 
         impl crate::domain::ports::tag_resolver::TagResolver for GitHubResolver {
             fn resolve_tags(
                 &self,
                 _user_id: Uuid,
-                tags: Vec<String>,
-                keep: Vec<String>,
-            ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, DomainError>> + Send + '_>>
-            {
+                writes: Vec<crate::domain::tag_alias::TagWrite>,
+            ) -> crate::domain::ports::tag_resolver::ResolveFuture<'_> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Box::pin(async move {
-                    Ok(tags
+                    Ok(writes
                         .into_iter()
-                        .map(|t| {
-                            if t == "github" && !keep.contains(&t) {
-                                "GitHub".to_string()
-                            } else {
-                                t
-                            }
+                        .map(|write| {
+                            write
+                                .tags
+                                .into_iter()
+                                .map(|t| {
+                                    if t == "github" && !write.keep.contains(&t) {
+                                        "GitHub".to_string()
+                                    } else {
+                                        t
+                                    }
+                                })
+                                .collect()
                         })
                         .collect())
                 })
@@ -2033,7 +2073,8 @@ mod tests {
         #[tokio::test]
         async fn tag_alias_resolution_runs_on_create_and_import() {
             let user_id = Uuid::new_v4();
-            let svc = make_service(vec![]).with_tag_resolver(Arc::new(GitHubResolver));
+            let resolver = Arc::new(GitHubResolver::default());
+            let svc = make_service(vec![]).with_tag_resolver(resolver.clone());
             let created = svc
                 .create(
                     user_id,
@@ -2050,23 +2091,27 @@ mod tests {
                 .unwrap();
             assert_eq!(created.tags, ["GitHub", "rust"]);
 
-            let mut record = make_record("https://example.com/b");
-            record.tags = vec!["github".into()];
+            let mut b = make_record("https://example.com/b");
+            b.tags = vec!["github".into()];
+            let mut c = make_record("https://example.com/c");
+            c.tags = vec!["rust".into(), "github".into()];
             svc.import_batch(
                 user_id,
-                vec![record],
+                vec![b, make_record("not-a-url"), c],
                 ImportStrategy::Upsert,
                 ImportMode::Import,
             )
             .await
             .unwrap();
-            let imported = svc
-                .repo
-                .find_by_url(user_id, "https://example.com/b")
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(imported.tags, ["GitHub"]);
+            for (url, tags) in [
+                ("https://example.com/b", vec!["GitHub"]),
+                ("https://example.com/c", vec!["rust", "GitHub"]),
+            ] {
+                let imported = svc.repo.find_by_url(user_id, url).await.unwrap().unwrap();
+                assert_eq!(imported.tags, tags);
+            }
+            // One call for the create, one for the whole import.
+            assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         }
 
         #[tokio::test]
@@ -2074,7 +2119,8 @@ mod tests {
             let user_id = Uuid::new_v4();
             let legacy = tagged(user_id, "https://example.com/legacy", &["github"]);
             let legacy_id = legacy.id;
-            let svc = make_service(vec![legacy]).with_tag_resolver(Arc::new(GitHubResolver));
+            let svc =
+                make_service(vec![legacy]).with_tag_resolver(Arc::new(GitHubResolver::default()));
 
             let updated = svc
                 .update(
@@ -2383,6 +2429,7 @@ mod tests {
                 &self,
                 user_id: Uuid,
                 updates: &[(Uuid, Vec<String>)],
+                _alias_targets: &[(String, String)],
             ) -> Result<u64, DomainError> {
                 let mut bookmarks = self.bookmarks.lock().unwrap();
                 let mut rows = 0u64;
