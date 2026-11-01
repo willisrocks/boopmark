@@ -1,24 +1,24 @@
-{"qid":"q01","type":"keyword","query":"Raft consensus","relevant":[41,50]}
-{"qid":"q02","type":"keyword","query":"SHA-1 collision","relevant":[379,18,25,19]}
-{"qid":"q03","type":"keyword","query":"sscanf strlen","relevant":[361]}
-{"qid":"q04","type":"keyword","query":"Chorleywood","relevant":[257,244,245]}
-{"qid":"q05","type":"keyword","query":"burrows wheeler bzip2","relevant":[142,144]}
-{"qid":"q06","type":"keyword","query":"Laki 1783 eruption","relevant":[188]}
-{"qid":"q07","type":"keyword","query":"idli batter","relevant":[224,219,218]}
-{"qid":"q08","type":"natural","query":"how do bees tell other bees where the flowers are","relevant":[201,199,190]}
-{"qid":"q09","type":"natural","query":"why the first price I hear skews my judgement","relevant":[272]}
-{"qid":"q10","type":"natural","query":"steeping ground coffee in cold water overnight","relevant":[243]}
-{"qid":"q11","type":"natural","query":"program pauses while unused memory is reclaimed automatically","relevant":[90,97,94]}
-{"qid":"q12","type":"natural","query":"two threads updating the same variable at once gives wrong results","relevant":[52,110,108]}
-{"qid":"q13","type":"natural","query":"parents sleeping in the same bed as their baby","relevant":[297]}
-{"qid":"q14","type":"natural","query":"orbiting observatory for x-ray astronomy","relevant":[170,157,167,162,164,165]}
-{"qid":"q15","type":"natural","query":"splitting a purchase into interest-free payments","relevant":[347]}
-{"qid":"q16","type":"natural","query":"surviving nodes that lie or send conflicting messages","relevant":[39,51,41]}
-{"qid":"q17","type":"deep","query":"why a game's online mode took minutes to load and how parsing JSON was fixed","relevant":[361]}
-{"qid":"q18","type":"deep","query":"CPU speculative execution leaking kernel memory","relevant":[445]}
-{"qid":"q19","type":"deep","query":"how the balance wheel and escapement keep time in a watch","relevant":[356]}
-{"qid":"q20","type":"deep","query":"chat tool vendor demanding a huge price increase from a nonprofit","relevant":[366]}
-{"qid":"q21","type":"deep","query":"fast Python package installer written in Rust","relevant":[467]}
-{"qid":"q22","type":"deep","query":"why air flowing around a wing creates lift","relevant":[416]}
-{"qid":"q23","type":"deep","query":"selling a farm product online from rural Georgia","relevant":[381]}
-{"qid":"q24","type":"deep","query":"e-ink screen helping a parent with memory loss","relevant":[487]}
+{"qid": "q01", "type": "keyword", "query": "Raft consensus", "relevant": [41]}
+{"qid": "q02", "type": "keyword", "query": "SHA-1 collision", "relevant": [379, 18, 25, 19]}
+{"qid": "q03", "type": "keyword", "query": "sscanf strlen", "relevant": [361]}
+{"qid": "q04", "type": "keyword", "query": "Chorleywood", "relevant": [257, 244, 245]}
+{"qid": "q05", "type": "keyword", "query": "burrows wheeler bzip2", "relevant": [142, 144]}
+{"qid": "q06", "type": "keyword", "query": "Laki 1783 eruption", "relevant": [188]}
+{"qid": "q07", "type": "keyword", "query": "idli batter", "relevant": [224, 219, 218]}
+{"qid": "q08", "type": "natural", "query": "how do bees tell other bees where the flowers are", "relevant": [201, 199, 190]}
+{"qid": "q09", "type": "natural", "query": "why the first price I hear skews my judgement", "relevant": [272, 262]}
+{"qid": "q10", "type": "natural", "query": "steeping ground coffee in cold water overnight", "relevant": [243, 226]}
+{"qid": "q11", "type": "natural", "query": "program pauses while unused memory is reclaimed automatically", "relevant": [90, 97, 94]}
+{"qid": "q12", "type": "natural", "query": "two threads updating the same variable at once gives wrong results", "relevant": [52, 110, 108, 115]}
+{"qid": "q13", "type": "natural", "query": "parents sleeping in the same bed as their baby", "relevant": [297]}
+{"qid": "q14", "type": "natural", "query": "orbiting observatory for x-ray astronomy", "relevant": [170, 157, 167, 162, 164, 165, 161, 158]}
+{"qid": "q15", "type": "natural", "query": "splitting a purchase into interest-free payments", "relevant": [347]}
+{"qid": "q16", "type": "natural", "query": "surviving nodes that lie or send conflicting messages", "relevant": [39, 51, 41, 38]}
+{"qid": "q17", "type": "deep", "query": "why a game's online mode took minutes to load and how parsing JSON was fixed", "relevant": [361]}
+{"qid": "q18", "type": "deep", "query": "CPU speculative execution leaking kernel memory", "relevant": [445]}
+{"qid": "q19", "type": "deep", "query": "how the balance wheel and escapement keep time in a watch", "relevant": [356]}
+{"qid": "q20", "type": "deep", "query": "chat tool vendor demanding a huge price increase from a nonprofit", "relevant": [366]}
+{"qid": "q21", "type": "deep", "query": "fast Python package installer written in Rust", "relevant": [467]}
+{"qid": "q22", "type": "deep", "query": "why air flowing around a wing creates lift", "relevant": [416]}
+{"qid": "q23", "type": "deep", "query": "selling a farm product online from rural Georgia", "relevant": [381]}
+{"qid": "q24", "type": "deep", "query": "e-ink screen helping a parent with memory loss", "relevant": [487]}

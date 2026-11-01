@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["psycopg[binary]>=3.2", "fastembed>=0.4", "numpy"]
+# dependencies = ["psycopg[binary]>=3.2", "fastembed>=0.4", "numpy", "httpx>=0.27"]
 # ///
 """Measure lexical vs vector vs hybrid retrieval on the labelled queries.
 
@@ -25,11 +25,11 @@ import uuid
 
 import psycopg
 
+from embedders import Embedder
 from seed import LOCAL_MODEL, MODEL_SLUG, bookmark_uuid
 
 K = 10
 RRF_K = 60
-QUERY_PREFIX = "Represent this sentence for searching relevant passages: "  # BGE convention
 
 # Today's production query (bookmark_repo.rs list()): boolean filter on the
 # metadata tsvector, no ranking, newest first.
@@ -158,6 +158,22 @@ LIMIT 10
 """
 
 
+# Variants from embed_variant.py (eval_chunks, exact search).
+SQL_VARIANT_VECTOR = """
+WITH nn AS (
+    SELECT bookmark_id, embedding <=> %(qv)s::vector AS dist
+    FROM eval_chunks WHERE user_id = %(user)s AND variant = %(variant)s
+    ORDER BY embedding <=> %(qv)s::vector LIMIT 200
+)
+SELECT bookmark_id FROM nn GROUP BY bookmark_id ORDER BY min(dist) LIMIT 10
+"""
+SQL_VARIANT_HYBRID = SQL_HYBRID_AND.replace(
+    "FROM bookmark_chunks\n    WHERE user_id = %(user)s AND model = %(model)s",
+    "FROM eval_chunks\n    WHERE user_id = %(user)s AND variant = %(variant)s",
+)
+assert SQL_VARIANT_HYBRID != SQL_HYBRID_AND
+
+
 def metrics(ranked: list[uuid.UUID], relevant: set[uuid.UUID]) -> dict:
     top = ranked[:K]
     hits = [1 if d in relevant else 0 for d in top]
@@ -182,14 +198,21 @@ def main() -> None:
     ap.add_argument("--bm25", action="store_true", help="also measure ParadeDB pg_search")
     ap.add_argument("--hnsw", action="store_true",
                     help="use the HNSW index (iterative scan) instead of exact search")
+    ap.add_argument("--variants", default="",
+                    help="comma list of variant=embedder-spec rows in eval_chunks, "
+                         "e.g. meta=fastembed:BAAI/bge-small-en-v1.5")
     ap.add_argument("--json", type=pathlib.Path, help="write per-query results here")
     args = ap.parse_args()
 
     queries = [json.loads(line) for line in open(args.queries)]
-    from fastembed import TextEmbedding
-
-    model = TextEmbedding(LOCAL_MODEL)
-    qvecs = list(model.embed([QUERY_PREFIX + q["query"] for q in queries]))
+    texts = [q["query"] for q in queries]
+    t0 = time.perf_counter()
+    qvecs = {"": Embedder(f"fastembed:{LOCAL_MODEL}").queries(texts)}
+    print(f"local query embedding: {(time.perf_counter() - t0) * 1000 / len(texts):.1f} ms/query "
+          "(includes model load)")
+    variants = dict(v.split("=", 1) for v in args.variants.split(",") if v)
+    for name, spec in variants.items():
+        qvecs[name] = Embedder(spec).queries(texts)
 
     methods = {
         "today (metadata filter, newest first)": SQL_TODAY,
@@ -200,6 +223,9 @@ def main() -> None:
         "hybrid RRF (full-text AND + vector)": SQL_HYBRID_AND,
         "hybrid RRF (full-text OR + vector)": SQL_HYBRID,
     }
+    for name in variants:
+        methods[f"vector [{name}]"] = (SQL_VARIANT_VECTOR, name)
+        methods[f"hybrid RRF (full-text AND + vector) [{name}]"] = (SQL_VARIANT_HYBRID, name)
 
     with psycopg.connect(args.db, autocommit=True) as conn:
         user = conn.execute("SELECT id FROM users WHERE email = %s", (args.email,)).fetchone()[0]
@@ -221,11 +247,12 @@ def main() -> None:
         latency = collections.defaultdict(list)
         pool = collections.defaultdict(set)
 
-        for q, qv in zip(queries, qvecs):
-            params = {"user": user, "q": q["query"], "model": MODEL_SLUG,
-                      "qv": "[" + ",".join(f"{x:.6f}" for x in qv) + "]"}
+        for qi, q in enumerate(queries):
             rel = {bookmark_uuid(i) for i in q["relevant"]}
             for name, sql in methods.items():
+                sql, variant = sql if isinstance(sql, tuple) else (sql, "")
+                params = {"user": user, "q": q["query"], "model": MODEL_SLUG, "variant": variant,
+                          "qv": "[" + ",".join(f"{x:.6f}" for x in qvecs[variant][qi]) + "]"}
                 for _ in range(2):  # warm once, time the second run
                     t0 = time.perf_counter()
                     ranked = [r[0] for r in conn.execute(sql, params).fetchall()]
