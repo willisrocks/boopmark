@@ -34,7 +34,13 @@ This spec fixes the problem in three layers. Each layer is useful without the ne
 
 Save-time suggestions change to choose from the canonical list (an enum in the output schema), allow
 at most one new tag, and resolve every suggestion through the alias table before storing it.
-⟨TBD suggestion numbers⟩
+Measured on 20 seeded bookmarks with the local model:
+
+- The current pipeline stored a **new distinct tag for 16% of suggested tags** (3% a new spelling
+  of an existing tag, 13% a brand-new tag). The proposed pipeline stored **0%**, reusing an
+  existing canonical tag every time.
+- On-topic rates were similar (38% vs 35% against the synthetic labels).
+- The prompt shrank from 3,050 to 1,980 input tokens per save.
 
 **Recommendation: Proposal A.**
 
@@ -43,7 +49,7 @@ at most one new tag, and resolve every suggestion through the alias table before
   - propose: a whole-list structured-output call plus string candidates
   - check: every pair, in one batched structured-output call
   - review: a review screen, with undo
-- Use a mid-tier model for consolidation (Sonnet 5 / gpt-5.6-terra, about $0.04–0.08 per run on
+- Use a mid-tier model for consolidation (Sonnet 5 / gpt-5.6-terra, about $0.09–0.10 per run on
   paper). Keep the user's default model for suggestions.
 
 Decision APIs (OpenAI Decisions, TypeSafe Jev) are real and very cheap. They do exactly one part of
@@ -63,7 +69,7 @@ gaps:
 | 3 | Every output tag is forced to lowercase | `compute_new_tags`, `validate_tag_text` | `GitHub`, `macOS`, `iOS` and `UI/UX` lose their casing |
 | 4 | It may add broader parent tags (`react` → `react`, `frontend`) | prompt rule 2 | The tag count can *grow*, and bookmarks get tags the user never chose |
 | 5 | Only the 500 most-used tags are sent | `input.tags.iter().take(500)` in both adapters | The long tail, where typos and one-off spellings live, is never considered |
-| 6 | The output must contain an entry for every tag | prompt rule 5 | Output grows with the library (~10 tokens per tag, so 6–8k for 600 tags), against a 60 s HTTP timeout (`DEFAULT_TIMEOUT_SECS`, Anthropic client) inside a synchronous HTMX request |
+| 6 | The output must contain an entry for every tag | prompt rule 5 | Output grows with the library (~10 tokens per tag, so 6–8k for 600 tags), against a 60 s HTTP client timeout (both consolidator clients) inside a synchronous HTMX request |
 | 7 | Anthropic output is parsed from free text | `extract_json_object` takes first `{` to last `}` | One malformed token fails the whole run. The OpenAI path uses JSON-object mode, not a strict schema. |
 | 8 | No deterministic pre-pass | — | Most merges are trivial case/hyphen/plural folds (297 of the 388 needed in the lab). The model spends tokens on them and can still miss some. |
 | 9 | The filter bar shows every distinct tag, single-select | `all_tags` → `filters_inner.html` | The wall of chips. Clicking a chip replaces the filter instead of adding to it. |
@@ -92,7 +98,7 @@ submitted tags, values are bounded, and control characters are rejected.
 Everything here is on this branch under `scripts/tag-lab/` and is reproducible.
 
 - `concepts.py`: the ground truth. 212 concepts, each listing the raw spellings a messy library
-  accumulates (600 spellings), plus 53 concept pairs where merging is a judgment call (`UI/UX` vs
+  accumulates (600 spellings), plus 52 concept pairs where merging is a judgment call (`UI/UX` vs
   `ux`, `vim` vs `neovim`, `local ai` vs `local llm`). It deliberately includes traps:
   - plural lookalikes: `ios`, `news`, `physics`, `kubernetes`, `aws`, `analytics`
   - near misses: `java`/`javascript`, `go`/`google`, `react`/`react native`, `claude`/`claude code`,
@@ -105,8 +111,14 @@ Everything here is on this branch under `scripts/tag-lab/` and is reproducible.
   deterministic normalizer.
 - `consolidate.py`: the proposed LLM step. Providers are local llama.cpp, OpenAI Responses with a
   strict `json_schema`, and Anthropic Messages with `output_config.format`.
+- `verify.py`: the pairwise check. One yes/no question per pair; P(yes) is read from the answer
+  token's log-probabilities, mimicking a decision-API predicate. It also generates the string
+  candidates and unions accepted pairs into groups.
 - `suggest.py`: save-time suggestions, the current prompt against the proposed one.
-- `measure.py`: scores a grouping against the ground truth.
+- `measure.py`: scores a grouping against the ground truth, overall and for the LLM's proposals
+  alone.
+- `out/`: every input and output of the runs, including the two hand checks
+  (`handcheck-deterministic.txt`, `handcheck-llm.txt`) and `spend.jsonl`.
 
 Run: Postgres 16 and the server ran locally from a nix shell on ports 56440 and 4210 (the host has no
 Docker). The lab user was seeded with `psql -f scripts/tag-lab/seed.sql`. Tags and counts were read
@@ -188,8 +200,15 @@ stemming dictionary is not needed.
 Slash tags are not split. `UI/UX` is one tag and only folds with `ui-ux`/`ui ux`/`ui/ux`. Whether it
 equals `ux` is a judgment call for the review step.
 
-**Canonical display form.** The group's most-used spelling is the default canonical tag, with case
-preserved, and the user can rename it. The new pipeline never forces lowercase.
+**Canonical display form.** Case is preserved and the user can rename the canonical tag. The new
+pipeline never forces lowercase. The lab's naive rule, the most-used spelling, picked odd display
+forms for some groups (`Coding Agents`, `Startup`, `AI-art`). The default is therefore chosen in
+this order:
+
+1. the most-used spelling written with spaces rather than hyphens or underscores
+2. among those, the all-lowercase spelling, unless every use is cased (acronyms and brands such as
+   `AWS`, `GitHub` and `macOS` keep their case when that is how they are mostly written)
+3. on a tie, the shortest spelling
 
 ### 2. Canonical tag model
 
@@ -272,7 +291,7 @@ transaction are milliseconds. M1 gets the same behaviour with additive migration
 **Migration.** Migration `015_tag_aliases.sql` creates the tables. A one-time job runs L1–L3 per user
 as a `normalize` batch: it rewrites tags, seeds `tag_aliases`, and can be undone like any other batch.
 It runs at deploy for every user, or lazily on first visit to the library page. Before it touches
-data, the library page shows a banner: "We merged 297 spellings into 303 tags · Review · Undo".
+data, the library page shows a banner: "We merged 600 spellings into 303 tags · Review · Undo".
 
 ### 3. Reviewed LLM consolidation
 
@@ -296,12 +315,14 @@ input tokens (Qwen tokenizer; expect ±20% on Claude/OpenAI). The current consol
 **Pairwise check (new).** Every candidate pair from either source goes into one batched call to the
 same provider: "do A and B mean the same thing?". The schema is
 `{"pairs":[{"id":int,"same":bool,"confidence":"high|medium|low"}]}`. For 300 pairs that is about
-9k input + 3k output tokens. Pairs judged `same` become merge groups (union-find), and the
-canonical tag is the most-used member. Only pairs judged `same` with `high` confidence are
+9k input + 3k output tokens. A structured boolean is used instead of the log-probabilities the
+lab read, because Anthropic's Messages API does not return token log-probabilities. Pairs judged
+`same` become merge groups (union-find), and the canonical tag follows the display-form rule
+above. Only pairs judged `same` with `high` confidence are
 pre-checked on the review screen. This step is what turns a 6%-precision proposal list into a
 usable one in the lab.
 
-**Output, strict schema.** The model returns only groups to merge, not an entry per tag, so output
+**Whole-list call output, strict schema.** The model returns only groups to merge, not an entry per tag, so output
 scales with the number of duplicates instead of the library size:
 
 ```json
@@ -380,7 +401,32 @@ Proposed:
 4. Every suggested tag goes through `TagResolver::resolve` before it is shown, so even a new tag
    that is a spelling of an existing one maps to the canonical tag.
 
-⟨TBD suggestion results⟩
+**Measured** (`suggest.py`, Qwen3-4B local, 20 seeded bookmarks sampled with a fixed seed; full
+rows in `out/suggest-qwen3-4b.json`):
+
+| Pipeline | Tags stored | Reused an existing tag exactly | New spelling of an existing tag (duplicate) | Brand-new tag | On-topic vs labels | Input tokens / save | Output tokens / save |
+|----------|-------------|-------------------------------|---------------------------------------------|---------------|--------------------|---------------------|----------------------|
+| Current prompt, stored verbatim | 100 | 84% | 3% | 13% | 33/87 (38%) | 3,050 | 59 |
+| Proposed (canonical enum + resolver) | 77 | **100%** | **0%** | **0%** | 27/77 (35%) | 1,980 | 27 |
+
+Reading the numbers:
+
+- **The current pipeline grows the library on almost every save.** 16 of 100 suggested tags would
+  have become new chips: `database` next to `databases`, `tutorial` next to `tutorials`, and new
+  tags such as `research`, `data` and `configuration management`.
+- **The proposed pipeline cannot grow the library by accident.**
+- *On-topic* is the share of judged tags whose concept is one of the bookmark's labeled concepts.
+  The seeded titles name only one or two concepts, so the low absolute numbers say more about the
+  seed than the prompt. The two pipelines are within noise of each other.
+- **Two weaknesses of the small model** under the proposed schema:
+  - It never used `new`. Going from 13% new tags to 0% may over-suppress a legitimately new topic.
+  - It sometimes padded with an off-topic popular tag (`mobile` on unrelated pages).
+
+  Both should be rechecked on a hosted model. If padding persists, change "2 to 5" to "1 to 5",
+  and add a server-side cap that drops any existing tag the model marks `low`.
+- **Synonyms leak until consolidation runs.** One answer stored `terminal`, `cli` and
+  `command line` together, because `cli` and `command line` are separate canonical tags until
+  consolidation merges them. Suggestions improve after consolidation.
 
 ## Model and API choice
 
@@ -435,26 +481,27 @@ whole vocabulary is exactly what consolidation needs.
 
 ### Proposals
 
-**A. Deterministic + structured-output LLM + review (recommended).**
+**A. Deterministic + structured-output LLM with a pairwise check + review (recommended).**
 
-- Consolidation is one call to the user's configured model, with the strict schema above.
+- Consolidation makes two calls to the user's configured provider: whole-list proposals, then a
+  batched pairwise check. Both use strict schemas, and string candidates are added for free.
   Suggestions use the enum schema.
 - It uses the keys and settings users already have (Anthropic or OpenAI) and adds no vendor.
 - Measured on the local 4B model: precision 1.00 after the pairwise check. Recall needs a
   stronger model.
-- Paper cost per consolidation run: about $0.04 (Sonnet 5), $0.04 (gpt-5.6-terra) or $0.02
+- Paper cost per consolidation run: about $0.09 (Sonnet 5), $0.10 (gpt-5.6-terra) or $0.04
   (Haiku 4.5). See the table below.
 
-**B. A + decision-API verifier.** After A proposes groups, send each proposed (member, canonical)
-pair as one predicate/Noul question: "A bookmark tagged '{member}' is about the same topic as one
-tagged '{canonical}'".
+**B. A, with the pairwise check done by a decision API.** Instead of A's batched generative check,
+send each candidate pair as one predicate/Noul question: "A bookmark tagged '{a}' is about the same
+topic as one tagged '{b}'". This is the step the lab emulated with log-probabilities.
 
 - All pairs go in one request: OpenAI allows 400 questions per request; Jev has no question limit
   within its context.
 - The calibrated probability drives the review defaults: ≥ 0.9 pre-checked, below that under
   "Check these". The model's self-reported confidence is not used for this.
-- Cost is negligible: about 100 pairs × ~40 tokens = 4k tokens → $0.0004 on OpenAI Decisions,
-  $0.0002 on Jev.
+- Cost is negligible: about 300 pairs × ~120 tokens (measured locally, with sample titles) = 36k
+  tokens → $0.004 on OpenAI Decisions, $0.0015 on Jev.
 - It is worth adding only if the review load from A is too high, that is, if users have to inspect
   many unchecked rows. Jev needs a second key; Decisions needs OpenAI access.
 
@@ -485,7 +532,7 @@ the pairwise check (100%).
 - *Consolidation* is a rare, whole-vocabulary reasoning task, and quality matters more than cost.
   Use the provider the user selected, at least at the mid tier: `claude-sonnet-5` or
   `gpt-5.6-terra`, even if the user's default is Haiku or luna. Show the estimated cost on the
-  button ("~$0.04").
+  button ("~$0.09").
 - *Suggestions* run on every save, and the enum schema constrains the output, so the user's
   default model (Haiku 4.5 / gpt-5.6-luna) is enough.
 - *Model options.* The settings list lacks Claude Haiku 5.5 and Sonnet 5.5, which are cheaper or
@@ -494,22 +541,22 @@ the pairwise check (100%).
 **Paper cost estimates** (list prices on the providers' pricing pages, 2026-10-31; token counts from
 the lab, rounded):
 
-| Model | $/M in, out | Consolidation, proposed (whole-list 6.5k in / 2.5k out + pair check 9k in / 3k out) | Consolidation, current (~22k in / ~5.5k out) | Per save, proposed (~2.5k in / 60 out) | Per save, current (~4.5k in / 150 out) |
+| Model | $/M in, out | Consolidation, proposed (whole-list 6.5k in / 2.5k out + pair check 9k in / 3k out) | Consolidation, current (~22k in / ~5.5k out) | Per save, proposed (measured 2.0k in / 27 out) | Per save, current (measured 3.05k in / 59 out) |
 |-------|-------------|-----|-----|-----|-----|
-| claude-haiku-4-5 (app default) | 1 / 5 | $0.043 | $0.050 | $0.0028 | $0.0053 |
-| claude-haiku-5-5 | 0.10 / 0.50 | $0.004 | $0.005 | $0.0003 | $0.0005 |
-| claude-sonnet-5 | 2 / 10 | $0.086 | $0.099 | $0.0056 | $0.0105 |
-| claude-opus-5-5 | 4 / 20 | $0.17 | $0.20 | $0.011 | $0.021 |
-| gpt-5.6-luna (app default) | 0.20 / 1.20 | $0.010 | $0.011 | $0.0006 | $0.0011 |
-| gpt-5.6-terra | 2 / 12 | $0.097 | $0.11 | $0.0057 | $0.011 |
-| gpt-5.6-sol | 4 / 20 | $0.17 | $0.20 | $0.011 | $0.021 |
+| claude-haiku-4-5 (app default) | 1 / 5 | $0.043 | $0.050 | $0.0021 | $0.0033 |
+| claude-haiku-5-5 | 0.10 / 0.50 | $0.004 | $0.005 | $0.0002 | $0.0003 |
+| claude-sonnet-5 | 2 / 10 | $0.086 | $0.099 | $0.0042 | $0.0067 |
+| claude-opus-5-5 | 4 / 20 | $0.17 | $0.20 | $0.0085 | $0.013 |
+| gpt-5.6-luna (app default) | 0.20 / 1.20 | $0.010 | $0.011 | $0.0004 | $0.0007 |
+| gpt-5.6-terra | 2 / 12 | $0.097 | $0.11 | $0.0043 | $0.0068 |
+| gpt-5.6-sol | 4 / 20 | $0.17 | $0.20 | $0.0085 | $0.013 |
 | OpenAI Decisions (gpt-6-luna), pair check only (36k in) | 0.10 / free | +$0.004 | — | Proposal C: ~$0.0007 | — |
 | TypeSafe Jev, pair check only (36k in) | 0.042 / free | +$0.0015 | — | Proposal C: ~$0.0003 | — |
 
 Every option costs cents per consolidation run and fractions of a cent per save, so cost does not
 decide between them; quality does. The proposed consolidation costs about the same as today's
 while doing more (a pair check plus review). Suggestions get cheaper because the canonical list is
-half the size of the raw list.
+half the size of the raw list (measured 1,980 vs 3,050 input tokens per save).
 
 ## Testing
 
@@ -540,7 +587,8 @@ half the size of the raw list.
 | Whole-list consolidation | local llama.cpp, Qwen3-4B-Instruct-2507 Q4_K_M | 1 | 6,440 | 1,791 | 0 |
 | Pair check on its 84 proposals | local | 84 | 10,082 | 84 | 0 |
 | Pair check on 287 string candidates | local | 287 | 34,200 | 287 | 0 |
-| Save-time suggestions, current and proposed | local | 40 | see [§5](#5-save-time-suggestions) | | 0 |
+| Save-time suggestions, current prompt | local | 20 | 61,000 | 1,180 | 0 |
+| Save-time suggestions, proposed prompt | local | 20 | 39,600 | 540 | 0 |
 | Hosted models, decision APIs | — | 0 | 0 | 0 | **0** (no keys available; $10 budget unused) |
 
 ## Open items
@@ -550,8 +598,10 @@ half the size of the raw list.
   measures them unchanged:
   `python3 scripts/tag-lab/consolidate.py --provider anthropic --model claude-sonnet-5 --run sonnet5`,
   then `measure.py out/sonnet5.groups.json`, and the same for `claude-haiku-4-5-20251001`,
-  `gpt-5.6-luna` and `gpt-5.6-terra`. Estimated total for 4 models × (consolidation + pair check +
-  20 suggestions) is under $1.
+  `gpt-5.6-luna` and `gpt-5.6-terra`. `verify.py` and `suggest.py` support only llama.cpp so
+  far; their hosted variants (a batched structured pair check, and the enum suggestion schema) are
+  a small addition. Estimated total for 4 models × (consolidation + pair check + 20 suggestions) is
+  under $1.
 - **Decision API access.** The OpenAI Decisions guide says GA, but secondary reports from October
   describe per-account enablement. Check with one request before building Proposal B on it.
 - **Real library check.** Run the normalizer over Chris's production tag list (read-only
