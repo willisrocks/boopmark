@@ -1,21 +1,38 @@
 use crate::domain::bookmark::{BookmarkFilter, BookmarkSort};
 use crate::domain::error::DomainError;
+use crate::domain::ports::embedder::{EmbedKind, Embedder};
 use crate::domain::ports::search_repo::SearchRepository;
-use crate::domain::search::{MAX_SEARCH_RESULTS, SearchHit, SearchQuery};
-use std::sync::Arc;
+use crate::domain::search::{
+    MAX_SEARCH_RESULTS, QueryVector, SearchHit, SearchQuery, semantic_query_text,
+};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Longer queries are cut here. The legs do not get better with more words,
 /// and trigram matching cost grows with the query.
 const MAX_QUERY_CHARS: usize = 256;
+/// The query embedding is on the request path: past this, whatever the
+/// backend (a hosted call, or a local model busy with a backfill), search
+/// runs the lexical legs alone.
+const QUERY_EMBED_TIMEOUT: Duration = Duration::from_millis(1500);
+/// A provider outage would warn on every search; warn once per interval and
+/// log the rest at debug.
+const FALLBACK_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct SearchService<R> {
     repo: Arc<R>,
+    embedder: Arc<dyn Embedder>,
+    last_fallback_warning: Mutex<Option<Instant>>,
 }
 
 impl<R: SearchRepository> SearchService<R> {
-    pub fn new(repo: Arc<R>) -> Self {
-        Self { repo }
+    pub fn new(repo: Arc<R>, embedder: Arc<dyn Embedder>) -> Self {
+        Self {
+            repo,
+            embedder,
+            last_fallback_warning: Mutex::new(None),
+        }
     }
 
     /// Relevance-ranked search. The filter's `search` must be non-empty
@@ -45,23 +62,70 @@ impl<R: SearchRepository> SearchService<R> {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let vector = self.query_vector(&text).await;
         let query = SearchQuery {
             text,
             tags: filter.tags.filter(|tags| !tags.is_empty()),
             sort: filter.sort.unwrap_or(BookmarkSort::Relevance),
             limit,
             offset,
+            vector,
         };
         self.repo.search(user_id, &query).await
+    }
+
+    /// The query's vector for the vector leg, or `None` to search
+    /// lexically: embeddings disabled, nothing to embed, a timeout, an error
+    /// or an unusable answer.
+    async fn query_vector(&self, text: &str) -> Option<QueryVector> {
+        if !self.embedder.enabled() {
+            return None;
+        }
+        let text = semantic_query_text(text);
+        if text.is_empty() {
+            return None;
+        }
+        let embedded = tokio::time::timeout(
+            QUERY_EMBED_TIMEOUT,
+            self.embedder.embed(vec![text], EmbedKind::Query),
+        )
+        .await;
+        let reason = match embedded {
+            Ok(Ok(mut embeddings)) => match embeddings.vectors.pop() {
+                Some(values)
+                    if embeddings.vectors.is_empty() && values.len() == self.embedder.dims() =>
+                {
+                    return Some(QueryVector {
+                        model_id: self.embedder.model_id().to_string(),
+                        values,
+                    });
+                }
+                _ => "the embedder returned no usable vector".to_string(),
+            },
+            Ok(Err(e)) => e.to_string(),
+            Err(_) => format!("timed out after {QUERY_EMBED_TIMEOUT:?}"),
+        };
+        self.warn_fallback(&reason);
+        None
+    }
+
+    fn warn_fallback(&self, reason: &str) {
+        let now = Instant::now();
+        let mut last = self.last_fallback_warning.lock().unwrap();
+        if last.is_none_or(|at| now.duration_since(at) >= FALLBACK_WARN_INTERVAL) {
+            *last = Some(now);
+            tracing::warn!("search: query embedding failed ({reason}); lexical legs only");
+        } else {
+            tracing::debug!("search: query embedding failed ({reason}); lexical legs only");
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::embedding::tests::{DisabledStub, StubEmbedder};
     use crate::domain::search::{IngestFailure, IngestJob};
-    use std::sync::Mutex;
-    use std::time::Duration;
 
     #[derive(Default)]
     struct RecordingRepo {
@@ -103,7 +167,7 @@ mod tests {
 
     async fn run(filter: BookmarkFilter) -> Option<SearchQuery> {
         let repo = Arc::new(RecordingRepo::default());
-        SearchService::new(repo.clone())
+        SearchService::new(repo.clone(), Arc::new(DisabledStub))
             .search(Uuid::new_v4(), filter)
             .await
             .unwrap();
@@ -153,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_an_empty_search_and_truncates_long_ones() {
         let repo = Arc::new(RecordingRepo::default());
-        let service = SearchService::new(repo.clone());
+        let service = SearchService::new(repo.clone(), Arc::new(DisabledStub));
         let empty = service
             .search(
                 Uuid::new_v4(),
@@ -171,5 +235,77 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(q.text.chars().count(), MAX_QUERY_CHARS);
+    }
+
+    async fn run_with(embedder: Arc<StubEmbedder>, text: &str) -> SearchQuery {
+        let repo = Arc::new(RecordingRepo::default());
+        SearchService::new(repo.clone(), embedder)
+            .search(
+                Uuid::new_v4(),
+                BookmarkFilter {
+                    search: Some(text.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        repo.queries.lock().unwrap().pop().unwrap()
+    }
+
+    #[tokio::test]
+    async fn embeds_the_query_without_its_exclusions() {
+        let embedder = Arc::new(StubEmbedder::new(8));
+        let q = run_with(embedder.clone(), "coffee -tea").await;
+        let vector = q.vector.expect("the vector leg runs");
+        assert_eq!(vector.model_id, "stub:hash@8");
+        assert_eq!(vector.values, embedder.vector("coffee"));
+        assert_eq!(
+            q.text, "coffee -tea",
+            "the lexical legs see the whole query"
+        );
+        let calls = embedder.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            (calls[0].0.clone(), calls[0].1),
+            (vec!["coffee".to_string()], EmbedKind::Query)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_query_embedding_falls_back_to_the_lexical_legs() {
+        let embedder = Arc::new(StubEmbedder {
+            delay: Duration::from_secs(10),
+            ..StubEmbedder::new(8)
+        });
+        let started = tokio::time::Instant::now();
+        let q = run_with(embedder, "borrow checker").await;
+        assert_eq!(q.vector, None);
+        assert_eq!(started.elapsed(), QUERY_EMBED_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn embedding_errors_and_empty_queries_skip_the_vector_leg() {
+        let embedder = Arc::new(StubEmbedder::new(8));
+        assert_eq!(
+            run_with(embedder.clone(), "fail: outage").await.vector,
+            None
+        );
+        assert_eq!(run_with(embedder.clone(), "-tea").await.vector, None);
+        assert_eq!(
+            embedder.calls.lock().unwrap().len(),
+            1,
+            "nothing to embed in -tea"
+        );
+        // A disabled embedder is never called (it would panic).
+        assert_eq!(
+            run(BookmarkFilter {
+                search: Some("rust".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .vector,
+            None
+        );
     }
 }

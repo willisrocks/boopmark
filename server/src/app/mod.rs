@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod bookmarks;
+pub mod embedding;
 pub mod enrichment;
 pub mod image_prompt;
 pub mod ingest;

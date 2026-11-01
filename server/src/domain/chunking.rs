@@ -260,9 +260,15 @@ mod tests {
         let text = words(0..300);
         let chunks = chunk_article(Some(" Title "), Some("About it"), &text);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].input, format!("Title\nAbout it\n{}", chunks[0].text));
+        assert_eq!(
+            chunks[0].input,
+            format!("Title\nAbout it\n{}", chunks[0].text)
+        );
         assert_eq!(chunks[1].input, format!("Title\n{}", chunks[1].text));
-        assert!(!chunks[0].text.contains("Title"), "the stored text has no header");
+        assert!(
+            !chunks[0].text.contains("Title"),
+            "the stored text has no header"
+        );
 
         let bare = chunk_article(None, Some("  "), "just text");
         assert_eq!(bare[0].input, "just text");
@@ -272,10 +278,16 @@ mod tests {
     fn long_words_end_windows_early_without_losing_text() {
         // 200 characters a word: eight fit in a window, and the next window
         // starts where it ended (no overlap is worth repeating).
-        let long: Vec<String> = (0..12).map(|i| format!("{i:02}{}", "x".repeat(197))).collect();
+        let long: Vec<String> = (0..12)
+            .map(|i| format!("{i:02}{}", "x".repeat(197)))
+            .collect();
         let chunks = chunk_article(None, None, &long.join(" "));
         assert_eq!(chunks.len(), 2);
-        assert!(chunks.iter().all(|c| c.text.chars().count() <= MAX_CHUNK_CHARS));
+        assert!(
+            chunks
+                .iter()
+                .all(|c| c.text.chars().count() <= MAX_CHUNK_CHARS)
+        );
         assert_eq!(chunks[0].text, long[..8].join(" "));
         assert_eq!(chunks[1].text, long[8..].join(" "));
     }
@@ -293,7 +305,11 @@ mod tests {
             .join(" ");
         let chunks = chunk_article(None, None, &dense);
         assert!(chunks.len() > 2);
-        assert!(chunks.iter().all(|c| c.text.chars().count() <= MAX_CHUNK_CHARS));
+        assert!(
+            chunks
+                .iter()
+                .all(|c| c.text.chars().count() <= MAX_CHUNK_CHARS)
+        );
         assert!(chunks[0].text.split(' ').count() < WINDOW_WORDS);
 
         // A single enormous word is cut.

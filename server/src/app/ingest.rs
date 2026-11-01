@@ -52,6 +52,9 @@ pub struct IngestWorker<R, F> {
     repo: Arc<R>,
     fetcher: Arc<F>,
     concurrency: usize,
+    /// Woken after each stored result, so the embedding worker picks it up
+    /// at once.
+    on_stored: Option<Arc<Notify>>,
 }
 
 impl<R, F> IngestWorker<R, F>
@@ -64,7 +67,14 @@ where
             repo,
             fetcher,
             concurrency: concurrency.max(1),
+            on_stored: None,
         }
+    }
+
+    /// Notify `notify` whenever a result (article or failure) is stored.
+    pub fn notify_on_stored(mut self, notify: Arc<Notify>) -> Self {
+        self.on_stored = Some(notify);
+        self
     }
 
     /// Run forever on a background task. `wake` cuts the idle sleep short.
@@ -137,7 +147,11 @@ where
             }
         };
         match stored {
-            Ok(true) => {}
+            Ok(true) => {
+                if let Some(notify) = &self.on_stored {
+                    notify.notify_one();
+                }
+            }
             // Deleted, its URL changed, or another claim took it over.
             Ok(false) => tracing::debug!(bookmark_id = %job.bookmark_id, "ingest result dropped"),
             Err(e) => {

@@ -21,6 +21,9 @@
         {% if let Some(snippet) = bookmark.snippet %}
         <p class="text-sm text-gray-400 mt-2 line-clamp-3" data-testid="bookmark-card-snippet">{% for segment in snippet %}{% if segment.highlighted %}<mark class="bg-yellow-400/20 text-gray-100 rounded-sm">{{ segment.text }}</mark>{% else %}{{ segment.text }}{% endif %}{% endfor %}</p>
         {% endif %}
+        {% if bookmark.semantic %}
+        <p class="text-xs text-gray-500 mt-1" data-testid="bookmark-card-semantic" title="Found by meaning: no word of the search appears in this bookmark">semantic match</p>
+        {% endif %}
         <div class="flex flex-wrap gap-1 mt-3">
             {% for tag in bookmark.tags %}
             <span class="px-2 py-0.5 text-xs rounded-full bg-[#2a2d45] text-gray-400">{{ tag }}</span>

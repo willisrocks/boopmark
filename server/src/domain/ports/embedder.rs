@@ -21,8 +21,6 @@ pub const INDEXED_DIMENSIONS: [usize; 2] = [1024, 384];
 /// differently (a prefix or an `input_type`). Adapters also use it to pick a
 /// timeout: a query is on the request path, a document is background work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// Constructed by article search, which lands separately.
-#[cfg_attr(not(test), expect(dead_code))]
 pub enum EmbedKind {
     Document,
     Query,

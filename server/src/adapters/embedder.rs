@@ -1,7 +1,3 @@
-// Nothing calls the port yet: tag management and article search move onto it
-// in their own changes. Remove this once they land.
-#![allow(dead_code)]
-
 //! Vendor adapters for the `Embedder` port, plus the router that builds the
 //! one selected by configuration:
 //!
@@ -466,7 +462,9 @@ pub struct FastembedEmbedder {
 
 #[cfg(feature = "local-embeddings")]
 impl FastembedEmbedder {
-    const BATCH_SIZE: usize = 64;
+    /// Inputs embedded per lock. A query waits for at most one such batch of
+    /// a running document job (about 2 s on a shared vCPU), not the whole job.
+    const BATCH_SIZE: usize = 16;
 
     /// fastembed lists ONNX re-exports (`Xenova/bge-small-en-v1.5`,
     /// `Qdrant/all-MiniLM-L6-v2-onnx`); match on the model name so the
@@ -537,9 +535,9 @@ impl Embedder for FastembedEmbedder {
         Box::pin(async move {
             reject_empty(&inputs)?;
             let inputs: Vec<String> = inputs.into_iter().map(|t| format!("{prefix}{t}")).collect();
-            // The lock is taken per chunk, so a search query waits for one
-            // chunk of a long document job at most, not the whole job.
-            let vectors = tokio::task::spawn_blocking(move || {
+            // The lock is taken per batch, so a search query waits for one
+            // batch of a long document job at most, not the whole job.
+            let job = tokio::task::spawn_blocking(move || {
                 let mut vectors = Vec::with_capacity(inputs.len());
                 for chunk in inputs.chunks(Self::BATCH_SIZE) {
                     let embedded = model
@@ -550,8 +548,16 @@ impl Embedder for FastembedEmbedder {
                     vectors.extend(embedded);
                 }
                 Ok::<_, DomainError>(vectors)
-            })
-            .await
+            });
+            // A query is on the request path, like a hosted call with its
+            // timeout. The blocking thread cannot be cancelled; it finishes
+            // on its own and its result is dropped.
+            let vectors = match kind {
+                EmbedKind::Query => tokio::time::timeout(QUERY_TIMEOUT, job)
+                    .await
+                    .map_err(|_| DomainError::Internal("fastembed query timed out".into()))?,
+                EmbedKind::Document => job.await,
+            }
             .map_err(|_| DomainError::Internal("fastembed task panicked".into()))??;
             let vectors = vectors
                 .into_iter()

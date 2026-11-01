@@ -211,8 +211,10 @@ async fn main() {
     );
     tracing::info!("embeddings: {}", embedder.model_id());
 
-    let search_service = Arc::new(SearchService::new(db.clone()));
+    let search_service = Arc::new(SearchService::new(db.clone(), embedder.clone()));
 
+    // Woken by the ingest worker after each result it stores.
+    let embed_wake = Arc::new(tokio::sync::Notify::new());
     if config.article_ingest_enabled {
         // Its own connection, so background fetching never takes one from
         // the request pool; the listener holds one more.
@@ -231,7 +233,18 @@ async fn main() {
             Arc::new(HtmlArticleFetcher::new(config.article_ingest_concurrency)),
             config.article_ingest_concurrency,
         )
+        .notify_on_stored(embed_wake.clone())
         .spawn(wake);
+    }
+    if embedder.enabled() {
+        // Its own connection too; the backfill runs through it.
+        let embed_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&config.database_url)
+            .await
+            .expect("Failed to connect the embedding worker to the database");
+        app::embedding::EmbedWorker::new(Arc::new(PostgresPool::new(embed_pool)), embedder.clone())
+            .spawn(embed_wake);
     }
 
     let login_provider: Arc<dyn LoginProvider> = match config.login_adapter {

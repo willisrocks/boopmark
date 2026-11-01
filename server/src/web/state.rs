@@ -126,6 +126,7 @@ impl AppState {
             .map(|bookmark| SearchHit {
                 bookmark,
                 snippet: None,
+                semantic: false,
             })
             .collect())
     }
