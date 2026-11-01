@@ -6,6 +6,7 @@ use crate::app::auth::AuthService;
 use crate::app::bookmarks::BookmarkService;
 use crate::app::enrichment::EnrichmentService;
 use crate::app::invite::InviteService;
+use crate::app::search::SearchService;
 use crate::app::settings::SettingsService;
 use crate::app::tag_alias::TagAliasService;
 use crate::app::tag_consolidation::TagConsolidationService;
@@ -43,6 +44,7 @@ pub struct AppState {
     pub llm_client: Arc<dyn LlmClient>,
     /// Operator-configured embedder (`EMBEDDING_BACKEND`, disabled by default).
     pub embedder: Arc<dyn Embedder>,
+    pub search: Arc<SearchService<PostgresPool>>,
 }
 
 #[derive(Clone)]
