@@ -671,3 +671,274 @@ impl TagAliasRepository for PostgresPool {
         .collect()
     }
 }
+
+#[cfg(test)]
+mod tag_alias_postgres_tests {
+    use super::*;
+    use crate::app::tag_alias::TagAliasService;
+    use sqlx::PgPool;
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
+
+    type BookmarkState = Vec<(Uuid, Vec<String>, DateTime<Utc>)>;
+    type AliasState = Vec<(String, String, String, String, Option<Uuid>, DateTime<Utc>)>;
+
+    async fn bookmark(pool: &PgPool, user_id: Uuid, tags: &[&str]) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO bookmarks (user_id, url, tags) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(user_id)
+        .bind(format!("https://example.com/{}", Uuid::new_v4()))
+        .bind(tags.iter().map(|t| t.to_string()).collect::<Vec<_>>())
+        .fetch_one(pool)
+        .await
+        .expect("insert bookmark")
+    }
+
+    async fn bookmarks(pool: &PgPool, user_id: Uuid) -> BookmarkState {
+        sqlx::query_as("SELECT id, tags, updated_at FROM bookmarks WHERE user_id = $1 ORDER BY id")
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+            .expect("load bookmarks")
+    }
+
+    async fn tags_of(pool: &PgPool, id: Uuid) -> Vec<String> {
+        sqlx::query_scalar("SELECT tags FROM bookmarks WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("load tags")
+    }
+
+    async fn aliases(pool: &PgPool, user_id: Uuid) -> AliasState {
+        sqlx::query_as(
+            "SELECT alias_key, alias, canonical, source, batch_id, created_at FROM tag_aliases
+             WHERE user_id = $1 ORDER BY alias_key",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+        .expect("load aliases")
+    }
+
+    fn s(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    /// Run explicitly with `--ignored` and `DATABASE_URL` pointing at a
+    /// scratch Postgres; the test applies the migrations itself.
+    #[tokio::test]
+    #[ignore = "requires a Postgres database in DATABASE_URL"]
+    async fn tag_alias_propose_apply_undo_round_trip() {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL is required for the ignored tag alias Postgres test");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("../migrations")
+            .run(&pool)
+            .await
+            .expect("migrations apply");
+        let repo = Arc::new(PostgresPool::new(pool.clone()));
+        let svc = TagAliasService::new(repo.clone());
+
+        let user = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        for id in [user, other] {
+            sqlx::query("INSERT INTO users (id, email, name) VALUES ($1, $2, 'tag alias test')")
+                .bind(id)
+                .bind(format!("tag-alias-{id}@example.test"))
+                .execute(&pool)
+                .await
+                .expect("insert user");
+        }
+
+        // A messy legacy library, written without the resolver.
+        let b_github_cased = bookmark(&pool, user, &["GitHub", "rust"]).await;
+        let b_github_lower = bookmark(&pool, user, &["github"]).await;
+        bookmark(&pool, user, &["GitHub"]).await;
+        bookmark(&pool, user, &["coding agents"]).await;
+        let b_agent = bookmark(&pool, user, &["coding-agent", "rust"]).await;
+        bookmark(&pool, user, &["Rust"]).await;
+        let b_untouched = bookmark(&pool, user, &["UI/UX", "ux", "kubernetes"]).await;
+        let other_bookmark = bookmark(&pool, other, &["github", "GitHub"]).await;
+        // Aliases from earlier writes: one points at a tag that will be
+        // merged away, so the merge must repoint it and undo restore it.
+        sqlx::query(
+            "INSERT INTO tag_aliases (user_id, alias_key, alias, canonical, source)
+             VALUES ($1, 'octocat', 'octocat', 'github', 'manual'),
+                    ($1, 'github', 'github', 'github', 'normalize')",
+        )
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("insert aliases");
+
+        let legacy = bookmarks(&pool, user).await;
+        let other_legacy = bookmarks(&pool, other).await;
+        let aliases_before = aliases(&pool, user).await;
+
+        // Proposing never changes bookmarks or aliases.
+        let proposals = svc.propose_normalization(user).await.expect("propose");
+        let summary: Vec<(String, Vec<String>)> = proposals
+            .iter()
+            .map(|p| (p.canonical.clone(), p.members.clone()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("GitHub".to_string(), s(&["GitHub", "github"])),
+                (
+                    "coding agents".to_string(),
+                    s(&["coding agents", "coding-agent"])
+                ),
+                ("rust".to_string(), s(&["Rust", "rust"])),
+            ]
+        );
+        assert_eq!(bookmarks(&pool, user).await, legacy);
+        assert_eq!(aliases(&pool, user).await, aliases_before);
+
+        // Re-running replaces pending proposals; a dismissed group stays gone.
+        let rust = proposals.iter().find(|p| p.canonical == "rust").unwrap();
+        assert_eq!(svc.dismiss_proposals(user, &[rust.id]).await.unwrap(), 1);
+        let proposals = svc.propose_normalization(user).await.expect("re-propose");
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(
+            svc.list_proposals(user, Some(ProposalStatus::Pending))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let ids: Vec<Uuid> = proposals.iter().map(|p| p.id).collect();
+
+        // Apply both as one batch.
+        let batch = svc.apply_merge(user, &ids).await.expect("apply");
+        assert_eq!(batch.kind, ChangeKind::Normalize);
+        assert_eq!(batch.summary.bookmarks_changed, 2);
+        assert_eq!(tags_of(&pool, b_github_cased).await, s(&["GitHub", "rust"]));
+        assert_eq!(tags_of(&pool, b_github_lower).await, s(&["GitHub"]));
+        assert_eq!(tags_of(&pool, b_agent).await, s(&["coding agents", "rust"]));
+        let changed = [b_github_lower, b_agent];
+        let after_apply = bookmarks(&pool, user).await;
+        for (before, after) in legacy.iter().zip(&after_apply) {
+            if !changed.contains(&before.0) {
+                assert_eq!(before, after, "an unmerged bookmark changed");
+            }
+        }
+        assert_eq!(bookmarks(&pool, other).await, other_legacy);
+        assert!(
+            svc.list_proposals(user, Some(ProposalStatus::Applied))
+                .await
+                .unwrap()
+                .iter()
+                .all(|p| p.batch_id == Some(batch.id))
+        );
+        assert!(matches!(
+            svc.apply_merge(user, &ids).await,
+            Err(DomainError::InvalidInput(_))
+        ));
+
+        // Old names, including the repointed alias, resolve to the merge target.
+        let canon = |aliases: &AliasState, key: &str| {
+            aliases.iter().find(|a| a.0 == key).map(|a| a.2.clone())
+        };
+        let merged_aliases = aliases(&pool, user).await;
+        assert_eq!(canon(&merged_aliases, "octocat").as_deref(), Some("GitHub"));
+        assert_eq!(canon(&merged_aliases, "github").as_deref(), Some("GitHub"));
+        assert_eq!(
+            canon(&merged_aliases, "codingagent").as_deref(),
+            Some("coding agents")
+        );
+        assert_eq!(
+            svc.resolve_tags(
+                user,
+                &s(&["github", "Octocat", "coding-agent", "Coding Agents"]),
+                &[]
+            )
+            .await
+            .unwrap(),
+            s(&["GitHub", "coding agents"])
+        );
+
+        // The user edits a merged bookmark before undoing.
+        sqlx::query("UPDATE bookmarks SET tags = $1 WHERE id = $2")
+            .bind(s(&["GitHub", "news"]))
+            .bind(b_github_lower)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let undone = svc.undo_batch(user, batch.id).await.expect("undo");
+        assert!(undone.undone_at.is_some());
+        assert_eq!(tags_of(&pool, b_github_lower).await, s(&["news", "github"]));
+        assert_eq!(tags_of(&pool, b_agent).await, s(&["coding-agent", "rust"]));
+        assert_eq!(
+            tags_of(&pool, b_untouched).await,
+            s(&["UI/UX", "ux", "kubernetes"])
+        );
+        assert_eq!(
+            tags_of(&pool, other_bookmark).await,
+            s(&["github", "GitHub"])
+        );
+        // Every alias row is exactly as before, so old spellings resolve as before.
+        assert_eq!(aliases(&pool, user).await, aliases_before);
+        assert_eq!(
+            svc.resolve_tags(user, &s(&["Octocat", "GITHUB"]), &[])
+                .await
+                .unwrap(),
+            s(&["github"])
+        );
+        assert_eq!(
+            svc.list_proposals(user, Some(ProposalStatus::Pending))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(matches!(
+            svc.undo_batch(user, batch.id).await,
+            Err(DomainError::InvalidInput(_))
+        ));
+
+        // A batch that a later, still-applied batch depends on cannot be undone.
+        let first = svc.apply_merge(user, &ids).await.expect("re-apply");
+        let second = svc
+            .merge_tags(
+                user,
+                ChangeKind::Rename,
+                &[TagMerge {
+                    canonical: "Git Hub".into(),
+                    members: s(&["GitHub"]),
+                }],
+            )
+            .await
+            .expect("rename");
+        assert!(matches!(
+            svc.undo_batch(user, first.id).await,
+            Err(DomainError::InvalidInput(_))
+        ));
+        svc.undo_batch(user, second.id).await.expect("undo rename");
+        svc.undo_batch(user, first.id).await.expect("undo first");
+        assert_eq!(tags_of(&pool, b_github_cased).await, s(&["GitHub", "rust"]));
+        assert_eq!(tags_of(&pool, b_agent).await, s(&["coding-agent", "rust"]));
+        assert_eq!(svc.list_batches(user, 10).await.unwrap().len(), 3);
+
+        // Other users cannot see or undo this user's batches.
+        assert!(matches!(
+            svc.undo_batch(other, first.id).await,
+            Err(DomainError::NotFound)
+        ));
+
+        sqlx::query("DELETE FROM users WHERE id IN ($1, $2)")
+            .bind(user)
+            .bind(other)
+            .execute(&pool)
+            .await
+            .expect("cleanup users");
+        pool.close().await;
+    }
+}
