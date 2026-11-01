@@ -26,8 +26,9 @@ This spec fixes the problem in three layers. Each layer is useful without the ne
    batch. In the lab, a 4B local model given the whole list proposed topic clusters, not synonyms
    (**6% precision**). The same model checking one pair at a time had **100% precision** (27/27,
    all hand-checked) at 26% recall. The fully local pipeline reached **600 → 303 → 276 tags with 0
-   wrong merges**. A hosted mid-tier model is needed for recall; that comparison is pending API
-   keys (see [Open items](#open-items)).
+   wrong merges**. Recall needs a stronger model than the local 4B. The hosted measurement of
+   Claude Haiku 5.5 runs on a helper machine with the real key
+   (see [Hosted measurement](#hosted-measurement-claude-haiku-55)).
 3. **A compact filter bar and a tag library page**: top tags by use, a searchable "More tags"
    popover that also matches aliases, multi-select, and a management page for rename, merge, delete
    and undo.
@@ -44,13 +45,19 @@ Measured on 20 seeded bookmarks with the local model:
 
 **Recommendation: Proposal A.**
 
-- Normalization and aliases first.
+- Normalization and aliases first. They do everything they can (77% of the needed merges in the
+  lab, with no errors), and the LLM only sees what is left.
 - Then consolidation with the user's own configured provider:
   - propose: a whole-list structured-output call plus string candidates
   - check: every pair, in one batched structured-output call
   - review: a review screen, with undo
-- Use a mid-tier model for consolidation (Sonnet 5 / gpt-5.6-terra, about $0.09–0.10 per run on
-  paper). Keep the user's default model for suggestions.
+- **Default model: Claude Haiku 5.5 (`claude-haiku-5-5`)** for both save-time suggestions and
+  merge proposals, at `effort: low`. About $0.004 per consolidation run and $0.0002 per save on
+  paper. On save it can only pick existing canonical tags (an enum) plus at most one new tag, and
+  the resolver maps that tag to an existing one where it can.
+- **One shared LLM port** (`LlmClient`, [section 6](#6-shared-llm-port)) with Anthropic, OpenAI
+  and local llama.cpp adapters, chosen by config. Both features use it, and the hybrid search spec
+  uses the same port. A prototype is on this branch.
 
 Decision APIs (OpenAI Decisions, TypeSafe Jev) are real and very cheap. They do exactly one part of
 this well, the pairwise check, and they cannot propose canonical names or new tags. They are the
@@ -107,7 +114,8 @@ and answered each question from code or measurements; there was no human gate.
 | Can an LLM apply merges unreviewed? | No. | 165 wrong merges when the local model's proposals were applied directly |
 | Self-reported confidence for review defaults? | No; use a pairwise check. | 41 of 45 `high`-confidence proposals were wrong; the pairwise check had 0 wrong |
 | Decision API at the core? | No; it is an optional pair-check backend. | Neither can propose names or new tags (primary docs); it is the one step it does well |
-| Which model? | Mid tier for consolidation, the default for suggestions. | Cents per run (paper costs); small models fail at the whole-list task |
+| Which model? | Claude Haiku 5.5 for suggestions and merge proposals (owner decision after review of #36, replacing my first answer of a mid-tier model for consolidation). | Deterministic rules take the bulk; the pair check and the review screen guard precision; the enum bounds suggestions. Hosted numbers: [Hosted measurement](#hosted-measurement-claude-haiku-55) |
+| One LLM integration or one per feature? | One shared `LlmClient` port; feature ports sit on top. | Today each vendor adapter repeats HTTP, auth and parsing for three features (`anthropic.rs`, `anthropic_tag_consolidator.rs`, `openai.rs`) |
 
 ## Lab: seed data, prototype, measurements
 
@@ -133,6 +141,13 @@ Everything here is on this branch under `scripts/tag-lab/` and is reproducible.
 - `suggest.py`: save-time suggestions, the current prompt against the proposed one.
 - `measure.py`: scores a grouping against the ground truth, overall and for the LLM's proposals
   alone.
+- `llm_client.py`: the Python mirror of the server's `LlmClient` port
+  ([section 6](#6-shared-llm-port)). It provides `complete_structured(StructuredRequest)`, with
+  Anthropic, OpenAI and llama.cpp adapters.
+- `hosted_eval.py`: the hosted run, using the same prompts and schemas through `llm_client.py`.
+  It runs on the committed seed files alone, has a hard spend guard of $3, prints metrics only and
+  writes `results/<run>.json`
+  ([Hosted measurement](#hosted-measurement-claude-haiku-55)).
 - `out/`: every input and output of the runs, including the two hand checks
   (`handcheck-deterministic.txt`, `handcheck-llm.txt`) and `spend.jsonl`.
 
@@ -186,7 +201,7 @@ What the numbers say:
   check: `out/handcheck-llm.txt`). It rejected 83 of its own 84 whole-list proposals.
 - **Recall is limited by how strong the model is, not by the pipeline.** The small model missed
   `ts`/`typescript`, `ML`/`machine learning`, `o11y`/`observability` and `rust`/`rust-lang`. A
-  hosted mid-tier model is expected to catch these, but that is not measured yet (pending keys).
+  hosted model is expected to catch these. The Haiku 5.5 run below measures this.
   String candidates alone also cap recall at 72 of the 102 residual pairs: pure synonyms such as
   `wfh`/`remote work` and `infosec`/`security` need the whole-list call.
 - **The review screen is still required.** It catches judgment calls (`UI/UX` ~ `ux` scored 0.68)
@@ -195,6 +210,37 @@ What the numbers say:
 Local run cost: $0. On this 4-core EPYC (AVX2, native llama.cpp build) the whole-list call took
 573 s for 6,440 input + 1,791 output tokens. The pairwise check averaged ~2.2 s and ~120 input
 tokens per pair. The nixpkgs llama.cpp binary has no AVX2 kernels and ran ~10× slower.
+
+### Hosted measurement (Claude Haiku 5.5)
+
+**Status: pending the helper run.** No hosted key is available on the worker host, so a helper runs
+`hosted_eval.py` on Chris's Mac with the real key and pushes the results file. This section will
+then be filled from `scripts/tag-lab/results/anthropic-claude-haiku-5-5-<UTC time>.json`.
+
+The run measures the same metrics as the local runs, on the same seed and sample, so the two are
+directly comparable:
+
+| Metric | Qwen3-4B local (measured) | Claude Haiku 5.5 (pending) |
+|--------|---------------------------|----------------------------|
+| Whole-list proposals: precision (LLM-only) | 0.06 (5 / 84) | — |
+| Pair check over the string candidates (and the whole-list proposals): accepted, precision | 28, 1.00 (p ≥ 0.5) | — (`high` and `high`+`medium`) |
+| Pipeline: tags after / wrong merges / recall (of 388) | 276 / 0 / 0.83 | — |
+| Suggestions, proposed prompt: reuse / new-tag rate | 100% / 0% (20 bookmarks) | — (30 bookmarks) |
+| Suggestions, current prompt: duplicate / new-tag rate | 3% / 13% | — |
+| Tokens and cost of the whole run | 151k in / 3.9k out, $0 | — (dry-run worst case $0.08) |
+
+Differences from the local runs, by design:
+
+- The pair check uses a batched structured boolean plus a confidence label (40 pairs per call). It
+  does not use log-probabilities, because the Anthropic API does not return them. This is what the
+  product would ship.
+- The pairs checked are the string candidates **plus** the whole-list proposals, as in the
+  design. Results are reported both ways.
+- The "current" suggestion prompt is the production text, but the answer goes through a structured
+  output schema so that it parses reliably. The prompt is unchanged, and only the tag choice is
+  scored.
+- Haiku 5.5 runs at `effort: low` with adaptive thinking left on. Thinking tokens bill as output
+  and are included in the token counts.
 
 ## Design
 
@@ -444,6 +490,94 @@ Reading the numbers:
   `command line` together, because `cli` and `command line` are separate canonical tags until
   consolidation merges them. Suggestions improve after consolidation.
 
+### 6. Shared LLM port
+
+All LLM code goes behind one port with vendor adapters, chosen by config. Suggest-on-save and
+consolidation both call it, and the hybrid search spec references the same names. A prototype with
+tests is on this branch.
+
+**Today.** Three feature ports (`LlmEnricher`, `TagConsolidator`, `LlmPromptAssistant`) each have
+their own Anthropic and OpenAI adapters (`anthropic.rs`, `anthropic_tag_consolidator.rs`,
+`openai.rs`) and three routers (`llm_router.rs`). The HTTP, auth, error mapping and JSON extraction
+are written once per feature per vendor. That is why the Anthropic paths still parse free text
+(gap 7) while the OpenAI path uses a schema.
+
+**The port** (`server/src/domain/ports/llm_client.rs`, prototype):
+
+```rust
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub struct StructuredRequest {
+    pub provider: TextProvider, pub api_key: String, pub model: String,
+    pub system: String, pub user: String,
+    pub json_schema: serde_json::Value, pub max_output_tokens: u32,
+}
+pub struct TokenUsage { pub input_tokens: u32, pub output_tokens: u32 }
+pub struct StructuredResponse { pub json: serde_json::Value, pub usage: TokenUsage }
+
+pub trait LlmClient: Send + Sync {
+    fn complete_structured(&self, req: StructuredRequest)
+        -> BoxFuture<'_, Result<StructuredResponse, DomainError>>;
+}
+```
+
+`BoxFuture` is a local alias with the same shape as `futures::future::BoxFuture`, because the
+server does not depend on the `futures` crate. The names and fields are exactly the ones the
+search spec uses.
+
+**Adapters** (`server/src/adapters/llm_client.rs`, prototype):
+
+| Adapter | Vendor feature | Notes |
+|---------|----------------|-------|
+| `AnthropicLlmClient` | Messages API, `output_config.format` `json_schema` | Reads the `text` block after any `thinking` blocks. Errors on `stop_reason` `refusal` or `max_tokens`. Sends `output_config.effort` (configured, default `low`) only to models that accept it (not Haiku 4.5). Sends no `temperature`: Haiku 5.5 rejects non-default sampling parameters. |
+| `OpenAiLlmClient` | Responses API, `text.format` `json_schema` `strict: true` | Reuses `extract_response_text` from `openai.rs`. |
+| `LlamaCppLlmClient` | `llama-server` chat completions, `response_format` `json_schema` (grammar-constrained) | For the lab and offline development. Ignores the key and the model name. |
+| `LlmClientRouter` | — | Picks the adapter by `req.provider` (the user's setting), unless config pins every request to one backend. |
+
+**Schema keywords.** Anthropic structured outputs do not support array-length or numeric
+constraints (`maxItems`, `minLength`, `minimum`, …). Adapters strip these keywords before sending
+(`strip_unenforced`), and the use case enforces them on the parsed result. For example, the
+suggester truncates to 5 tags, keeps at most 1 new tag, and drops anything not in the enum. The
+llama.cpp adapter keeps the full schema, because its grammar can enforce it.
+
+**Config.** `LlmClientConfig::from_env()`:
+
+- `LLM_BACKEND=llamacpp` with `LLAMACPP_BASE_URL` pins everything to a local server.
+- Otherwise requests are routed by provider, and `ANTHROPIC_EFFORT` (default `low`) sets the
+  effort level.
+
+Per-user provider, model and key stay where they are (`llm_settings`) and travel in each request.
+Adding a vendor means adding one adapter and one `TextProvider` variant.
+
+**Feature ports on top.** Each feature port becomes a thin use-case adapter that builds a prompt
+and schema, calls `LlmClient`, and validates the result. None needs vendor code:
+
+| Existing port | On top of `LlmClient` | Status |
+|---------------|-----------------------|--------|
+| `LlmEnricher` (suggest on save) | `LlmClientEnricher`: title, description, `existing` as an enum of canonical tags, at most one `new` | Prototype in `server/src/app/tag_llm.rs`, with tests |
+| `TagConsolidator` | Replaced by two use-case functions: whole-list proposals and `check_merge_pairs` (batched pair check). The old `mapping` contract (one entry per tag, parent tags) is what this spec removes. | `check_merge_pairs` prototyped; whole-list proposals follow the lab's `SCHEMA` |
+| `LlmPromptAssistant` (image prompts) | Same port with the schema `{"prompt": string}`, then the existing `validate_assisted_image_prompt` | Not prototyped. It is outside tag management, but nothing prevents it. |
+
+After migration, `anthropic.rs`, `anthropic_tag_consolidator.rs` and the text half of `openai.rs`
+shrink to nothing, and the three feature routers collapse into `LlmClientRouter`. The prototype is
+additive: nothing in `main.rs` is rewired yet, so current behaviour is unchanged.
+
+**Tests in the prototype** (focused, `cargo test -p boopmark-server llm_client tag_llm`, 11 tests;
+none call a network):
+
+- request bodies per vendor
+- thinking blocks are skipped
+- refusals and truncation are errors
+- usage is parsed
+- keywords are stripped at depth while `enum` survives
+- config is read from env
+- the router dispatches by provider or pins to one backend
+- both features run through one stub `LlmClient`: the enricher sends an enum schema and drops
+  off-list tags, and the pair check batches 40 per call and ignores duplicate or unknown ids
+
+The lab's `llm_client.py` mirrors the same port in Python, so `hosted_eval.py` sends the requests
+the server would send.
+
 ## Model and API choice
 
 ### What the "decision APIs" actually are (verified from primary sources, 2026-10-31)
@@ -504,11 +638,14 @@ whole vocabulary is exactly what consolidation needs.
   Suggestions use the enum schema.
 - It uses the keys and settings users already have (Anthropic or OpenAI) and adds no vendor.
 - Measured on the local 4B model: precision 1.00 after the pairwise check. Recall needs a
-  stronger model.
-- Paper cost per consolidation run: about $0.09 (Sonnet 5), $0.10 (gpt-5.6-terra) or $0.04
-  (Haiku 4.5). See the table below.
+  stronger model (Haiku 5.5 hosted run pending).
+- Default model Claude Haiku 5.5: about $0.004 per consolidation run and $0.0002 per save on paper.
+  See the table below.
+- All calls go through the shared `LlmClient` port ([section 6](#6-shared-llm-port)).
 
-**B. A, with the pairwise check done by a decision API.** Instead of A's batched generative check,
+**B (optional). A, with the pairwise check done by a decision API.** It would be a second adapter
+behind a narrow `PairJudge` port, not behind `LlmClient`: decision APIs return probabilities, not
+JSON. Instead of A's batched generative check,
 send each candidate pair as one predicate/Noul question: "A bookmark tagged '{a}' is about the same
 topic as one tagged '{b}'". This is the step the lab emulated with log-probabilities.
 
@@ -539,20 +676,32 @@ threshold. For consolidation, per-tag `Choice` among candidate canonicals.
 
 ### Model choice
 
-**Measured:** only the local Qwen3-4B (no hosted keys were available; see [Open items](#open-items)).
-It shows the failure mode of a small model on the whole-list task (6% precision) and the strength of
-the pairwise check (100%).
+**Measured so far:** only the local Qwen3-4B. It shows the failure mode of a small model on the
+whole-list task (6% precision) and the strength of the pairwise check (100%). Claude Haiku 5.5 is
+measured on the same harness by the helper run
+([Hosted measurement](#hosted-measurement-claude-haiku-55)).
 
-**Recommended defaults:**
+**Defaults (decided):**
 
-- *Consolidation* is a rare, whole-vocabulary reasoning task, and quality matters more than cost.
-  Use the provider the user selected, at least at the mid tier: `claude-sonnet-5` or
-  `gpt-5.6-terra`, even if the user's default is Haiku or luna. Show the estimated cost on the
-  button ("~$0.09").
-- *Suggestions* run on every save, and the enum schema constrains the output, so the user's
-  default model (Haiku 4.5 / gpt-5.6-luna) is enough.
-- *Model options.* The settings list lacks Claude Haiku 5.5 and Sonnet 5.5, which are cheaper or
-  better than the listed Haiku 4.5 and Sonnet 5. Adding them is a separate small change.
+- **Claude Haiku 5.5 (`claude-haiku-5-5`) for both suggestions and merge proposals.**
+  - Run it at `output_config.effort: low`. Haiku 5.5 defaults to `medium` and thinks adaptively,
+    and short tagging calls do not need more.
+  - Send no `temperature`: Haiku 5.5 rejects non-default sampling parameters.
+  - Leave room for thinking in `max_tokens` (1,024 per save, 4,096 per pair batch, 16,000 for
+    the whole-list call).
+- **Why a small model is enough here.** The LLM never decides alone:
+  - Deterministic normalization makes 77% of the merges before any model runs.
+  - The pair check filters the whole-list proposals.
+  - The review screen gates every merge, and undo backs it.
+  - On save, the enum allows only existing canonical tags plus at most one new tag, and the
+    resolver maps that one to an existing tag when it can.
+- **Change `DEFAULT_ANTHROPIC_MODEL`** from `claude-haiku-4-5-20251001` to `claude-haiku-5-5`,
+  and add Haiku 5.5 to `ANTHROPIC_MODEL_OPTIONS`. Haiku 5.5 is 10× cheaper than Haiku 4.5.
+  Existing users keep their saved model.
+- **OpenAI users** keep `gpt-5.6-luna` (similar price class) through the same port.
+- **Escape hatch if Haiku 5.5's recall disappoints.** Offer an opt-in "thorough" run with Claude
+  Sonnet 5.5 on the library page (about $0.09 per run on paper). Precision is protected either way
+  by the pair check and the review screen, so the model only moves recall.
 
 **Paper cost estimates** (list prices on the providers' pricing pages, 2026-10-31; token counts from
 the lab, rounded):
@@ -560,7 +709,8 @@ the lab, rounded):
 | Model | $/M in, out | Consolidation, proposed (whole-list 6.5k in / 2.5k out + pair check 9k in / 3k out) | Consolidation, current (~22k in / ~5.5k out) | Per save, proposed (measured 2.0k in / 27 out) | Per save, current (measured 3.05k in / 59 out) |
 |-------|-------------|-----|-----|-----|-----|
 | claude-haiku-4-5 (app default) | 1 / 5 | $0.043 | $0.050 | $0.0021 | $0.0033 |
-| claude-haiku-5-5 | 0.10 / 0.50 | $0.004 | $0.005 | $0.0002 | $0.0003 |
+| **claude-haiku-5-5 (proposed default)** | 0.10 / 0.50 (prompts ≤ 100k tokens) | **$0.004** | $0.005 | **$0.0002** | $0.0003 |
+| claude-sonnet-5-5 (opt-in "thorough") | 2 / 10 | $0.086 | $0.099 | $0.0042 | $0.0067 |
 | claude-sonnet-5 | 2 / 10 | $0.086 | $0.099 | $0.0042 | $0.0067 |
 | claude-opus-5-5 | 4 / 20 | $0.17 | $0.20 | $0.0085 | $0.013 |
 | gpt-5.6-luna (app default) | 0.20 / 1.20 | $0.010 | $0.011 | $0.0004 | $0.0007 |
@@ -576,7 +726,8 @@ half the size of the raw list (measured 1,980 vs 3,050 input tokens per save).
 
 ## Testing
 
-- Unit: `tag_normalize` (shipped on this branch: 7 tests). Also resolver lookup order,
+- Unit: `tag_normalize` (on this branch: 7 tests); the `LlmClient` adapters, router and the two
+  use cases on top (on this branch: 11 tests, no network). Also resolver lookup order,
   merge/rename/delete/undo on a stub repository, and consolidation validation for unknown tags,
   claimed tags, a non-member canonical, and singleton groups.
 - Repository: alias upsert and lookup, batch apply and undo in one transaction, and undo with
@@ -592,8 +743,11 @@ half the size of the raw list (measured 1,980 vs 3,050 input tokens per save).
 1. Normalizer, resolver, alias tables and migration, write-path resolution. No UI change except the
    banner. Biggest win, no LLM.
 2. Filter bar (top N + More + multi-select) and the `/tags` library page with manual merge and undo.
-3. Suggestion prompt and schema change.
-4. LLM consolidation as a background job with the review screen. Remove the old one-click button.
+3. The `LlmClient` port and adapters wired in `main.rs`, `LlmEnricher` moved onto it, the suggestion
+   prompt and enum schema, and the Haiku 5.5 default. The hybrid search work can start using the
+   port from here.
+4. LLM consolidation as a background job with the review screen, on the port. Remove the old
+   one-click button, `TagConsolidator` and its adapters.
 5. Optional: Proposal B verifier, if review load warrants it.
 
 ## Spend log
@@ -605,19 +759,26 @@ half the size of the raw list (measured 1,980 vs 3,050 input tokens per save).
 | Pair check on 287 string candidates | local | 287 | 34,200 | 287 | 0 |
 | Save-time suggestions, current prompt | local | 20 | 61,000 | 1,180 | 0 |
 | Save-time suggestions, proposed prompt | local | 20 | 39,600 | 540 | 0 |
-| Hosted models, decision APIs | — | 0 | 0 | 0 | **0** (no keys available; $10 budget unused) |
+| Port plumbing check: `hosted_eval.py` suggestions (2 bookmarks) and pair check (110 tags) | local | — | — | — | 0 |
+| Hosted models, decision APIs | — | 0 | 0 | 0 | **0** so far. The Haiku 5.5 run is capped at $3 by its spend guard; the dry-run worst case is $0.08. |
 
 ## Open items
 
-- **Hosted comparison (blocked on keys).** The $10 budget is approved, but no Anthropic, OpenAI or
-  TypeSafe key was available to this run. Once keys are in the environment, the same harness
-  measures them unchanged:
-  `python3 scripts/tag-lab/consolidate.py --provider anthropic --model claude-sonnet-5 --run sonnet5`,
-  then `measure.py out/sonnet5.groups.json`, and the same for `claude-haiku-4-5-20251001`,
-  `gpt-5.6-luna` and `gpt-5.6-terra`. `verify.py` and `suggest.py` support only llama.cpp so
-  far; their hosted variants (a batched structured pair check, and the enum suggestion schema) are
-  a small addition. Estimated total for 4 models × (consolidation + pair check + 20 suggestions) is
-  under $1.
+- **Hosted Haiku 5.5 run (helper).** From a clean clone of this branch, on macOS with the system
+  `python3` (3.9 or newer). No Postgres, Rust or pip packages are needed; it reads the committed
+  seed files:
+
+  ```sh
+  git clone -b spec-tag-management https://github.com/willisrocks/boopmark.git && cd boopmark
+  python3 scripts/tag-lab/hosted_eval.py --dry-run            # no calls, prints the worst case
+  ANTHROPIC_API_KEY=... python3 scripts/tag-lab/hosted_eval.py
+  # optional OpenAI comparison:
+  OPENAI_API_KEY=... python3 scripts/tag-lab/hosted_eval.py --provider openai --model gpt-5.6-luna
+  git add scripts/tag-lab/results/*.json && git commit -m "tag-lab: hosted results" && git push
+  ```
+
+  Expected cost: about $0.02–0.05 for Haiku 5.5 (worst case $0.08), and under $0.15 for luna. Each
+  run is aborted before any call that could pass $3.
 - **Decision API access.** The OpenAI Decisions guide says GA, but secondary reports from October
   describe per-account enablement. Check with one request before building Proposal B on it.
 - **Real library check.** Run the normalizer over Chris's production tag list (read-only
