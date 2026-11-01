@@ -132,29 +132,29 @@ with `pg_trgm` and pgvector ≥ 0.8 (`halfvec`, `hnsw.iterative_scan`).
 
 ## Tasks
 
-- [ ] **1. Migration 018** `migrations/018_bookmark_chunks_vector.sql`:
+- [x] **1. Migration 018** `migrations/018_bookmark_chunks_vector.sql`:
   `CREATE EXTENSION IF NOT EXISTS vector`, `bookmark_chunks` (halfvec, no
   fixed size, `model`), user index, partial HNSW indexes for 1024 and 384,
   the embed queue columns and index, and the replaced trigger function.
-- [ ] **2. Follow-ups (a)-(d)** with tests: extraction permit, spaced minus,
+- [x] **2. Follow-ups (a)-(d)** with tests: extraction permit, spaced minus,
   host-ranked claim, SVG refusal and `/uploads` headers.
-- [ ] **3. Chunker** `domain/chunking.rs` with unit tests: windows, overlap,
+- [x] **3. Chunker** `domain/chunking.rs` with unit tests: windows, overlap,
   header, chunk cap, character cap, short-text and metadata chunk.
-- [ ] **4. Embed queue port and Postgres adapter**: claim, store chunks,
+- [x] **4. Embed queue port and Postgres adapter**: claim, store chunks,
   record failure; `store_article` resets `embedded_model` on a changed
   hash.
-- [ ] **5. `EmbedWorker`** with a stub embedder: chunks per bookmark,
+- [x] **5. `EmbedWorker`** with a stub embedder: chunks per bookmark,
   metadata chunk, retry schedule, permanent failure, rate limit, spend log,
   disabled embedder spawns nothing. Wire it in `main.rs`.
-- [ ] **6. Vector leg** in `search_sql`, query embedding with timeout in
+- [x] **6. Vector leg** in `search_sql`, query embedding with timeout in
   `SearchService`, semantic label and chunk snippet; unit tests with a stub
   embedder (timeout, error, disabled).
-- [ ] **7. Settings → Search index panel**, retry all, refetch, owner line.
-- [ ] **8. DB tests** (pgvector): chunks stored and replaced, three-leg
+- [x] **7. Settings → Search index panel**, retry all, refetch, owner line.
+- [x] **8. DB tests** (pgvector): chunks stored and replaced, three-leg
   query, model filter, user isolation, tag filter and exclusion on the
   vector leg, cascade, embed claim and stale write; timeout fallback.
   Extend the CI step's filter.
-- [ ] **9. Eval**: `app_eval.py` waits for embeddings; run
+- [x] **9. Eval**: `app_eval.py` waits for embeddings; run
   `--features local-embeddings` (bge-small) on the local DB and record
   nDCG@10 against the spec's 0.925. Docs: README, `.env.example`, the
   search-eval README, the local-embeddings image follow-up note.
