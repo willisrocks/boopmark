@@ -1,0 +1,38 @@
+<li data-testid="review-row" data-canonical="{{ row.canonical }}" data-confidence="{{ row.confidence }}" class="flex flex-col gap-3 rounded-lg border border-gray-700 bg-[#0f1117] p-4 sm:flex-row sm:items-start">
+    <input type="hidden" name="shown:{{ row.id }}" value="{{ row.shown }}" form="review-form">
+    <input
+        type="checkbox"
+        name="ids"
+        value="{{ row.id }}"
+        form="review-form"
+        data-review-checkbox
+        aria-label="Merge into {{ row.canonical }}"
+        {% if row.prechecked %}checked{% endif %}
+        class="mt-1 h-4 w-4 flex-none rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500"
+    >
+    <div class="min-w-0 flex-1 space-y-2">
+        <div class="flex flex-wrap gap-1.5" data-testid="review-row-members">
+            {% for chip in row.chips %}
+            <span class="inline-flex items-center gap-1 rounded-full bg-gray-800 px-2.5 py-0.5 text-xs text-gray-200">{{ chip.tag }}<span class="text-gray-500">{{ chip.count }}</span></span>
+            {% endfor %}
+        </div>
+        <label class="flex flex-wrap items-center gap-2 text-sm text-gray-400">
+            <span>Merge into</span>
+            <input
+                type="text"
+                name="canonical:{{ row.id }}"
+                value="{{ row.canonical }}"
+                form="review-form"
+                maxlength="100"
+                data-testid="review-row-canonical"
+                class="w-48 rounded-lg border border-gray-700 bg-[#1e2235] px-2 py-1 text-sm text-gray-100 focus:border-blue-500 focus:outline-none"
+            >
+        </label>
+        <p class="text-xs text-gray-500">
+            <span class="rounded bg-gray-800 px-1.5 py-0.5 text-gray-300">{{ row.source }}</span>
+            <span class="ml-1">confidence {{ row.confidence }}</span>
+            <span class="ml-1">· changes up to {{ row.bookmarks }} bookmark{% if row.bookmarks != 1 %}s{% endif %}</span>
+            {% if let Some(title) = row.sample_title %}<span class="ml-1">· e.g. “{{ title }}”</span>{% endif %}
+        </p>
+    </div>
+</li>

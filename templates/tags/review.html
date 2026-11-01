@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Review tag merges - BoopMark{% endblock %}
+{% block content %}
+{% include "components/header.html" %}
+
+<main class="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8" data-testid="tag-review-page">
+    <a href="/tags" class="text-sm text-gray-400 hover:text-gray-200">← Tag library</a>
+    <div class="mt-2 mb-6">
+        <h1 class="text-2xl font-bold text-white">Review tag merges</h1>
+        <p class="mt-1 text-sm text-gray-400">Suggested merges of duplicate tags. Nothing changes until you apply the ones you check, and every apply can be undone.</p>
+    </div>
+
+    {% if let Some(message) = notice %}
+    <div data-testid="review-notice" class="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+        <span>{{ message }}</span>
+        {% if let Some(batch) = applied_batch %}
+        <form method="post" action="/tags/review/undo/{{ batch }}">
+            <button type="submit" data-testid="review-undo-applied" class="rounded-lg border border-emerald-400/50 px-3 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-500/20">Undo</button>
+        </form>
+        {% endif %}
+    </div>
+    {% endif %}
+    {% if let Some(message) = error %}
+    <div data-testid="review-error" class="mb-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{{ message }}</div>
+    {% endif %}
+
+    <section class="mb-6 space-y-3 rounded-xl border border-gray-700 bg-[#1e2235] p-5 sm:p-6">
+        <div class="flex flex-col gap-3 sm:flex-row">
+            <form method="post" action="/tags/review/run">
+                <button
+                    type="submit"
+                    data-testid="review-run-ai"
+                    class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                    {% if !has_provider %}disabled title="Add an AI provider key and enable AI in Settings first."{% endif %}
+                >Find duplicates with AI</button>
+            </form>
+            <form method="post" action="/tags/review/normalize">
+                <button type="submit" data-testid="review-run-normalize" class="w-full rounded-lg border border-gray-600 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-700 sm:w-auto">Find spelling variants</button>
+            </form>
+        </div>
+        {% if !has_provider %}
+        <p class="text-xs text-gray-500">AI suggestions use your own provider key. <a href="/settings#ai-models" class="text-blue-400 hover:text-blue-300">Set one up in Settings</a>.</p>
+        {% endif %}
+        {% include "tags/review_status.html" %}
+    </section>
+
+    <form id="review-form" method="post" action="/tags/review/apply"></form>
+
+    {% if check_rows.is_empty() && high_rows.is_empty() %}
+    <div data-testid="review-empty" class="rounded-xl border border-dashed border-gray-700 px-6 py-10 text-center text-sm text-gray-400">
+        No merge suggestions right now.
+    </div>
+    {% else %}
+    {% if !check_rows.is_empty() %}
+    <section data-testid="review-check-these" class="mb-6">
+        <div class="mb-3 flex items-center justify-between gap-3">
+            <div>
+                <h2 class="text-lg font-semibold text-white">Check these</h2>
+                <p class="text-sm text-gray-400">Probably the same tag, but some are broader or overlapping topics. Not applied unless you check them.</p>
+            </div>
+            <button type="button" data-testid="review-select-all" data-select-all class="flex-none rounded-lg border border-gray-600 px-3 py-1.5 text-sm text-gray-200 hover:bg-gray-700">Select all</button>
+        </div>
+        <ul class="space-y-3" role="list">
+            {% for row in check_rows %}
+            {% include "tags/review_row.html" %}
+            {% endfor %}
+        </ul>
+    </section>
+    {% endif %}
+    {% if !high_rows.is_empty() %}
+    <section data-testid="review-high" class="mb-6">
+        <div class="mb-3">
+            <h2 class="text-lg font-semibold text-white">Suggested merges</h2>
+            <p class="text-sm text-gray-400">Same tag, different spelling or name. Checked for you; uncheck any you want to keep apart.</p>
+        </div>
+        <ul class="space-y-3" role="list">
+            {% for row in high_rows %}
+            {% include "tags/review_row.html" %}
+            {% endfor %}
+        </ul>
+    </section>
+    {% endif %}
+
+    <div class="sticky bottom-0 -mx-4 flex items-center gap-3 border-t border-gray-800 bg-[#0f1117] px-4 py-3 sm:-mx-6 sm:px-6">
+        <button type="submit" form="review-form" data-testid="review-apply" class="flex-1 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none">Apply <span data-apply-count>0</span> <span data-apply-noun>merges</span></button>
+        <button type="submit" form="review-form" formaction="/tags/review/dismiss" data-testid="review-dismiss" class="flex-1 rounded-lg border border-gray-600 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-700 sm:flex-none">Dismiss checked</button>
+    </div>
+    {% endif %}
+
+    {% if !batches.is_empty() %}
+    <section data-testid="review-history" class="mt-8">
+        <h2 class="mb-3 text-lg font-semibold text-white">Recent cleanups</h2>
+        <ul class="space-y-2" role="list">
+            {% for batch in batches %}
+            <li data-testid="review-batch" class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-700 bg-[#1e2235] px-4 py-3 text-sm">
+                <span class="text-gray-300">{{ batch.label }}: {{ batch.merges }} merge{% if batch.merges != 1 %}s{% endif %}, {{ batch.bookmarks }} bookmark{% if batch.bookmarks != 1 %}s{% endif %} · {{ batch.when }}</span>
+                {% if batch.undone %}
+                <span class="text-xs text-gray-500">Undone</span>
+                {% else %}
+                <form method="post" action="/tags/review/undo/{{ batch.id }}">
+                    <button type="submit" data-testid="review-undo" class="rounded-lg border border-gray-600 px-3 py-1 text-xs font-medium text-gray-200 hover:bg-gray-700">Undo</button>
+                </form>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% endif %}
+</main>
+
+<script>
+(() => {
+    const boxes = () => Array.from(document.querySelectorAll("[data-review-checkbox]"));
+    const update = () => {
+        const checked = boxes().filter((box) => box.checked).length;
+        document.querySelectorAll("[data-apply-count]").forEach((el) => { el.textContent = String(checked); });
+        document.querySelectorAll("[data-apply-noun]").forEach((el) => { el.textContent = checked === 1 ? "merge" : "merges"; });
+        const apply = document.querySelector("[data-testid='review-apply']");
+        if (apply) apply.disabled = checked === 0;
+    };
+    document.addEventListener("change", (event) => {
+        if (event.target.matches && event.target.matches("[data-review-checkbox]")) update();
+    });
+    document.querySelectorAll("[data-select-all]").forEach((button) => {
+        button.addEventListener("click", () => {
+            button.closest("section").querySelectorAll("[data-review-checkbox]").forEach((box) => { box.checked = true; });
+            update();
+        });
+    });
+    update();
+})();
+</script>
+{% endblock %}

@@ -1,6 +1,4 @@
 use super::PostgresPool;
-use super::lock_user_tags;
-use super::tag_alias_repo::repoint_aliases;
 use crate::domain::bookmark::*;
 use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::{
@@ -292,18 +290,6 @@ impl BookmarkRepository for PostgresPool {
         Ok(())
     }
 
-    async fn tags_with_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT unnest(tags) AS tag, COUNT(*) AS count FROM bookmarks WHERE user_id = $1 GROUP BY tag ORDER BY count DESC",
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DomainError::Internal(e.to_string()))?;
-
-        Ok(rows)
-    }
-
     async fn export_all(&self, user_id: Uuid) -> Result<Vec<Bookmark>, DomainError> {
         sqlx::query_as::<_, Bookmark>(
             "SELECT id, user_id, url, title, description, image_url, override_image_url, domain, tags, created_at, updated_at
@@ -472,107 +458,6 @@ impl BookmarkRepository for PostgresPool {
         .map_err(|e| DomainError::Internal(e.to_string()))?
         .ok_or(DomainError::NotFound)?;
         Ok(old)
-    }
-
-    async fn tag_samples(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError> {
-        use crate::domain::ports::tag_consolidator::TagSample;
-
-        let rows: Vec<(String, i64, Vec<String>)> = sqlx::query_as(
-            "WITH expanded AS (
-                 SELECT id, title, created_at, unnest(tags) AS tag
-                 FROM bookmarks
-                 WHERE user_id = $1
-             ),
-             counts AS (
-                 SELECT tag, COUNT(*) AS count
-                 FROM expanded
-                 GROUP BY tag
-             ),
-             ranked AS (
-                 SELECT
-                     tag,
-                     title,
-                     ROW_NUMBER() OVER (PARTITION BY tag ORDER BY created_at DESC, id DESC) AS rn
-                 FROM expanded
-                 WHERE title IS NOT NULL AND title <> ''
-             )
-             SELECT
-                 c.tag,
-                 c.count,
-                 COALESCE(
-                     ARRAY_AGG(r.title ORDER BY r.rn) FILTER (WHERE r.rn IS NOT NULL),
-                     ARRAY[]::TEXT[]
-                 ) AS sample_titles
-             FROM counts c
-             LEFT JOIN ranked r ON r.tag = c.tag AND r.rn <= 3
-             GROUP BY c.tag, c.count
-             ORDER BY c.count DESC, c.tag ASC",
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DomainError::Internal(e.to_string()))?;
-
-        Ok(rows
-            .into_iter()
-            .map(|(tag, count, sample_titles)| TagSample {
-                tag,
-                count,
-                sample_titles,
-            })
-            .collect())
-    }
-
-    async fn list_id_tags(&self, user_id: Uuid) -> Result<Vec<(Uuid, Vec<String>)>, DomainError> {
-        let rows: Vec<(Uuid, Vec<String>)> =
-            sqlx::query_as("SELECT id, tags FROM bookmarks WHERE user_id = $1")
-                .bind(user_id)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| DomainError::Internal(e.to_string()))?;
-        Ok(rows)
-    }
-
-    async fn update_tags_bulk(
-        &self,
-        user_id: Uuid,
-        updates: &[(Uuid, Vec<String>)],
-        alias_targets: &[(String, String)],
-    ) -> Result<u64, DomainError> {
-        if updates.is_empty() && alias_targets.is_empty() {
-            return Ok(0);
-        }
-
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| DomainError::Internal(e.to_string()))?;
-        lock_user_tags(&mut tx, user_id).await?;
-
-        let mut rows: u64 = 0;
-        for (id, new_tags) in updates {
-            let r = sqlx::query(
-                "UPDATE bookmarks
-                 SET tags = $1, updated_at = now()
-                 WHERE id = $2 AND user_id = $3",
-            )
-            .bind(new_tags)
-            .bind(id)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| DomainError::Internal(e.to_string()))?;
-            rows += r.rows_affected();
-        }
-        repoint_aliases(&mut tx, user_id, alias_targets).await?;
-        tx.commit()
-            .await
-            .map_err(|e| DomainError::Internal(e.to_string()))?;
-        Ok(rows)
     }
 }
 

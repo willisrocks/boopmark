@@ -32,7 +32,7 @@ macro_rules! string_enum {
         }
 
         impl $name {
-            pub fn as_str(self) -> &'static str {
+            pub const fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $text),+
                 }
@@ -50,6 +50,7 @@ macro_rules! string_enum {
         }
     };
 }
+pub(crate) use string_enum;
 
 string_enum!(
     /// Who decided that a spelling belongs to a canonical tag.
@@ -378,7 +379,9 @@ pub fn resolve_writes(
 /// stray `" rust "` can be merged into `rust`. The canonical is trimmed and
 /// must be a valid tag. A spelling may be merged into only one tag. Chains
 /// are followed (`a -> b` plus `b -> c` maps `a` to `c`), and cycles are
-/// rejected. A merge with nothing to rewrite is an error.
+/// rejected. Spellings that share a compact key must end at the same tag,
+/// because one alias key points at one canonical. A merge with nothing to
+/// rewrite is an error.
 pub fn merge_mapping(merges: &[TagMerge]) -> Result<BTreeMap<String, String>, DomainError> {
     let mut direct: BTreeMap<String, String> = BTreeMap::new();
     for merge in merges {
@@ -421,6 +424,30 @@ pub fn merge_mapping(merges: &[TagMerge]) -> Result<BTreeMap<String, String>, Do
         }
         resolved.insert(source.clone(), target.clone());
     }
+
+    // One alias key points at one canonical: two spellings with the same
+    // compact key cannot end up at different tags, and a spelling cannot
+    // leave a key that a target of this batch keeps.
+    let mut key_targets: HashMap<String, (&str, &str)> = HashMap::new();
+    let ends = resolved
+        .iter()
+        .map(|(source, target)| (source.as_str(), target.as_str()))
+        .chain(
+            resolved
+                .values()
+                .map(|target| (target.as_str(), target.as_str())),
+        );
+    for (spelling, target) in ends {
+        if let Some((other, other_target)) =
+            key_targets.insert(compact_key(spelling), (spelling, target))
+            && other_target != target
+        {
+            return Err(DomainError::InvalidInput(format!(
+                "\"{other}\" and \"{spelling}\" are spellings of one tag but merge into \
+                 \"{other_target}\" and \"{target}\""
+            )));
+        }
+    }
     Ok(resolved)
 }
 
@@ -457,6 +484,28 @@ pub fn undo_tags(current: &[String], before: &[String], after: &[String]) -> Vec
         }
     }
     out
+}
+
+/// The user's canonical tags with bookmark counts, most used first. Each
+/// L1-L3 group counts as one tag under its display form, so spellings that
+/// still await review are offered once.
+pub fn canonical_tag_counts(tag_counts: &[(String, i64)]) -> Vec<(String, i64)> {
+    let mut out: Vec<(String, i64)> = group_tags(tag_counts, Level::Plural)
+        .into_iter()
+        .filter_map(|group| Some((clean_tag(&group.canonical)?.to_string(), group.count)))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
+/// What `raw` would be stored as on a new bookmark, without remembering
+/// any alias: the read-only form of [`resolve_tags`].
+pub fn preview_tags(
+    raw: &[String],
+    aliases: &[TagAlias],
+    tag_counts: &[(String, i64)],
+) -> Vec<String> {
+    resolve_tags(raw, &[], &mut TagIndex::new(aliases, tag_counts)).0
 }
 
 /// The L1-L3 groups with more than one spelling, as proposals. This is what
@@ -676,6 +725,40 @@ mod tests {
         assert!(merge_mapping(&[merge("b", &["a"]), merge("a", &["b"])]).is_err());
         assert!(merge_mapping(&[merge("a", &["a"])]).is_err());
         assert!(merge_mapping(&[merge(" ", &["a"])]).is_err());
+    }
+
+    #[test]
+    fn canonical_tags_count_each_group_once_and_previews_write_nothing() {
+        let counts = counts(&[("GitHub", 5), ("github", 2), ("rust", 4), ("Rust", 1)]);
+        assert_eq!(
+            canonical_tag_counts(&counts),
+            vec![("GitHub".to_string(), 7), ("rust".to_string(), 5)]
+        );
+        let aliases = [alias("gh", "GitHub")];
+        assert_eq!(
+            preview_tags(&s(&["gh", "RUST", " new tag ", "\u{7}"]), &aliases, &counts),
+            ["GitHub", "rust", "new tag"]
+        );
+    }
+
+    #[test]
+    fn merge_mapping_rejects_one_key_merged_into_two_tags() {
+        // `JS` and `js` share the alias key `js`.
+        assert!(
+            merge_mapping(&[merge("javascript", &["JS"]), merge("java script", &["js"])]).is_err()
+        );
+        // `Go` leaves the key `go`, which the target `go` keeps.
+        assert!(merge_mapping(&[merge("go", &["golang"]), merge("Google", &["Go"])]).is_err());
+        // Same key and same target, or a case-only rename, are fine.
+        assert_eq!(
+            merge_mapping(&[merge("GitHub", &["github", "Github", "gh"])])
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(
+            merge_mapping(&[merge("javascript", &["JS"]), merge("javascript", &["js"])]).is_ok()
+        );
     }
 
     #[test]

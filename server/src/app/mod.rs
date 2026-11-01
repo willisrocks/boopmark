@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod bookmarks;
 pub mod enrichment;
+pub mod image_prompt;
 pub mod ingest;
 pub mod invite;
 pub mod search;
@@ -10,3 +11,4 @@ pub mod settings;
 #[allow(dead_code)]
 pub mod tag_alias;
 pub mod tag_consolidation;
+pub mod tag_llm;

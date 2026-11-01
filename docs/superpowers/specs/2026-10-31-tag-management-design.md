@@ -594,7 +594,7 @@ has reviewed, the library page shows a banner: "600 spellings can merge into 303
 
 Triggered from the library page ("Find duplicates with AI"). It runs as a background job, not inside
 the HTMX request. The page polls the job, so the 60 s client timeout no longer matters. If the job
-and its stored proposals need their own tables, they go in migration `018_tag_consolidation.sql`.
+and its stored proposals need their own tables, they go in migration `017_tag_consolidation.sql`.
 
 **Input.** The canonical tags after normalization (not raw spellings), each with its bookmark count
 and one sample title, delimited as untrusted data, as today. With 303 tags this measured 6,440

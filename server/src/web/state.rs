@@ -34,12 +34,12 @@ pub struct AppState {
     pub settings: Arc<SettingsService<PostgresPool>>,
     pub config: Arc<Config>,
     pub enrichment: Arc<EnrichmentService<FallbackMetadataExtractor, PostgresPool>>,
-    pub tag_consolidation: Arc<TagConsolidationService<PostgresPool, PostgresPool>>,
     pub tag_aliases: Arc<TagAliasService<PostgresPool>>,
+    /// Reviewed LLM consolidation: background runs and the review screen.
+    pub tag_consolidation: Arc<TagConsolidationService<PostgresPool, PostgresPool, PostgresPool>>,
     pub images_storage: ImageStorage,
     pub image_processing_slots: Arc<tokio::sync::Semaphore>,
     pub active_image_fix_jobs: Arc<Mutex<HashSet<Uuid>>>,
-    pub active_tag_consolidation_jobs: Arc<Mutex<HashSet<Uuid>>>,
     pub login_provider: Arc<dyn LoginProvider>,
     pub invites: Arc<InviteService<PostgresPool>>,
     /// Shared structured-output LLM port, routed by the user's provider.

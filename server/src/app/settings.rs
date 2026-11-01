@@ -269,7 +269,7 @@ where
                 return Ok(None);
             };
             prompt_assistant
-                .assist_image_prompt_with_provider(
+                .assist_image_prompt(
                     credentials.provider,
                     &credentials.api_key,
                     &credentials.model,
@@ -457,20 +457,19 @@ mod tests {
         last_upsert: Mutex<Option<LastUpsert>>,
     }
 
-    struct PromptAssistantStub {
-        marker: &'static str,
-    }
+    /// Answers with the provider it was asked to use.
+    struct PromptAssistantStub;
 
     impl LlmPromptAssistant for PromptAssistantStub {
         fn assist_image_prompt(
             &self,
+            provider: TextProvider,
             _api_key: &str,
             _model: &str,
             _context: ImageGenerationContext,
             _instruction: Option<String>,
-        ) -> Pin<Box<dyn Future<Output = Result<String, DomainError>> + Send + '_>> {
-            let marker = self.marker;
-            Box::pin(async move { Ok(marker.to_string()) })
+        ) -> crate::domain::ports::llm_client::BoxFuture<'_, Result<String, DomainError>> {
+            Box::pin(async move { Ok(provider.as_str().to_string()) })
         }
     }
 
@@ -567,12 +566,9 @@ mod tests {
     }
 
     #[test]
-    fn normalize_model_defaults_to_latest_full_haiku_id() {
-        assert_eq!(normalize_model(None), "claude-haiku-4-5-20251001");
-        assert_eq!(
-            normalize_model(Some("   ".into())),
-            "claude-haiku-4-5-20251001"
-        );
+    fn normalize_model_defaults_to_haiku_5_5() {
+        assert_eq!(normalize_model(None), "claude-haiku-5-5");
+        assert_eq!(normalize_model(Some("   ".into())), "claude-haiku-5-5");
     }
 
     #[test]
@@ -603,6 +599,7 @@ mod tests {
         for model in [
             "claude-opus-5",
             "claude-sonnet-5",
+            "claude-haiku-5-5",
             "claude-haiku-4-5-20251001",
         ] {
             let view = service
@@ -1136,14 +1133,8 @@ mod tests {
             .await
             .expect("save");
 
-        let prompt_router = crate::adapters::llm_router::LlmPromptAssistantRouter::new(
-            Arc::new(PromptAssistantStub {
-                marker: "anthropic",
-            }),
-            Arc::new(PromptAssistantStub { marker: "openai" }),
-        );
         let image_settings =
-            ConfiguredImageAiSettingsProvider::new(settings, Arc::new(prompt_router));
+            ConfiguredImageAiSettingsProvider::new(settings, Arc::new(PromptAssistantStub));
         let prompt = image_settings
             .assist_image_prompt(
                 user_id,

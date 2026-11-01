@@ -6,6 +6,7 @@ mod invite;
 mod legal;
 mod settings;
 pub(crate) mod shared;
+mod tag_review;
 pub(crate) mod tags;
 
 use axum::Router;
@@ -56,6 +57,7 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/users/{id}/deactivate", post(admin::deactivate_user))
         .merge(auth::routes())
         .merge(settings::routes())
+        .merge(tag_review::routes())
 }
 
 async fn home(MaybeUser(user): MaybeUser) -> axum::response::Redirect {

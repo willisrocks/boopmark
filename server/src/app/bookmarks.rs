@@ -439,10 +439,6 @@ where
         }
     }
 
-    pub async fn tags_with_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
-        self.repo.tags_with_counts(user_id).await
-    }
-
     pub async fn extract_metadata(&self, url: &str) -> Result<UrlMetadata, DomainError> {
         self.metadata.extract(url).await
     }
@@ -1303,12 +1299,6 @@ mod tests {
                 bookmarks.remove(index);
                 Ok(old)
             }
-            async fn tags_with_counts(
-                &self,
-                _user_id: Uuid,
-            ) -> Result<Vec<(String, i64)>, DomainError> {
-                Ok(vec![])
-            }
             async fn export_all(&self, user_id: Uuid) -> Result<Vec<Bookmark>, DomainError> {
                 Ok(self
                     .bookmarks
@@ -1395,45 +1385,6 @@ mod tests {
                 let old = bookmark.override_image_url.take();
                 bookmark.override_image_url = image_url.map(str::to_string);
                 Ok(old)
-            }
-            async fn tag_samples(
-                &self,
-                _user_id: Uuid,
-            ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError>
-            {
-                Ok(vec![])
-            }
-            async fn list_id_tags(
-                &self,
-                user_id: Uuid,
-            ) -> Result<Vec<(Uuid, Vec<String>)>, DomainError> {
-                Ok(self
-                    .bookmarks
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|b| b.user_id == user_id)
-                    .map(|b| (b.id, b.tags.clone()))
-                    .collect())
-            }
-            async fn update_tags_bulk(
-                &self,
-                user_id: Uuid,
-                updates: &[(Uuid, Vec<String>)],
-                _alias_targets: &[(String, String)],
-            ) -> Result<u64, DomainError> {
-                let mut bookmarks = self.bookmarks.lock().unwrap();
-                let mut rows = 0u64;
-                for (id, new_tags) in updates {
-                    if let Some(b) = bookmarks
-                        .iter_mut()
-                        .find(|b| b.id == *id && b.user_id == user_id)
-                    {
-                        b.tags = new_tags.clone();
-                        rows += 1;
-                    }
-                }
-                Ok(rows)
             }
         }
 
@@ -2290,12 +2241,6 @@ mod tests {
                 b.remove(index);
                 Ok(old)
             }
-            async fn tags_with_counts(
-                &self,
-                _user_id: Uuid,
-            ) -> Result<Vec<(String, i64)>, DomainError> {
-                Ok(vec![])
-            }
             async fn export_all(&self, user_id: Uuid) -> Result<Vec<Bookmark>, DomainError> {
                 if self.export_error {
                     return Err(DomainError::Internal("export failed".to_string()));
@@ -2368,45 +2313,6 @@ mod tests {
                 let old = bookmark.override_image_url.take();
                 bookmark.override_image_url = image_url.map(str::to_string);
                 Ok(old)
-            }
-            async fn tag_samples(
-                &self,
-                _user_id: Uuid,
-            ) -> Result<Vec<crate::domain::ports::tag_consolidator::TagSample>, DomainError>
-            {
-                Ok(vec![])
-            }
-            async fn list_id_tags(
-                &self,
-                user_id: Uuid,
-            ) -> Result<Vec<(Uuid, Vec<String>)>, DomainError> {
-                Ok(self
-                    .bookmarks
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|b| b.user_id == user_id)
-                    .map(|b| (b.id, b.tags.clone()))
-                    .collect())
-            }
-            async fn update_tags_bulk(
-                &self,
-                user_id: Uuid,
-                updates: &[(Uuid, Vec<String>)],
-                _alias_targets: &[(String, String)],
-            ) -> Result<u64, DomainError> {
-                let mut bookmarks = self.bookmarks.lock().unwrap();
-                let mut rows = 0u64;
-                for (id, new_tags) in updates {
-                    if let Some(b) = bookmarks
-                        .iter_mut()
-                        .find(|b| b.id == *id && b.user_id == user_id)
-                    {
-                        b.tags = new_tags.clone();
-                        rows += 1;
-                    }
-                }
-                Ok(rows)
             }
         }
 

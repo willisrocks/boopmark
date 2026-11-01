@@ -7,12 +7,15 @@
 //! every such change is one batch that `undo_batch` reverts.
 
 use crate::domain::error::DomainError;
+use crate::domain::ports::llm_client::BoxFuture;
 use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::ports::tag_resolver::{ResolveFuture, TagResolver};
+use crate::domain::ports::tag_vocabulary::TagVocabulary;
 use crate::domain::tag_alias::{
     ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMerge,
-    TagMergeProposal, TagWrite, normalization_proposals,
+    TagMergeProposal, TagWrite, canonical_tag_counts, normalization_proposals, preview_tags,
 };
+use crate::domain::tag_consolidation::{ReviewedRow, TagSample};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -114,6 +117,21 @@ where
         self.repo.dismiss_proposals(user_id, ids).await
     }
 
+    /// Apply the rows checked on the review screen, exactly as shown, as
+    /// one undoable batch. See [`TagAliasRepository::apply_reviewed`].
+    pub async fn apply_reviewed(
+        &self,
+        user_id: Uuid,
+        rows: &[ReviewedRow],
+    ) -> Result<TagChangeBatch, DomainError> {
+        self.repo.apply_reviewed(user_id, rows).await
+    }
+
+    /// Each distinct tag with its count and a sample title.
+    pub async fn tag_samples(&self, user_id: Uuid) -> Result<Vec<TagSample>, DomainError> {
+        self.repo.tag_samples(user_id).await
+    }
+
     pub async fn list_proposals(
         &self,
         user_id: Uuid,
@@ -141,6 +159,30 @@ where
 {
     fn resolve_tags(&self, user_id: Uuid, writes: Vec<TagWrite>) -> ResolveFuture<'_> {
         Box::pin(async move { self.resolve_writes(user_id, &writes).await })
+    }
+}
+
+impl<R> TagVocabulary for TagAliasService<R>
+where
+    R: TagAliasRepository + Send + Sync + 'static,
+{
+    fn canonical_tags(
+        &self,
+        user_id: Uuid,
+    ) -> BoxFuture<'_, Result<Vec<(String, i64)>, DomainError>> {
+        Box::pin(async move { Ok(canonical_tag_counts(&self.repo.tag_counts(user_id).await?)) })
+    }
+
+    fn preview_tags(
+        &self,
+        user_id: Uuid,
+        tags: Vec<String>,
+    ) -> BoxFuture<'_, Result<Vec<String>, DomainError>> {
+        Box::pin(async move {
+            let aliases = self.repo.list_aliases(user_id).await?;
+            let counts = self.repo.tag_counts(user_id).await?;
+            Ok(preview_tags(&tags, &aliases, &counts))
+        })
     }
 }
 
@@ -179,6 +221,10 @@ mod tests {
 
         async fn tag_counts(&self, _user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError> {
             Ok(self.counts.clone())
+        }
+
+        async fn tag_samples(&self, _user_id: Uuid) -> Result<Vec<TagSample>, DomainError> {
+            unimplemented!("not used by these tests")
         }
 
         async fn resolve_writes(
@@ -221,6 +267,14 @@ mod tests {
             _status: Option<ProposalStatus>,
         ) -> Result<Vec<TagMergeProposal>, DomainError> {
             Ok(Vec::new())
+        }
+
+        async fn apply_reviewed(
+            &self,
+            _user_id: Uuid,
+            _rows: &[ReviewedRow],
+        ) -> Result<TagChangeBatch, DomainError> {
+            unimplemented!("not used by these tests")
         }
 
         async fn dismiss_proposals(

@@ -3,6 +3,7 @@ use crate::domain::tag_alias::{
     ChangeKind, NewTagMergeProposal, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch,
     TagMerge, TagMergeProposal, TagWrite,
 };
+use crate::domain::tag_consolidation::{ReviewedRow, TagSample};
 use uuid::Uuid;
 
 /// Storage for aliases, merge proposals and undoable change batches.
@@ -17,6 +18,10 @@ pub trait TagAliasRepository: Send + Sync {
 
     /// Each distinct tag on the user's bookmarks with its bookmark count.
     async fn tag_counts(&self, user_id: Uuid) -> Result<Vec<(String, i64)>, DomainError>;
+
+    /// Each distinct tag with its bookmark count and the title of its most
+    /// recent titled bookmark, for consolidation and the review screen.
+    async fn tag_samples(&self, user_id: Uuid) -> Result<Vec<TagSample>, DomainError>;
 
     /// Resolve bookmark tag writes to canonical tags with
     /// [`crate::domain::tag_alias::resolve_writes`] and remember the new
@@ -55,6 +60,18 @@ pub trait TagAliasRepository: Send + Sync {
         &self,
         user_id: Uuid,
         ids: &[Uuid],
+    ) -> Result<TagChangeBatch, DomainError>;
+
+    /// Apply the rows checked on the review screen as one batch, in one
+    /// transaction under the per-user lock: the proposals pending now are
+    /// resolved through the current aliases, every row must still match
+    /// what the page showed ([`crate::domain::tag_consolidation::plan_reviewed_apply`]),
+    /// and edited targets are saved with the apply. Fails without changes
+    /// otherwise.
+    async fn apply_reviewed(
+        &self,
+        user_id: Uuid,
+        rows: &[ReviewedRow],
     ) -> Result<TagChangeBatch, DomainError>;
 
     /// Apply merges that did not come from proposals (manual merge, rename).

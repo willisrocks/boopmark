@@ -8,6 +8,7 @@ pub mod session_repo;
 // Merge and undo are called by the /tags page and review screen (later steps).
 #[allow(dead_code)]
 pub mod tag_alias_repo;
+pub mod tag_consolidation_job_repo;
 pub mod user_repo;
 
 use sqlx::PgPool;
@@ -24,7 +25,7 @@ impl PostgresPool {
 }
 
 /// Serialize every tag change of one user (write-path resolution, merge,
-/// undo, the legacy consolidation) for the rest of the transaction.
+/// undo, proposal replacement) for the rest of the transaction.
 pub(super) async fn lock_user_tags(
     conn: &mut sqlx::PgConnection,
     user_id: uuid::Uuid,
@@ -34,5 +35,9 @@ pub(super) async fn lock_user_tags(
         .execute(conn)
         .await
         .map(|_| ())
-        .map_err(|e| crate::domain::error::DomainError::Internal(e.to_string()))
+        .map_err(db_err)
+}
+
+pub(super) fn db_err(e: sqlx::Error) -> crate::domain::error::DomainError {
+    crate::domain::error::DomainError::Internal(e.to_string())
 }

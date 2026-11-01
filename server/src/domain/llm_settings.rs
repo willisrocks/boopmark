@@ -16,14 +16,16 @@ pub struct ImageGenerationModelOption {
     pub value: &'static str,
 }
 
-pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
+/// Claude Haiku 5.5 is the tag spec's default for suggestions and consolidation
+/// (run at `effort: low`, see `ANTHROPIC_EFFORT`). Saved settings keep their model.
+pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-5-5";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6-luna";
 pub const DEFAULT_IMAGE_GENERATION_MODEL: &str = "gpt-image-2";
 
 // Claude Fable 5 is intentionally not offered for these short JSON tasks:
 // its adaptive thinking is always on and cannot be disabled, so its token and
 // retention behavior is not a safe fit for the low-latency bookmark path.
-pub const ANTHROPIC_MODEL_OPTIONS: [AnthropicModelOption; 3] = [
+pub const ANTHROPIC_MODEL_OPTIONS: [AnthropicModelOption; 4] = [
     AnthropicModelOption {
         label: "Claude Opus 5",
         value: "claude-opus-5",
@@ -31,6 +33,10 @@ pub const ANTHROPIC_MODEL_OPTIONS: [AnthropicModelOption; 3] = [
     AnthropicModelOption {
         label: "Claude Sonnet 5",
         value: "claude-sonnet-5",
+    },
+    AnthropicModelOption {
+        label: "Claude Haiku 5.5",
+        value: "claude-haiku-5-5",
     },
     AnthropicModelOption {
         label: "Claude Haiku 4.5",
@@ -131,13 +137,14 @@ mod tests {
 
     #[test]
     fn anthropic_model_metadata_matches_current_official_allow_list() {
-        assert_eq!(DEFAULT_ANTHROPIC_MODEL, "claude-haiku-4-5-20251001");
-        assert_eq!(ANTHROPIC_MODEL_OPTIONS.len(), 3);
+        assert_eq!(DEFAULT_ANTHROPIC_MODEL, "claude-haiku-5-5");
+        assert_eq!(ANTHROPIC_MODEL_OPTIONS.len(), 4);
         assert_eq!(
             ANTHROPIC_MODEL_OPTIONS.map(|option| option.value),
             [
                 "claude-opus-5",
                 "claude-sonnet-5",
+                "claude-haiku-5-5",
                 "claude-haiku-4-5-20251001",
             ]
         );

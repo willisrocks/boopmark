@@ -1,9 +1,9 @@
 //! One provider-neutral LLM port shared by every text feature: tag
 //! suggestions on save, tag consolidation, and later callers. Vendor adapters
 //! live in `adapters::llm_client`. The feature ports (`LlmEnricher`,
-//! `TagConsolidator`, `LlmPromptAssistant`) are meant to become thin use-case
-//! adapters on top of this one, instead of each vendor adapter
-//! re-implementing HTTP, auth and response parsing.
+//! `LlmPromptAssistant`) and tag consolidation are thin use cases on top of
+//! this one (`app::tag_llm`, `app::image_prompt`), so no feature re-implements
+//! vendor HTTP, auth or response parsing.
 
 use crate::domain::error::DomainError;
 use crate::domain::llm_settings::TextProvider;
