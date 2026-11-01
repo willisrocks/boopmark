@@ -12,12 +12,17 @@ use crate::domain::error::DomainError;
 
 pub use crate::domain::ports::llm_client::BoxFuture;
 
+/// The vector sizes the article-search schema has an HNSW index for
+/// (text-embedding-3 at 1,024, bge-small at 384). An embedder of any other
+/// size could not be searched, so it is refused at startup.
+pub const INDEXED_DIMENSIONS: [usize; 2] = [1024, 384];
+
 /// Models such as BGE, Voyage and Nomic embed queries and documents
 /// differently (a prefix or an `input_type`). Adapters also use it to pick a
 /// timeout: a query is on the request path, a document is background work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // Constructed by article search, which lands separately.
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub enum EmbedKind {
     Document,
     Query,

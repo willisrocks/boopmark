@@ -10,3 +10,4 @@ pub mod openai_image;
 pub mod postgres;
 pub mod screenshot;
 pub mod storage;
+pub mod vendor_http;

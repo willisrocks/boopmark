@@ -17,10 +17,11 @@
 //! `local` needs the `local-embeddings` cargo feature, so the default build
 //! carries no ONNX Runtime.
 
-use crate::adapters::llm_client::{http_status_error, transport_error};
+use crate::adapters::vendor_http::{KeyOwner, post_json, token_count};
 use crate::domain::error::DomainError;
-use crate::domain::ports::embedder::{BoxFuture, EmbedKind, Embedder, Embeddings};
-use reqwest::StatusCode;
+use crate::domain::ports::embedder::{
+    BoxFuture, EmbedKind, Embedder, Embeddings, INDEXED_DIMENSIONS,
+};
 use serde_json::{Value, json};
 use std::ops::Range;
 use std::sync::Arc;
@@ -33,9 +34,6 @@ const DEFAULT_OPENAI_MODEL: &str = "text-embedding-3-large";
 /// model alone does not change the vector space size.
 const DEFAULT_OPENAI_DIMENSIONS: usize = 1024;
 const DEFAULT_LOCAL_MODEL: &str = "BAAI/bge-small-en-v1.5";
-/// The vector sizes the article-search schema has an HNSW index for
-/// (te3 at 1,024, bge-small at 384). Any other size could not be searched.
-const INDEXED_DIMENSIONS: [usize; 2] = [1024, 384];
 /// The API accepts 2,048 inputs and 300k tokens per request; stay well below.
 const OPENAI_MAX_INPUTS: usize = 256;
 /// Every token covers at least one byte of UTF-8, so a byte cap below 300k
@@ -144,25 +142,14 @@ fn check_indexed(dims: usize) -> Result<(), DomainError> {
     }
     Err(DomainError::InvalidInput(format!(
         "{dims}-dimension embeddings have no search index; set EMBEDDING_DIMENSIONS \
-         (and EMBEDDING_MODEL) to a size the schema indexes: 1024 or 384"
+         (and EMBEDDING_MODEL) to a size the schema indexes: {INDEXED_DIMENSIONS:?}"
     )))
-}
-
-/// The key is the operator's: a rejected or rotated key is fixed by the
-/// operator, so 401 and 403 stay retryable instead of failing bookmarks for
-/// good. Other statuses map as for `LlmClient`.
-fn status_error(status: StatusCode) -> DomainError {
-    match status {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            DomainError::Internal(format!("{VENDOR} API returned HTTP {status}"))
-        }
-        _ => http_status_error(VENDOR, status),
-    }
 }
 
 /// `embed` returns no usage with an error, so tokens already billed for a
 /// failed call (an unusable answer, or earlier batches) are logged: counts
-/// only, never the inputs.
+/// only, never the inputs. Once `DomainError` can carry usage, it should
+/// travel with the error instead.
 fn log_billed_failure(usage_tokens: u32, error: &DomainError) {
     if usage_tokens > 0 {
         tracing::warn!(
@@ -204,20 +191,22 @@ impl EmbedderRouter {
                         "EMBEDDING_BACKEND=openai needs OPENAI_EMBEDDING_API_KEY".into(),
                     )
                 })?;
-                let embedder = OpenAiEmbedder::new(key, &settings.model, settings.dimensions)?;
-                check_indexed(embedder.dims())?;
-                Arc::new(embedder)
+                Arc::new(OpenAiEmbedder::new(
+                    key,
+                    &settings.model,
+                    settings.dimensions,
+                )?)
             }
             #[cfg(feature = "local-embeddings")]
             EmbeddingBackend::Local => {
                 // Checked before loading, which downloads the model.
                 let native = FastembedEmbedder::native_dims(&settings.model);
-                if settings.dimensions.is_some_and(|dims| dims != native) {
+                if settings.dimensions.is_some_and(|dims| Some(dims) != native) {
                     return Err(DomainError::InvalidInput(
                         "EMBEDDING_DIMENSIONS does not match the local model".into(),
                     ));
                 }
-                if native != 0 {
+                if let Some(native) = native {
                     check_indexed(native)?;
                 }
                 Arc::new(FastembedEmbedder::new(&settings.model)?)
@@ -229,6 +218,9 @@ impl EmbedderRouter {
                 ));
             }
         };
+        if inner.enabled() {
+            check_indexed(inner.dims())?;
+        }
         Ok(Self { inner })
     }
 }
@@ -358,38 +350,25 @@ impl OpenAiEmbedder {
         &self,
         batch: &[String],
         timeout: Duration,
-    ) -> Result<(Vec<Vec<f32>>, u32), DomainError> {
+    ) -> Result<(Vec<Vec<f32>>, u32), (DomainError, u32)> {
         let mut body = json!({"model": self.model, "input": batch, "encoding_format": "float"});
         if self.shortened {
             body["dimensions"] = json!(self.dims);
         }
-        let response = self
+        let request = self
             .client
             .post(&self.url)
             .bearer_auth(&self.api_key)
-            .timeout(timeout)
-            .json(&body)
-            .send()
+            .timeout(timeout);
+        // The operator's key: a rejected or rotated key stays retryable.
+        let payload = post_json(request, &body, VENDOR, KeyOwner::Operator)
             .await
-            .map_err(|error| transport_error(VENDOR, &error))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(status_error(status));
-        }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| transport_error(VENDOR, &error))?;
-        let payload: Value = serde_json::from_slice(&bytes).map_err(|_| {
-            DomainError::Internal(format!("{VENDOR} returned a malformed response"))
-        })?;
-        let tokens = payload
-            .pointer("/usage/total_tokens")
-            .and_then(Value::as_u64)
-            .map_or(0, |tokens| u32::try_from(tokens).unwrap_or(u32::MAX));
+            .map_err(|error| (error, 0))?;
+        // Billed even when the answer turns out unusable.
+        let tokens = token_count(&payload, "/usage/total_tokens");
         let vectors = self
             .parse_vectors(&payload, batch.len())
-            .inspect_err(|error| log_billed_failure(tokens, error))?;
+            .map_err(|error| (error, tokens))?;
         Ok((vectors, tokens))
     }
 
@@ -459,10 +438,12 @@ impl Embedder for OpenAiEmbedder {
             };
             let mut out = Embeddings::default();
             for range in self.batches(&inputs) {
-                let (vectors, tokens) = self
-                    .embed_batch(&inputs[range], timeout)
-                    .await
-                    .inspect_err(|error| log_billed_failure(out.usage_tokens, error))?;
+                let (vectors, tokens) = self.embed_batch(&inputs[range], timeout).await.map_err(
+                    |(error, billed)| {
+                        log_billed_failure(out.usage_tokens.saturating_add(billed), &error);
+                        error
+                    },
+                )?;
                 out.vectors.extend(vectors);
                 out.usage_tokens = out.usage_tokens.saturating_add(tokens);
             }
@@ -501,8 +482,8 @@ impl FastembedEmbedder {
     }
 
     /// The vector length of a supported model; 0 if fastembed lacks it.
-    fn native_dims(model_code: &str) -> usize {
-        Self::find(model_code).map_or(0, |info| info.dim)
+    fn native_dims(model_code: &str) -> Option<usize> {
+        Self::find(model_code).map(|info| info.dim)
     }
 
     /// `model_code` is the Hugging Face name, e.g. `BAAI/bge-small-en-v1.5`.
@@ -556,12 +537,19 @@ impl Embedder for FastembedEmbedder {
         Box::pin(async move {
             reject_empty(&inputs)?;
             let inputs: Vec<String> = inputs.into_iter().map(|t| format!("{prefix}{t}")).collect();
+            // The lock is taken per chunk, so a search query waits for one
+            // chunk of a long document job at most, not the whole job.
             let vectors = tokio::task::spawn_blocking(move || {
-                model
-                    .lock()
-                    .map_err(|_| DomainError::Internal("fastembed model lock poisoned".into()))?
-                    .embed(&inputs, Some(Self::BATCH_SIZE))
-                    .map_err(|e| DomainError::Internal(format!("fastembed failed: {e}")))
+                let mut vectors = Vec::with_capacity(inputs.len());
+                for chunk in inputs.chunks(Self::BATCH_SIZE) {
+                    let embedded = model
+                        .lock()
+                        .map_err(|_| DomainError::Internal("fastembed model lock poisoned".into()))?
+                        .embed(chunk, Some(Self::BATCH_SIZE))
+                        .map_err(|e| DomainError::Internal(format!("fastembed failed: {e}")))?;
+                    vectors.extend(embedded);
+                }
+                Ok::<_, DomainError>(vectors)
             })
             .await
             .map_err(|_| DomainError::Internal("fastembed task panicked".into()))??;
@@ -583,11 +571,11 @@ impl Embedder for FastembedEmbedder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::vendor_http::test_support::{
+        SECRET_BODY, assert_error, closed_port, lookup, serve,
+    };
     use axum::{Router, extract::State, http::HeaderMap, http::StatusCode, routing::post};
     use std::sync::Mutex;
-    use tokio::net::TcpListener;
-
-    const SECRET_BODY: &str = "secret detail from the vendor";
 
     #[derive(Clone, Default)]
     struct Captured(Arc<Mutex<Vec<Value>>>);
@@ -621,10 +609,7 @@ mod tests {
     }
 
     async fn server_for(router: Router) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        format!("http://{address}/v1/embeddings")
+        format!("{}/v1/embeddings", serve(router).await)
     }
 
     /// A vendor that answers every request with `status` and `body`.
@@ -653,26 +638,6 @@ mod tests {
 
     fn inputs(texts: &[&str]) -> Vec<String> {
         texts.iter().map(|t| t.to_string()).collect()
-    }
-
-    fn lookup(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
-        move |key| {
-            pairs
-                .iter()
-                .find(|(name, _)| *name == key)
-                .map(|(_, value)| value.to_string())
-        }
-    }
-
-    fn assert_error(result: Result<Embeddings, DomainError>, retryable: bool, needle: &str) {
-        let message = match (result, retryable) {
-            (Err(DomainError::Internal(message)), true) => message,
-            (Err(DomainError::InvalidInput(message)), false) => message,
-            (other, _) => panic!("expected retryable={retryable}, got {other:?}"),
-        };
-        assert!(message.contains(needle), "{message}");
-        assert!(!message.contains(SECRET_BODY));
-        assert!(!message.contains("sk-test"));
     }
 
     #[test]
@@ -940,13 +905,8 @@ mod tests {
 
     #[tokio::test]
     async fn openai_network_failures_are_retryable() {
-        let address = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap()
-            .local_addr()
-            .unwrap();
         let embedder = OpenAiEmbedder::with_url(
-            &format!("http://{address}/v1/embeddings"),
+            &format!("{}/v1/embeddings", closed_port().await),
             "sk-test".into(),
             "text-embedding-3-small",
             None,
@@ -992,8 +952,8 @@ mod tests {
     fn fastembed_knows_bge_small_by_its_upstream_name() {
         assert_eq!(
             FastembedEmbedder::native_dims("BAAI/bge-small-en-v1.5"),
-            384
+            Some(384)
         );
-        assert_eq!(FastembedEmbedder::native_dims("no-such-model"), 0);
+        assert_eq!(FastembedEmbedder::native_dims("no-such-model"), None);
     }
 }

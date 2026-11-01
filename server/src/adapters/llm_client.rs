@@ -13,12 +13,12 @@
 //! ANTHROPIC_EFFORT=low                 (low | medium | high | xhigh | max | none)
 //! ```
 
+use crate::adapters::vendor_http::{KeyOwner, post_json, token_count};
 use crate::domain::error::DomainError;
 use crate::domain::llm_settings::TextProvider;
 use crate::domain::ports::llm_client::{
     BoxFuture, LlmClient, StructuredRequest, StructuredResponse, TokenUsage,
 };
-use reqwest::StatusCode;
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 use std::time::Duration;
@@ -211,61 +211,6 @@ fn resolve_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
     root.pointer(reference.strip_prefix('#')?)
 }
 
-/// Statuses where the same request can succeed later: the SDKs' retry set.
-fn is_retryable_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::REQUEST_TIMEOUT | StatusCode::CONFLICT | StatusCode::TOO_MANY_REQUESTS
-    ) || status.is_server_error()
-}
-
-/// Maps a non-success HTTP status to the port's error classes: `Internal`
-/// for retryable statuses, `InvalidInput` for the rest of 4xx. The message
-/// carries the status only, never the response body.
-pub(crate) fn http_status_error(vendor: &str, status: StatusCode) -> DomainError {
-    let message = format!("{vendor} API returned HTTP {status}");
-    if is_retryable_status(status) || !status.is_client_error() {
-        DomainError::Internal(message)
-    } else {
-        DomainError::InvalidInput(message)
-    }
-}
-
-/// Maps a transport failure. reqwest errors can embed the URL, so only the
-/// kind of failure is reported. A request that cannot be built (a key that
-/// is not a valid header value) fails the same way every time.
-pub(crate) fn transport_error(vendor: &str, error: &reqwest::Error) -> DomainError {
-    if error.is_builder() {
-        DomainError::InvalidInput(format!("{vendor} API request could not be built"))
-    } else if error.is_timeout() {
-        DomainError::Internal(format!("{vendor} API request timed out"))
-    } else {
-        DomainError::Internal(format!("{vendor} API request failed"))
-    }
-}
-
-async fn post_json(
-    request: reqwest::RequestBuilder,
-    body: &Value,
-    vendor: &str,
-) -> Result<Value, DomainError> {
-    let response = request
-        .json(body)
-        .send()
-        .await
-        .map_err(|error| transport_error(vendor, &error))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(http_status_error(vendor, status));
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| transport_error(vendor, &error))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| DomainError::Internal(format!("{vendor} returned a malformed response")))
-}
-
 /// Parses the answer text and checks it against the request's schema.
 fn parse_answer(text: &str, schema: &Value, vendor: &str) -> Result<Value, DomainError> {
     let json: Value = serde_json::from_str(text.trim())
@@ -278,15 +223,23 @@ fn parse_answer(text: &str, schema: &Value, vendor: &str) -> Result<Value, Domai
     Ok(json)
 }
 
-/// The response, or the error after logging what the failed answer still
-/// cost. Refusals, truncation and off-schema answers are billed; the port
-/// returns no usage with an error, so the tokens are logged (counts only).
-fn billed(
+/// Builds the response from a vendor's answer text and the usage at
+/// `usage_pointers` (input, output): parses the text and checks it against
+/// the schema. Refusals, truncation and off-schema answers are billed, and the
+/// port returns no usage with an error, so a failure logs its token counts
+/// (counts only, never content).
+fn finish(
     vendor: &str,
-    usage: TokenUsage,
-    answer: Result<Value, DomainError>,
+    payload: &Value,
+    usage_pointers: [&str; 2],
+    schema: &Value,
+    text: Result<&str, DomainError>,
 ) -> Result<StructuredResponse, DomainError> {
-    answer
+    let usage = TokenUsage {
+        input_tokens: token_count(payload, usage_pointers[0]),
+        output_tokens: token_count(payload, usage_pointers[1]),
+    };
+    text.and_then(|text| parse_answer(text, schema, vendor))
         .map(|json| StructuredResponse { json, usage })
         .inspect_err(|error| {
             if usage != TokenUsage::default() {
@@ -298,13 +251,6 @@ fn billed(
                 );
             }
         })
-}
-
-fn usage_field(payload: &Value, pointer: &str) -> u32 {
-    payload
-        .pointer(pointer)
-        .and_then(Value::as_u64)
-        .map_or(0, |tokens| u32::try_from(tokens).unwrap_or(u32::MAX))
 }
 
 /// Anthropic Messages API with `output_config.format` JSON-schema outputs.
@@ -372,14 +318,17 @@ impl AnthropicLlmClient {
     }
 
     fn parse_response(payload: &Value, schema: &Value) -> Result<StructuredResponse, DomainError> {
-        let usage = TokenUsage {
-            input_tokens: usage_field(payload, "/usage/input_tokens"),
-            output_tokens: usage_field(payload, "/usage/output_tokens"),
-        };
-        billed("Anthropic", usage, Self::answer(payload, schema))
+        let usage = ["/usage/input_tokens", "/usage/output_tokens"];
+        finish(
+            "Anthropic",
+            payload,
+            usage,
+            schema,
+            Self::answer_text(payload),
+        )
     }
 
-    fn answer(payload: &Value, schema: &Value) -> Result<Value, DomainError> {
+    fn answer_text(payload: &Value) -> Result<&str, DomainError> {
         match payload.get("stop_reason").and_then(Value::as_str) {
             Some("refusal") => {
                 return Err(DomainError::InvalidInput(
@@ -394,15 +343,14 @@ impl AnthropicLlmClient {
             _ => {}
         }
         // Thinking blocks may come first; the answer is the text block.
-        let text = payload
+        payload
             .get("content")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .find(|block| block.get("type").and_then(Value::as_str) == Some("text"))
             .and_then(|block| block.get("text").and_then(Value::as_str))
-            .ok_or_else(|| DomainError::Internal("Anthropic response had no text".into()))?;
-        parse_answer(text, schema, "Anthropic")
+            .ok_or_else(|| DomainError::Internal("Anthropic response had no text".into()))
     }
 }
 
@@ -419,7 +367,7 @@ impl LlmClient for AnthropicLlmClient {
                 .header("x-api-key", &req.api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION);
             Self::parse_response(
-                &post_json(request, &body, "Anthropic").await?,
+                &post_json(request, &body, "Anthropic", KeyOwner::User).await?,
                 &req.json_schema,
             )
         })
@@ -462,14 +410,11 @@ impl OpenAiLlmClient {
     }
 
     fn parse_response(payload: &Value, schema: &Value) -> Result<StructuredResponse, DomainError> {
-        let usage = TokenUsage {
-            input_tokens: usage_field(payload, "/usage/input_tokens"),
-            output_tokens: usage_field(payload, "/usage/output_tokens"),
-        };
-        billed("OpenAI", usage, Self::answer(payload, schema))
+        let usage = ["/usage/input_tokens", "/usage/output_tokens"];
+        finish("OpenAI", payload, usage, schema, Self::answer_text(payload))
     }
 
-    fn answer(payload: &Value, schema: &Value) -> Result<Value, DomainError> {
+    fn answer_text(payload: &Value) -> Result<&str, DomainError> {
         if payload.get("status").and_then(Value::as_str) == Some("incomplete") {
             let reason = payload
                 .pointer("/incomplete_details/reason")
@@ -500,7 +445,7 @@ impl OpenAiLlmClient {
                 "OpenAI declined the request".into(),
             ));
         }
-        let text = payload
+        payload
             .get("output_text")
             .and_then(Value::as_str)
             .or_else(|| {
@@ -509,8 +454,7 @@ impl OpenAiLlmClient {
                     .find(|content| content_type(content) == Some("output_text"))
                     .and_then(|content| content.get("text").and_then(Value::as_str))
             })
-            .ok_or_else(|| DomainError::Internal("OpenAI response had no text".into()))?;
-        parse_answer(text, schema, "OpenAI")
+            .ok_or_else(|| DomainError::Internal("OpenAI response had no text".into()))
     }
 }
 
@@ -529,7 +473,7 @@ impl LlmClient for OpenAiLlmClient {
             let body = Self::request_body(&req);
             let request = self.client.post(&self.url).bearer_auth(&req.api_key);
             Self::parse_response(
-                &post_json(request, &body, "OpenAI").await?,
+                &post_json(request, &body, "OpenAI", KeyOwner::User).await?,
                 &req.json_schema,
             )
         })
@@ -569,14 +513,17 @@ impl LlamaCppLlmClient {
     }
 
     fn parse_response(payload: &Value, schema: &Value) -> Result<StructuredResponse, DomainError> {
-        let usage = TokenUsage {
-            input_tokens: usage_field(payload, "/usage/prompt_tokens"),
-            output_tokens: usage_field(payload, "/usage/completion_tokens"),
-        };
-        billed("llama.cpp", usage, Self::answer(payload, schema))
+        let usage = ["/usage/prompt_tokens", "/usage/completion_tokens"];
+        finish(
+            "llama.cpp",
+            payload,
+            usage,
+            schema,
+            Self::answer_text(payload),
+        )
     }
 
-    fn answer(payload: &Value, schema: &Value) -> Result<Value, DomainError> {
+    fn answer_text(payload: &Value) -> Result<&str, DomainError> {
         if payload
             .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
@@ -586,11 +533,10 @@ impl LlamaCppLlmClient {
                 "llama.cpp response hit max_tokens before finishing".into(),
             ));
         }
-        let text = payload
+        payload
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
-            .ok_or_else(|| DomainError::Internal("llama.cpp response had no text".into()))?;
-        parse_answer(text, schema, "llama.cpp")
+            .ok_or_else(|| DomainError::Internal("llama.cpp response had no text".into()))
     }
 }
 
@@ -603,7 +549,7 @@ impl LlmClient for LlamaCppLlmClient {
             let body = Self::request_body(&req);
             let request = self.client.post(&self.url);
             Self::parse_response(
-                &post_json(request, &body, "llama.cpp").await?,
+                &post_json(request, &body, "llama.cpp", KeyOwner::User).await?,
                 &req.json_schema,
             )
         })
@@ -657,47 +603,32 @@ impl LlmClientConfig {
 /// Picks the adapter for each request from its `provider`, unless the
 /// deployment pins every request to one backend.
 #[derive(Clone)]
-pub struct LlmClientRouter {
-    anthropic: Arc<dyn LlmClient>,
-    openai: Arc<dyn LlmClient>,
-    pinned: Option<Arc<dyn LlmClient>>,
+pub enum LlmClientRouter {
+    ByProvider {
+        anthropic: Arc<dyn LlmClient>,
+        openai: Arc<dyn LlmClient>,
+    },
+    Pinned(Arc<dyn LlmClient>),
 }
 
 impl LlmClientRouter {
-    pub fn new(
-        anthropic: Arc<dyn LlmClient>,
-        openai: Arc<dyn LlmClient>,
-        pinned: Option<Arc<dyn LlmClient>>,
-    ) -> Self {
-        Self {
-            anthropic,
-            openai,
-            pinned,
-        }
-    }
-
     pub fn from_config(config: &LlmClientConfig) -> Self {
         match config {
-            LlmClientConfig::Hosted { anthropic_effort } => Self::new(
-                Arc::new(AnthropicLlmClient::new(anthropic_effort.clone())),
-                Arc::new(OpenAiLlmClient::new()),
-                None,
-            ),
-            LlmClientConfig::LlamaCpp { base_url } => Self::new(
-                Arc::new(AnthropicLlmClient::new(None)),
-                Arc::new(OpenAiLlmClient::new()),
-                Some(Arc::new(LlamaCppLlmClient::new(base_url))),
-            ),
+            LlmClientConfig::Hosted { anthropic_effort } => Self::ByProvider {
+                anthropic: Arc::new(AnthropicLlmClient::new(anthropic_effort.clone())),
+                openai: Arc::new(OpenAiLlmClient::new()),
+            },
+            LlmClientConfig::LlamaCpp { base_url } => {
+                Self::Pinned(Arc::new(LlamaCppLlmClient::new(base_url)))
+            }
         }
     }
 
     fn select(&self, provider: TextProvider) -> &Arc<dyn LlmClient> {
-        if let Some(pinned) = &self.pinned {
-            return pinned;
-        }
-        match provider {
-            TextProvider::Anthropic => &self.anthropic,
-            TextProvider::OpenAi => &self.openai,
+        match (self, provider) {
+            (Self::Pinned(client), _) => client,
+            (Self::ByProvider { anthropic, .. }, TextProvider::Anthropic) => anthropic,
+            (Self::ByProvider { openai, .. }, TextProvider::OpenAi) => openai,
         }
     }
 }
@@ -714,11 +645,11 @@ impl LlmClient for LlmClientRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::vendor_http::test_support::{
+        SECRET_BODY, assert_error, closed_port, lookup, serve,
+    };
     use axum::{Router, extract::State, http::HeaderMap, routing::post};
     use std::sync::Mutex;
-    use tokio::net::TcpListener;
-
-    const SECRET_BODY: &str = "secret detail from the vendor";
 
     fn schema() -> Value {
         json!({
@@ -772,10 +703,7 @@ mod tests {
         let router = Router::new()
             .route(path, post(reply))
             .with_state(seen.clone());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        (format!("http://{address}{path}"), seen)
+        (format!("{}{path}", serve(router).await), seen)
     }
 
     fn anthropic_answer(text: &str) -> String {
@@ -817,25 +745,11 @@ mod tests {
     }
 
     fn assert_invalid_input(result: Result<StructuredResponse, DomainError>, needle: &str) {
-        match result {
-            Err(DomainError::InvalidInput(message)) => {
-                assert!(message.contains(needle), "{message}");
-                assert!(!message.contains(SECRET_BODY));
-                assert!(!message.contains("sk-test"));
-            }
-            other => panic!("expected InvalidInput, got {other:?}"),
-        }
+        assert_error(result, false, needle);
     }
 
     fn assert_internal(result: Result<StructuredResponse, DomainError>, needle: &str) {
-        match result {
-            Err(DomainError::Internal(message)) => {
-                assert!(message.contains(needle), "{message}");
-                assert!(!message.contains(SECRET_BODY));
-                assert!(!message.contains("sk-test"));
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert_error(result, true, needle);
     }
 
     #[test]
@@ -1091,13 +1005,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_failures_are_retryable() {
-        // Bind and drop a listener so the port is closed.
-        let address = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        let result = OpenAiLlmClient::with_url(&format!("http://{address}/v1/responses"))
+        let result = OpenAiLlmClient::with_url(&format!("{}/v1/responses", closed_port().await))
             .complete_structured(request(TextProvider::OpenAi, "gpt-5.6-luna"))
             .await;
         assert_internal(result, "request failed");
@@ -1150,40 +1058,32 @@ mod tests {
 
     #[test]
     fn config_reads_backend_and_effort_from_env_vars() {
-        let vars = |pairs: &'static [(&'static str, &'static str)]| {
-            move |name: &str| {
-                pairs
-                    .iter()
-                    .find(|(key, _)| *key == name)
-                    .map(|(_, value)| value.to_string())
-            }
-        };
         assert_eq!(
-            LlmClientConfig::from_vars(vars(&[])),
+            LlmClientConfig::from_vars(lookup(&[])),
             LlmClientConfig::Hosted {
                 anthropic_effort: Some("low".into())
             }
         );
         assert_eq!(
-            LlmClientConfig::from_vars(vars(&[("ANTHROPIC_EFFORT", "High")])),
+            LlmClientConfig::from_vars(lookup(&[("ANTHROPIC_EFFORT", "High")])),
             LlmClientConfig::Hosted {
                 anthropic_effort: Some("high".into())
             }
         );
         assert_eq!(
-            LlmClientConfig::from_vars(vars(&[("ANTHROPIC_EFFORT", "none")])),
+            LlmClientConfig::from_vars(lookup(&[("ANTHROPIC_EFFORT", "none")])),
             LlmClientConfig::Hosted {
                 anthropic_effort: None
             }
         );
         assert_eq!(
-            LlmClientConfig::from_vars(vars(&[("ANTHROPIC_EFFORT", "turbo")])),
+            LlmClientConfig::from_vars(lookup(&[("ANTHROPIC_EFFORT", "turbo")])),
             LlmClientConfig::Hosted {
                 anthropic_effort: Some("low".into())
             }
         );
         assert_eq!(
-            LlmClientConfig::from_vars(vars(&[
+            LlmClientConfig::from_vars(lookup(&[
                 ("LLM_BACKEND", "llamacpp"),
                 ("LLAMACPP_BASE_URL", "http://127.0.0.1:4211"),
             ])),
@@ -1192,7 +1092,7 @@ mod tests {
             }
         );
         assert_eq!(
-            LlmClientConfig::from_vars(vars(&[("LLM_BACKEND", "llamacpp")])),
+            LlmClientConfig::from_vars(lookup(&[("LLM_BACKEND", "llamacpp")])),
             LlmClientConfig::LlamaCpp {
                 base_url: DEFAULT_LLAMACPP_BASE_URL.into()
             }
@@ -1218,11 +1118,10 @@ mod tests {
 
     #[tokio::test]
     async fn router_dispatches_by_provider_unless_pinned() {
-        let hosted = LlmClientRouter::new(
-            Arc::new(Marker("anthropic")),
-            Arc::new(Marker("openai")),
-            None,
-        );
+        let hosted = LlmClientRouter::ByProvider {
+            anthropic: Arc::new(Marker("anthropic")),
+            openai: Arc::new(Marker("openai")),
+        };
         let openai = request(TextProvider::OpenAi, "gpt-5.6-luna");
         let anthropic = request(TextProvider::Anthropic, "claude-haiku-5-5");
         assert_eq!(
@@ -1237,11 +1136,7 @@ mod tests {
             hosted.complete_structured(anthropic).await.unwrap().json,
             "anthropic"
         );
-        let pinned = LlmClientRouter::new(
-            Arc::new(Marker("anthropic")),
-            Arc::new(Marker("openai")),
-            Some(Arc::new(Marker("local"))),
-        );
+        let pinned = LlmClientRouter::Pinned(Arc::new(Marker("local")));
         assert_eq!(
             pinned.complete_structured(openai).await.unwrap().json,
             "local"
