@@ -1,5 +1,6 @@
 use super::PostgresPool;
-use super::tag_alias_repo::{lock_user_tags, repoint_aliases};
+use super::lock_user_tags;
+use super::tag_alias_repo::repoint_aliases;
 use crate::domain::bookmark::*;
 use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::{

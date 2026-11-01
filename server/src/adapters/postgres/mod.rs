@@ -20,3 +20,17 @@ impl PostgresPool {
         Self { pool }
     }
 }
+
+/// Serialize every tag change of one user (write-path resolution, merge,
+/// undo, the legacy consolidation) for the rest of the transaction.
+pub(super) async fn lock_user_tags(
+    conn: &mut sqlx::PgConnection,
+    user_id: uuid::Uuid,
+) -> Result<(), crate::domain::error::DomainError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('boopmark.tags:' || $1::text, 0))")
+        .bind(user_id)
+        .execute(conn)
+        .await
+        .map(|_| ())
+        .map_err(|e| crate::domain::error::DomainError::Internal(e.to_string()))
+}

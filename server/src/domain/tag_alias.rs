@@ -15,6 +15,7 @@
 use crate::domain::error::DomainError;
 use crate::domain::tag_normalize::{
     Level, choose_display, clean_tag, compact_key, existing_singular, group_tags,
+    singular_candidates, tag_key,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -192,9 +193,12 @@ pub struct TagChangeSummary {
 /// existing libraries are not backfilled into `tag_aliases`.
 #[derive(Debug, Default, Clone)]
 pub struct TagIndex {
+    /// Compact key -> canonical, from alias rows and this write's results.
     aliases: HashMap<String, String>,
-    alias_spellings: BTreeMap<String, String>,
     existing: BTreeMap<String, Vec<(String, i64)>>,
+    /// Singular compact key -> compact key of a known plural spelling, so
+    /// a new singular finds an existing plural in one lookup.
+    plurals: HashMap<String, String>,
 }
 
 impl TagIndex {
@@ -204,9 +208,11 @@ impl TagIndex {
             index.remember(&alias.alias_key, &alias.alias, &alias.canonical);
         }
         for (tag, count) in tag_counts {
+            let key = compact_key(tag);
+            index.index_plural(tag, &key);
             index
                 .existing
-                .entry(compact_key(tag))
+                .entry(key)
                 .or_default()
                 .push((tag.clone(), *count));
         }
@@ -215,8 +221,18 @@ impl TagIndex {
 
     fn remember(&mut self, key: &str, spelling: &str, canonical: &str) {
         self.aliases.insert(key.to_string(), canonical.to_string());
-        self.alias_spellings
-            .insert(key.to_string(), spelling.to_string());
+        self.index_plural(spelling, key);
+    }
+
+    fn index_plural(&mut self, spelling: &str, key: &str) {
+        for singular in singular_candidates(&tag_key(spelling)) {
+            let singular = compact_key(&singular);
+            if singular != key {
+                self.plurals
+                    .entry(singular)
+                    .or_insert_with(|| key.to_string());
+            }
+        }
     }
 
     fn contains_key(&self, key: &str) -> bool {
@@ -236,20 +252,6 @@ impl TagIndex {
         self.existing
             .get(key)
             .is_some_and(|spellings| spellings.iter().any(|(s, _)| s == raw))
-    }
-
-    /// Every known `(spelling, compact key)`, in a stable order.
-    fn spellings(&self) -> impl Iterator<Item = (&str, &str)> {
-        let aliases = self
-            .alias_spellings
-            .iter()
-            .map(|(key, spelling)| (spelling.as_str(), key.as_str()));
-        let existing = self.existing.iter().flat_map(|(key, spellings)| {
-            spellings
-                .iter()
-                .map(move |(s, _)| (s.as_str(), key.as_str()))
-        });
-        aliases.chain(existing)
     }
 }
 
@@ -281,17 +283,6 @@ pub fn resolve_tag(raw: &str, index: &mut TagIndex) -> Resolution {
             record: None,
         };
     }
-    if let Some(spellings) = index.existing.get(&key).filter(|s| s.len() > 1) {
-        let canonical = if spellings.iter().any(|(s, _)| s == raw) {
-            raw.to_string()
-        } else {
-            choose_display(spellings)
-        };
-        return Resolution {
-            canonical,
-            record: None,
-        };
-    }
 
     let canonical = if index.is_existing_spelling(&key, raw) {
         raw.to_string()
@@ -301,18 +292,20 @@ pub fn resolve_tag(raw: &str, index: &mut TagIndex) -> Resolution {
         index
             .canonical_for_key(&singular)
             .expect("existing_singular only returns known keys")
-    } else if let Some(plural_key) = index
-        .spellings()
-        .find(|(spelling, _)| existing_singular(spelling, |k| k == key).is_some())
-        .map(|(_, plural_key)| plural_key.to_string())
-    {
+    } else if let Some(plural_key) = index.plurals.get(&key) {
         index
-            .canonical_for_key(&plural_key)
-            .expect("spellings only yields known keys")
+            .canonical_for_key(plural_key)
+            .expect("plurals only holds known keys")
     } else {
         raw.to_string()
     };
 
+    if index.existing.get(&key).is_some_and(|s| s.len() > 1) {
+        return Resolution {
+            canonical,
+            record: None,
+        };
+    }
     index.remember(&key, raw, &canonical);
     Resolution {
         record: Some(NewTagAlias {

@@ -1,4 +1,4 @@
-use super::PostgresPool;
+use super::{PostgresPool, lock_user_tags};
 use crate::domain::error::DomainError;
 use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::tag_alias::{
@@ -6,7 +6,7 @@ use crate::domain::tag_alias::{
     TagAlias, TagChangeBatch, TagChangeSummary, TagIndex, TagMerge, TagMergeProposal, TagWrite,
     merge_mapping, resolve_writes, rewrite_tags, undo_tags,
 };
-use crate::domain::tag_normalize::compact_key;
+use crate::domain::tag_normalize::{clean_tag, compact_key};
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgExecutor, Postgres, Transaction};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -114,20 +114,6 @@ fn sorted(members: &[String]) -> Vec<String> {
     members.sort();
     members.dedup();
     members
-}
-
-/// Serialize every tag change of one user (write-path resolution, apply,
-/// undo, the legacy consolidation) for the rest of the transaction.
-pub(super) async fn lock_user_tags(
-    conn: &mut PgConnection,
-    user_id: Uuid,
-) -> Result<(), DomainError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('boopmark.tags:' || $1::text, 0))")
-        .bind(user_id)
-        .execute(conn)
-        .await
-        .map(|_| ())
-        .map_err(db_err)
 }
 
 async fn load_aliases<'e>(
@@ -370,6 +356,31 @@ impl TagAliasRepository for PostgresPool {
         if writes.iter().all(|w| w.tags.is_empty()) {
             return Ok(writes.iter().map(|_| Vec::new()).collect());
         }
+        // Fast path, without the lock: when every new tag already has an
+        // alias row (the usual case once a library has settled), alias rows
+        // alone decide the result and nothing is written.
+        let keys: Vec<String> = writes
+            .iter()
+            .flat_map(|w| w.tags.iter().filter(|t| !w.keep.contains(t)))
+            .filter_map(|t| clean_tag(t).map(compact_key))
+            .collect();
+        let known = sqlx::query_as::<_, AliasRow>(
+            "SELECT alias_key, alias, canonical, source, batch_id FROM tag_aliases
+             WHERE user_id = $1 AND alias_key = ANY($2)",
+        )
+        .bind(user_id)
+        .bind(&keys)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?
+        .into_iter()
+        .map(alias_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+        let (resolved, records) = resolve_writes(writes, &mut TagIndex::new(&known, &[]));
+        if records.is_empty() {
+            return Ok(resolved);
+        }
+
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         lock_user_tags(&mut tx, user_id).await?;
         let aliases = load_aliases(&mut *tx, user_id).await?;
@@ -536,7 +547,7 @@ impl TagAliasRepository for PostgresPool {
         let merges: Vec<TagMerge> = proposals.iter().map(TagMergeProposal::merge).collect();
         let batch = apply_merges_tx(&mut tx, user_id, kind, &merges, false)
             .await?
-            .expect("a batch is always recorded for proposals");
+            .ok_or_else(|| DomainError::Internal("no batch recorded for proposals".into()))?;
         sqlx::query(
             "UPDATE tag_merge_proposals
              SET status = 'applied', batch_id = $3, decided_at = now()
