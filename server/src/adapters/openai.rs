@@ -474,7 +474,7 @@ fn quote_untrusted(value: &str) -> String {
 /// Responses API payloads expose convenience `output_text` in some versions
 /// and nested output message content in others. Accept both forms so a server
 /// response shape change does not silently disable enrichment.
-fn extract_response_text(payload: &Value) -> Option<String> {
+pub(crate) fn extract_response_text(payload: &Value) -> Option<String> {
     if let Some(text) = payload.get("output_text").and_then(Value::as_str) {
         return Some(text.to_string());
     }

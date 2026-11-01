@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod anthropic_tag_consolidator;
+pub mod llm_client;
 pub mod llm_router;
 pub mod login;
 pub mod metadata;
