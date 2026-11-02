@@ -175,7 +175,7 @@ pub(crate) mod vector_schema_tests {
     /// idempotently.
     #[tokio::test]
     #[ignore = "requires DATABASE_URL on a Postgres with pgvector"]
-    async fn with_vector_ready_is_idempotent() {
+    async fn pgvector_ready_is_idempotent() {
         let pool = pool().await;
         assert_eq!(ensure_vector_schema(&pool).await, VectorStatus::Ready);
         assert_eq!(ensure_vector_schema(&pool).await, VectorStatus::Ready);

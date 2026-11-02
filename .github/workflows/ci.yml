@@ -92,6 +92,7 @@ jobs:
           -- --ignored
           adapters::postgres::search_repo::search_tests
           adapters::postgres::embedding_repo::embedding_tests
+          adapters::postgres::vector_schema::vector_schema_tests::pgvector_ready_is_idempotent
       - name: Test tag consolidation DB
         run: >-
           cargo test -p boopmark-server
