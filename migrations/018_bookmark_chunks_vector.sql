@@ -1,33 +1,9 @@
 -- Full-article search, vector leg (spec:
 -- docs/superpowers/specs/2026-10-31-hybrid-article-search-design.md).
--- Needs pgvector >= 0.8 (halfvec, hnsw.iterative_scan). Fly MPG: enable
--- `vector` in the dashboard first.
-
-CREATE EXTENSION IF NOT EXISTS vector;
-
--- The embedded passages of each bookmark. An article of at least 300
--- characters is split into windows; anything else (a failed or skipped
--- fetch, a short page) has one chunk, ord 0, made of its metadata.
-CREATE TABLE bookmark_chunks (
-    bookmark_id UUID NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE,
-    user_id     UUID NOT NULL,
-    ord         INT  NOT NULL,
-    text        TEXT NOT NULL,      -- the passage, shown as a snippet
-    embedding   halfvec NOT NULL,   -- no fixed dimension: one schema for every backend
-    model       TEXT NOT NULL,      -- Embedder::model_id() that produced this embedding
-    PRIMARY KEY (bookmark_id, ord)
-);
-CREATE INDEX idx_bookmark_chunks_user ON bookmark_chunks(user_id);
--- One partial expression index per supported size: text-embedding-3-large
--- at 1,024 (production, the openai default) and bge-small at 384 (local).
--- The vector leg casts to the configured size and filters on it, so it uses
--- the matching index.
-CREATE INDEX idx_bookmark_chunks_hnsw_1024 ON bookmark_chunks
-    USING hnsw ((embedding::halfvec(1024)) halfvec_cosine_ops)
-    WHERE vector_dims(embedding) = 1024;
-CREATE INDEX idx_bookmark_chunks_hnsw_384 ON bookmark_chunks
-    USING hnsw ((embedding::halfvec(384)) halfvec_cosine_ops)
-    WHERE vector_dims(embedding) = 384;
+-- Only the parts that work without pgvector. The `vector` extension and the
+-- bookmark_chunks table are created at startup when available
+-- (server/src/adapters/postgres/vector_schema.rs), so the app boots and
+-- searches lexically on a database without the extension.
 
 -- The embed queue: a row needs (re-)embedding when it is not pending and its
 -- `embedded_model` differs from the configured embedder. Every existing row
@@ -56,7 +32,8 @@ BEGIN
             text = NULL, text_chars = 0, content_hash = NULL, fetched_at = NULL,
             embedded_model = NULL, embed_attempts = 0, embed_next_attempt_at = now(), embed_error = NULL,
             search = EXCLUDED.search, meta_text = EXCLUDED.meta_text, updated_at = now();
-        IF TG_OP = 'UPDATE' THEN
+        -- bookmark_chunks exists only once the vector schema is ready.
+        IF TG_OP = 'UPDATE' AND to_regclass('bookmark_chunks') IS NOT NULL THEN
             DELETE FROM bookmark_chunks WHERE bookmark_id = NEW.id;
         END IF;
         PERFORM pg_notify('bookmark_ingest', '');
