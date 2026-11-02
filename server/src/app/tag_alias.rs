@@ -12,10 +12,11 @@ use crate::domain::ports::tag_alias_repo::TagAliasRepository;
 use crate::domain::ports::tag_resolver::{ResolveFuture, TagResolver};
 use crate::domain::ports::tag_vocabulary::TagVocabulary;
 use crate::domain::tag_alias::{
-    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMerge,
-    TagMergeProposal, TagWrite, canonical_tag_counts, normalization_proposals, preview_tags,
+    ChangeKind, ProposalSource, ProposalStatus, TagAlias, TagChangeBatch, TagMergeProposal,
+    TagWrite, canonical_tag_counts, normalization_proposals, preview_tags,
 };
 use crate::domain::tag_consolidation::{ReviewedRow, TagSample};
+use crate::domain::tag_library::{ManualMerge, ManualMergePlan};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -88,21 +89,21 @@ where
 
     /// Merge tags directly, without a proposal: a manual merge
     /// (`ChangeKind::Merge`) or a rename, which is a merge into a new name
-    /// (`ChangeKind::Rename`). One undoable batch, or `None` when nothing
-    /// would change (a retried or double-submitted request).
+    /// (`ChangeKind::Rename`). Checked against the library under the lock;
+    /// returns the plan and one undoable batch, or `None` when nothing would
+    /// change.
     pub async fn merge_tags(
         &self,
         user_id: Uuid,
-        kind: ChangeKind,
-        merges: &[TagMerge],
-    ) -> Result<Option<TagChangeBatch>, DomainError> {
-        if !matches!(kind, ChangeKind::Merge | ChangeKind::Rename) {
+        request: &ManualMerge,
+    ) -> Result<(ManualMergePlan, Option<TagChangeBatch>), DomainError> {
+        if !matches!(request.kind, ChangeKind::Merge | ChangeKind::Rename) {
             return Err(DomainError::InvalidInput(format!(
                 "{} is not a manual merge",
-                kind.as_str()
+                request.kind.as_str()
             )));
         }
-        self.repo.apply_merges(user_id, kind, merges).await
+        self.repo.apply_manual_merge(user_id, request).await
     }
 
     pub async fn undo_batch(
@@ -189,7 +190,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tag_alias::{Confidence, NewTagMergeProposal, TagChangeSummary};
+    use crate::domain::tag_alias::{Confidence, NewTagMergeProposal, TagChangeSummary, TagMerge};
     use std::sync::Mutex;
 
     /// In-memory stand-in for the repository: aliases, tag counts and the
@@ -200,7 +201,7 @@ mod tests {
         aliases: Mutex<Vec<TagAlias>>,
         counts: Vec<(String, i64)>,
         proposals: Mutex<Vec<(ProposalSource, NewTagMergeProposal)>>,
-        merged: Mutex<Vec<(ChangeKind, Vec<TagMerge>)>>,
+        merged: Mutex<Vec<ManualMerge>>,
     }
 
     fn batch(kind: ChangeKind) -> TagChangeBatch {
@@ -293,14 +294,21 @@ mod tests {
             Ok(batch(ChangeKind::Normalize))
         }
 
-        async fn apply_merges(
+        async fn apply_manual_merge(
             &self,
             _user_id: Uuid,
-            kind: ChangeKind,
-            merges: &[TagMerge],
-        ) -> Result<Option<TagChangeBatch>, DomainError> {
-            self.merged.lock().unwrap().push((kind, merges.to_vec()));
-            Ok(Some(batch(kind)))
+            request: &ManualMerge,
+        ) -> Result<(ManualMergePlan, Option<TagChangeBatch>), DomainError> {
+            self.merged.lock().unwrap().push(request.clone());
+            let plan = ManualMergePlan {
+                kind: request.kind,
+                merge: TagMerge {
+                    canonical: request.target.clone(),
+                    members: request.sources.clone(),
+                },
+                redirected_from: None,
+            };
+            Ok((plan, Some(batch(request.kind))))
         }
 
         async fn undo_batch(
@@ -390,23 +398,24 @@ mod tests {
     #[tokio::test]
     async fn merge_tags_accepts_only_manual_kinds() {
         let (svc, repo) = service(StubRepo::default());
-        let merges = vec![TagMerge {
-            canonical: "GitHub".into(),
-            members: s(&["github"]),
-        }];
+        let request = |kind| ManualMerge {
+            kind,
+            sources: s(&["github"]),
+            target: "GitHub".into(),
+        };
         let user = Uuid::new_v4();
         assert!(
-            svc.merge_tags(user, ChangeKind::Merge, &merges)
+            svc.merge_tags(user, &request(ChangeKind::Merge))
                 .await
                 .is_ok()
         );
         assert!(
-            svc.merge_tags(user, ChangeKind::Rename, &merges)
+            svc.merge_tags(user, &request(ChangeKind::Rename))
                 .await
                 .is_ok()
         );
         assert!(matches!(
-            svc.merge_tags(user, ChangeKind::Normalize, &merges).await,
+            svc.merge_tags(user, &request(ChangeKind::Normalize)).await,
             Err(DomainError::InvalidInput(_))
         ));
         assert_eq!(repo.merged.lock().unwrap().len(), 2);

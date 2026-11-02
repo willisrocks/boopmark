@@ -8,14 +8,16 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::tag_alias::{ChangeKind, ProposalStatus, TagAlias, TagChangeBatch, TagMerge};
+use crate::domain::tag_alias::{
+    ChangeKind, ProposalStatus, TagAlias, TagChangeBatch, TagMerge, undo_cutoff,
+};
 use crate::domain::tag_library::{
-    MergeRefusal, TagRow, TagSort, alias_preview, filter_rows, library_rows, resolve_merge_target,
+    ManualMerge, ManualMergePlan, TagRow, TagSort, alias_preview, filter_rows, library_rows,
     search, sort_rows, top_tags,
 };
 use crate::domain::tag_normalize::clean_tag;
@@ -31,8 +33,6 @@ const SEARCH_LIMIT: usize = 20;
 const ALIAS_PREVIEW: usize = 3;
 /// The first page of batches; [`recent_batches`] fetches more as needed.
 const HISTORY_PAGE: i64 = 50;
-/// Spec: the batch history keeps undo for 30 days.
-const UNDO_WINDOW_DAYS: i64 = 30;
 
 fn render(t: &impl Template) -> axum::response::Response {
     match t.render() {
@@ -341,7 +341,7 @@ async fn recent_batches(
     state: &AppState,
     user_id: Uuid,
 ) -> Result<Vec<TagChangeBatch>, DomainError> {
-    let cutoff = Utc::now() - Duration::days(UNDO_WINDOW_DAYS);
+    let cutoff = undo_cutoff(Utc::now());
     let mut limit = HISTORY_PAGE;
     loop {
         let batches = state.tag_aliases.list_batches(user_id, limit).await?;
@@ -490,9 +490,9 @@ impl MergeForm {
         form
     }
 
-    /// The change as typed, checked for shape only; [`plan_merge`] checks it
-    /// against the library.
-    fn request(&self) -> Result<MergeRequest, String> {
+    /// The change as typed, checked for shape only; the repository checks it
+    /// against the library under the lock ([`crate::domain::tag_library::plan_manual_merge`]).
+    fn request(&self) -> Result<ManualMerge, String> {
         let kind = match self.kind.as_str() {
             "rename" => ChangeKind::Rename,
             "merge" => ChangeKind::Merge,
@@ -512,66 +512,12 @@ impl MergeForm {
         if kind == ChangeKind::Rename && self.sources.len() != 1 {
             return Err("Rename one tag at a time.".into());
         }
-        Ok(MergeRequest {
+        Ok(ManualMerge {
             kind,
             target: target.to_string(),
             sources: self.sources.clone(),
         })
     }
-}
-
-struct MergeRequest {
-    kind: ChangeKind,
-    target: String,
-    sources: Vec<String>,
-}
-
-/// The merge to apply after checking the request against the current tags
-/// and aliases (see [`resolve_merge_target`]), or the message to show
-/// instead. A target that is another tag's spelling becomes a merge into
-/// that tag.
-fn plan_merge(
-    request: MergeRequest,
-    rows: &[TagRow],
-    aliases: &[TagAlias],
-) -> Result<(ChangeKind, TagMerge, Option<String>), String> {
-    let target = resolve_merge_target(rows, aliases, &request.sources, &request.target).map_err(
-        |refusal| match refusal {
-            MergeRefusal::Stale => {
-                "The tag list changed. Reload the page and try again.".to_string()
-            }
-            MergeRefusal::SpellingOf { source, canonical } => format!(
-                "“{source}” is also a spelling of “{canonical}”. Merge it into “{canonical}” first."
-            ),
-            MergeRefusal::SharedSpelling { source, other } => format!(
-                "“{other}” is another spelling of “{source}”. Select it too, or merge it first."
-            ),
-        },
-    )?;
-    let members: Vec<String> = request
-        .sources
-        .into_iter()
-        .filter(|s| *s != target.canonical)
-        .collect();
-    if members.is_empty() {
-        return Err(match request.kind {
-            ChangeKind::Rename if !target.redirected => "That is already the tag's name.".into(),
-            _ => "Choose tags to merge into a different tag.".into(),
-        });
-    }
-    let (kind, redirected_from) = if target.redirected {
-        (ChangeKind::Merge, Some(request.target))
-    } else {
-        (request.kind, None)
-    };
-    Ok((
-        kind,
-        TagMerge {
-            canonical: target.canonical,
-            members,
-        },
-        redirected_from,
-    ))
 }
 
 fn quoted_list(names: &[String]) -> String {
@@ -602,10 +548,19 @@ async fn apply_merge_form(
     form: &MergeForm,
 ) -> Result<Flash, Flash> {
     let request = form.request().map_err(Flash::error)?;
-    let (counts, aliases) = load_tags(state, user_id).await.map_err(Flash::from_error)?;
-    let rows = library_rows(&counts, &aliases);
-    let (kind, merge, redirected_from) =
-        plan_merge(request, &rows, &aliases).map_err(Flash::error)?;
+    let (plan, batch) = state
+        .tag_aliases
+        .merge_tags(user_id, &request)
+        .await
+        .map_err(Flash::from_error)?;
+    let Some(batch) = batch else {
+        return Ok(Flash::ok("Nothing to change.".into(), None));
+    };
+    let ManualMergePlan {
+        kind,
+        merge,
+        redirected_from,
+    } = plan;
     let what = match (kind, redirected_from) {
         (ChangeKind::Rename, _) => format!(
             "Renamed {} to “{}”",
@@ -623,18 +578,10 @@ async fn apply_merge_form(
             merge.canonical
         ),
     };
-    match state
-        .tag_aliases
-        .merge_tags(user_id, kind, std::slice::from_ref(&merge))
-        .await
-        .map_err(Flash::from_error)?
-    {
-        Some(batch) => Ok(Flash::ok(
-            format!("{what} on {}.", bookmarks_changed(&batch)),
-            Some(batch.id),
-        )),
-        None => Ok(Flash::ok("Nothing to change.".into(), None)),
-    }
+    Ok(Flash::ok(
+        format!("{what} on {}.", bookmarks_changed(&batch)),
+        Some(batch.id),
+    ))
 }
 
 /// `POST /tags/batches/{id}/undo`: undo one batch as a unit.
@@ -661,6 +608,7 @@ pub async fn undo(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::tag_library::plan_manual_merge;
 
     fn s(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_string()).collect()
@@ -730,7 +678,9 @@ mod tests {
             .chain([("rust".to_string(), 2), ("K8S".to_string(), 1)])
             .collect();
         let rows = library_rows(&counts, &aliases);
-        plan_merge(MergeForm::parse(form).request()?, &rows, &aliases)
+        let plan = plan_manual_merge(&MergeForm::parse(form).request()?, &rows, &aliases)
+            .map_err(|e| e.to_string())?;
+        Ok((plan.kind, plan.merge, plan.redirected_from))
     }
 
     #[test]

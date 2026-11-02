@@ -85,6 +85,17 @@ string_enum!(
     }
 );
 
+impl Confidence {
+    /// 0 for the most confident, for sorting.
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::High => 0,
+            Self::Medium => 1,
+            Self::Low => 2,
+        }
+    }
+}
+
 string_enum!(
     /// What a change batch did; shown in the history list.
     ChangeKind {
@@ -169,6 +180,22 @@ pub struct NewTagMergeProposal {
     pub canonical: String,
     pub members: Vec<String>,
     pub confidence: Confidence,
+}
+
+/// How long a batch can be undone (spec: the history keeps undo for 30
+/// days).
+pub const UNDO_WINDOW_DAYS: i64 = 30;
+
+/// Batches created before this can no longer be undone.
+pub fn undo_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - chrono::Duration::days(UNDO_WINDOW_DAYS)
+}
+
+impl TagChangeBatch {
+    /// Older than the undo window, so it can no longer be undone.
+    pub fn undo_expired(&self, now: DateTime<Utc>) -> bool {
+        self.created_at < undo_cutoff(now)
+    }
 }
 
 /// One applied rename/merge, the unit of undo.

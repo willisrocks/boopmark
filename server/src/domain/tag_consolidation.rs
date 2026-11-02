@@ -615,17 +615,23 @@ fn expand_selection<'a>(
 /// Every spelling that applying `proposal` merges: its members, then the
 /// members of the spelling-variant rows it covers, each once.
 pub fn row_spellings(proposal: &TagMergeProposal, pending: &[TagMergeProposal]) -> Vec<String> {
-    let mut spellings: Vec<String> = Vec::new();
-    for tag in proposal
-        .members
-        .iter()
-        .chain(covered(proposal, pending).flat_map(|p| &p.members))
-    {
-        if !spellings.contains(tag) {
-            spellings.push(tag.clone());
+    unique(
+        proposal
+            .members
+            .iter()
+            .chain(covered(proposal, pending).flat_map(|p| &p.members)),
+    )
+}
+
+/// `tags` in order, each once.
+fn unique<'a>(tags: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tag in tags {
+        if !out.contains(tag) {
+            out.push(tag.clone());
         }
     }
-    spellings
+    out
 }
 
 /// Pending proposals as they apply now. A member or target that is on no
@@ -763,16 +769,38 @@ pub fn plan_reviewed_apply(
         .iter()
         .filter(|p| selected.contains(&p.id))
         .collect();
-    let merges = covering
+    let merging: Vec<&TagMergeProposal> = covering
         .iter()
+        .copied()
         .filter(|p| {
             !covering
                 .iter()
                 .any(|c| c.id != p.id && covered(c, pending).any(|v| v.id == p.id))
         })
+        .collect();
+    // Two checked AI rows that share a member both cover that member's
+    // spelling row. Its spellings go with one of them only (the highest
+    // confidence, then the first), so an edited target cannot give them two
+    // targets; the other row's shared member still chains to its target.
+    let mut by_rank = merging.clone();
+    by_rank.sort_by_key(|p| p.confidence.rank());
+    let mut owner: HashMap<Uuid, Uuid> = HashMap::new();
+    for p in &by_rank {
+        for v in covered(p, pending) {
+            owner.entry(v.id).or_insert(p.id);
+        }
+    }
+    let merges = merging
+        .iter()
         .map(|p| TagMerge {
             canonical: targets[&p.id].clone(),
-            members: row_spellings(p, pending),
+            members: unique(
+                p.members.iter().chain(
+                    covered(p, pending)
+                        .filter(|v| owner[&v.id] == p.id)
+                        .flat_map(|v| &v.members),
+                ),
+            ),
         })
         .collect();
     Ok(ReviewedApply {
@@ -1336,6 +1364,70 @@ mod tests {
         // An invalid edited target is refused.
         row.canonical = Some("bad\ntag".into());
         assert!(plan_reviewed_apply(&[row], &pending).is_err());
+    }
+
+    #[test]
+    fn a_spelling_row_covered_by_two_checked_rows_gets_one_target() {
+        use ProposalSource::*;
+        // A medium row joined the high group by its canonical, so both AI
+        // rows have `javascript` and both cover its spelling row.
+        let variants = proposal(
+            "javascript",
+            &["JavaScript", "javascript"],
+            Deterministic,
+            Confidence::High,
+        );
+        let medium = proposal(
+            "javascript",
+            &["ecmascript", "javascript"],
+            Llm,
+            Confidence::Medium,
+        );
+        let high = proposal("javascript", &["javascript", "js"], Llm, Confidence::High);
+        let pending = vec![variants.clone(), medium.clone(), high.clone()];
+        let mut edited = shown(&medium, &pending);
+        assert_eq!(edited.shown, s(&["ecmascript", "javascript", "JavaScript"]));
+        edited.canonical = Some("ECMAScript".into());
+        let rows = [edited, shown(&high, &pending)];
+
+        let plan = plan_reviewed_apply(&rows, &pending).unwrap();
+        // The spelling row goes with the high row only, listed first in
+        // `pending` or not.
+        assert_eq!(
+            plan.merges,
+            vec![
+                TagMerge {
+                    canonical: "ECMAScript".into(),
+                    members: s(&["ecmascript", "javascript"]),
+                },
+                TagMerge {
+                    canonical: "javascript".into(),
+                    members: s(&["javascript", "js", "JavaScript"]),
+                },
+            ]
+        );
+        assert_eq!(plan.ids.len(), 3);
+        // Every spelling has one target: the edited one, through the chain.
+        let mapping = crate::domain::tag_alias::merge_mapping(&plan.merges).unwrap();
+        for tag in ["JavaScript", "javascript", "js", "ecmascript"] {
+            assert_eq!(mapping[tag], "ECMAScript", "{tag}");
+        }
+
+        // With equal confidence, the first checked row takes it.
+        let other = proposal(
+            "javascript",
+            &["ecmascript", "javascript"],
+            Llm,
+            Confidence::High,
+        );
+        let pending = vec![variants.clone(), other.clone(), high.clone()];
+        let rows = [shown(&other, &pending), shown(&high, &pending)];
+        let plan = plan_reviewed_apply(&rows, &pending).unwrap();
+        assert_eq!(
+            plan.merges[0].members,
+            s(&["ecmascript", "javascript", "JavaScript"])
+        );
+        assert_eq!(plan.merges[1].members, s(&["javascript", "js"]));
     }
 
     #[test]

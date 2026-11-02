@@ -43,6 +43,10 @@ async function seedLibrary(page) {
     title,
     tags: [tag],
   }));
+  await importRecords(page, records);
+}
+
+async function importRecords(page, records) {
   const response = await page.request.post(
     "/api/v1/bookmarks/import?format=jsonl&mode=restore&strategy=upsert",
     {
@@ -156,4 +160,30 @@ test("without a provider key the AI run is disabled but spelling variants still 
   await expect(page.getByTestId("review-run-ai")).toBeDisabled();
   await page.getByTestId("review-run-normalize").click();
   await expect(page.getByTestId("review-notice")).toBeVisible();
+});
+
+test("a spelling that differs only by spaces shows its spaces", async ({ page }) => {
+  await signIn(page);
+  await clearSuggestions(page);
+  // HTML collapses spaces, so without a marker " zig " would look like "zig".
+  await importRecords(
+    page,
+    ["zig", " zig "].map((tag, i) => ({
+      id: crypto.randomUUID(),
+      url: `https://tags.example.com/zig-${i}`,
+      title: `Zig ${i}`,
+      tags: [tag],
+    })),
+  );
+
+  await page.goto("/tags/review");
+  await page.getByTestId("review-run-normalize").click();
+  const chips = row(page, "zig").getByTestId("review-chip");
+  await expect(chips).toHaveCount(2);
+  const padded = chips.filter({ hasText: "␠zig␠" });
+  await expect(padded).toHaveCount(1);
+  await expect(padded).toHaveAttribute("title", "“ zig ”");
+  const plain = chips.filter({ hasNotText: "␠" });
+  await expect(plain).toHaveCount(1);
+  await expect(plain).not.toHaveAttribute("title");
 });
