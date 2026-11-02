@@ -474,11 +474,14 @@ pub(super) mod search_tests {
     pub(crate) async fn pool() -> PgPool {
         let database_url = std::env::var("DATABASE_URL")
             .expect("DATABASE_URL is required for the ignored Postgres search test");
-        PgPoolOptions::new()
+        let pool = PgPoolOptions::new()
             .max_connections(8)
             .connect(&database_url)
             .await
-            .expect("DATABASE_URL must point at a migrated database")
+            .expect("DATABASE_URL must point at a migrated database");
+        // What main.rs does after migrating; Unavailable on a database without pgvector.
+        crate::adapters::postgres::vector_schema::ensure_vector_schema(&pool).await;
+        pool
     }
 
     pub(crate) async fn user(pool: &PgPool) -> Uuid {

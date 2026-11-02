@@ -5,7 +5,7 @@ mod domain;
 mod web;
 
 use adapters::article::readability::HtmlArticleFetcher;
-use adapters::embedder::EmbedderRouter;
+use adapters::embedder::{DisabledEmbedder, EmbedderRouter};
 use adapters::llm_client::{LlmClientConfig, LlmClientRouter};
 use adapters::login::google::GoogleLoginProvider;
 use adapters::login::local_password::LocalPasswordLoginProvider;
@@ -15,6 +15,7 @@ use adapters::metadata::iframely::IframelyExtractor;
 use adapters::metadata::opengraph_io::OpengraphIoExtractor;
 use adapters::openai_image::OpenAiImageGenerator;
 use adapters::postgres::PostgresPool;
+use adapters::postgres::vector_schema::VectorStatus;
 use adapters::screenshot::noop::NoopScreenshot;
 use adapters::screenshot::playwright::PlaywrightScreenshot;
 use adapters::storage::local::LocalStorage;
@@ -62,6 +63,8 @@ async fn main() {
         .run(&pool)
         .await
         .expect("Failed to run migrations");
+    // Never fails the boot: without pgvector, search is lexical only.
+    let vector_status = adapters::postgres::vector_schema::ensure_vector_schema(&pool).await;
 
     let db = Arc::new(PostgresPool::new(pool));
     let secret_box = Arc::new(SecretBox::new(&config.llm_settings_encryption_key));
@@ -209,9 +212,20 @@ async fn main() {
     let embedder: Arc<dyn Embedder> = Arc::new(
         EmbedderRouter::from_env().unwrap_or_else(|e| panic!("invalid embedding config: {e}")),
     );
+    let vector_unavailable = match vector_status {
+        VectorStatus::Ready => None,
+        VectorStatus::Unavailable(reason) => Some(reason),
+    };
+    let embedder: Arc<dyn Embedder> = if vector_unavailable.is_some() {
+        Arc::new(DisabledEmbedder)
+    } else {
+        embedder
+    };
     tracing::info!("embeddings: {}", embedder.model_id());
 
-    let search_service = Arc::new(SearchService::new(db.clone(), embedder.clone()));
+    let search_service = Arc::new(
+        SearchService::new(db.clone(), embedder.clone()).vector_unavailable(vector_unavailable),
+    );
 
     // Woken by the ingest worker after each result it stores.
     let embed_wake = Arc::new(tokio::sync::Notify::new());

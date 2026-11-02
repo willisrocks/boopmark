@@ -24,6 +24,8 @@ pub struct SearchService<R> {
     repo: Arc<R>,
     embedder: Arc<dyn Embedder>,
     last_fallback_warning: Mutex<Option<Instant>>,
+    /// Why the vector schema could not be created at startup, if it could not.
+    vector_unavailable: Option<String>,
 }
 
 impl<R: SearchRepository> SearchService<R> {
@@ -32,7 +34,14 @@ impl<R: SearchRepository> SearchService<R> {
             repo,
             embedder,
             last_fallback_warning: Mutex::new(None),
+            vector_unavailable: None,
         }
+    }
+
+    /// Shown in the owner line of Settings → Search index.
+    pub fn vector_unavailable(mut self, reason: Option<String>) -> Self {
+        self.vector_unavailable = reason;
+        self
     }
 
     /// Relevance-ranked search. The filter's `search` must be non-empty
@@ -162,12 +171,16 @@ impl<R: SearchRepository + SearchIndexRepository> SearchService<R> {
                 .map_or("not installed", |(_, v)| v.as_str())
                 .to_string()
         };
-        Ok(format!(
+        let line = format!(
             "{} · vector {} · pg_trgm {}",
             self.embedder.model_id(),
             version("vector"),
             version("pg_trgm")
-        ))
+        );
+        Ok(match &self.vector_unavailable {
+            Some(reason) => format!("vector search unavailable: {reason} · {line}"),
+            None => line,
+        })
     }
 }
 

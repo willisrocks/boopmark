@@ -11,6 +11,7 @@ pub mod session_repo;
 pub mod tag_alias_repo;
 pub mod tag_consolidation_job_repo;
 pub mod user_repo;
+pub mod vector_schema;
 
 use sqlx::PgPool;
 
