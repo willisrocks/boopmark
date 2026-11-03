@@ -42,11 +42,35 @@ pub struct Config {
     /// `PAGE_CAPTURE_MAX_BYTES`: the cap on the gzip body, and the same cap
     /// on the HTML it inflates to.
     pub page_capture_max_bytes: usize,
+    /// `PAGE_SCRAPER`: the server-side fallback for URL-only saves.
+    /// `disabled` unless it is `firecrawl`.
+    pub page_scraper: PageScraperBackend,
+    /// `PAGE_SCRAPER_API_KEY`: the operator's hosted-scraper key. Missing or
+    /// empty with `PAGE_SCRAPER=firecrawl` runs the disabled backend.
+    pub page_scraper_api_key: Option<String>,
+    /// `PAGE_SCRAPER_TIMEOUT_SECONDS`: one scrape, retries excluded.
+    pub page_scraper_timeout_seconds: u64,
+    /// `PAGE_SCRAPER_MONTHLY_BUDGET_PAGES`: pages per calendar month,
+    /// 0 meaning no cap.
+    pub page_scraper_monthly_budget_pages: u64,
 }
 
 /// The measured p90 page was 437 KB, the largest 1.9 MB; 5 MiB leaves room
 /// for a rendered page and matches the fetch path's `MAX_HTML_BYTES`.
 pub const DEFAULT_PAGE_CAPTURE_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+/// One scrape's budget, as the spec fixes it.
+pub const DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS: u64 = 30;
+
+/// The server-side scraper of the fallback decorator. The companion eval
+/// chose Firecrawl and dropped Obscura
+/// (`docs/superpowers/specs/assets/2026-11-03-scraper-eval.md`), so Obscura
+/// has no adapter and no value here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageScraperBackend {
+    Disabled,
+    Firecrawl,
+}
 
 #[derive(Debug, Clone)]
 pub enum ScreenshotBackend {
@@ -139,6 +163,19 @@ impl Config {
             page_capture_max_bytes: parse_capture_max_bytes(
                 env::var("PAGE_CAPTURE_MAX_BYTES").ok().as_deref(),
             ),
+            page_scraper: parse_page_scraper(env::var("PAGE_SCRAPER").ok().as_deref()),
+            page_scraper_api_key: env::var("PAGE_SCRAPER_API_KEY")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            page_scraper_timeout_seconds: parse_scraper_timeout(
+                env::var("PAGE_SCRAPER_TIMEOUT_SECONDS").ok().as_deref(),
+            ),
+            page_scraper_monthly_budget_pages: parse_scraper_budget(
+                env::var("PAGE_SCRAPER_MONTHLY_BUDGET_PAGES")
+                    .ok()
+                    .as_deref(),
+            ),
         }
     }
 }
@@ -169,6 +206,32 @@ fn parse_capture_max_bytes(value: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_PAGE_CAPTURE_MAX_BYTES)
 }
 
+/// `PAGE_SCRAPER`: only `firecrawl` enables the fallback. An unset or unknown
+/// value is the disabled backend, like `METADATA_FALLBACK_BACKEND`, so a typo
+/// leaves the app working and spending nothing.
+fn parse_page_scraper(value: Option<&str>) -> PageScraperBackend {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("firecrawl") => PageScraperBackend::Firecrawl,
+        _ => PageScraperBackend::Disabled,
+    }
+}
+
+/// One scrape's timeout, 30 s by default and at most 2 minutes: a scrape sits
+/// inside an ingest job's 2-minute budget.
+fn parse_scraper_timeout(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .map_or(DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, |n| n.min(120))
+}
+
+/// The monthly page cap, 0 (no cap) by default.
+fn parse_scraper_budget(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 fn llm_settings_encryption_key() -> String {
     let raw_key =
         env::var("LLM_SETTINGS_ENCRYPTION_KEY").expect("LLM_SETTINGS_ENCRYPTION_KEY required");
@@ -190,8 +253,10 @@ fn llm_settings_encryption_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_PAGE_CAPTURE_MAX_BYTES, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend,
+        DEFAULT_PAGE_CAPTURE_MAX_BYTES, DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, LoginAdapter,
+        MetadataFallbackBackend, PageScraperBackend, ScreenshotBackend,
         llm_settings_encryption_key, parse_capture_max_bytes, parse_flag, parse_ingest_concurrency,
+        parse_page_scraper, parse_scraper_budget, parse_scraper_timeout,
     };
 
     /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.
@@ -310,6 +375,48 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn scraper_backend_is_disabled_unless_it_says_firecrawl() {
+        assert_eq!(parse_page_scraper(None), PageScraperBackend::Disabled);
+        assert_eq!(
+            parse_page_scraper(Some("disabled")),
+            PageScraperBackend::Disabled
+        );
+        assert_eq!(
+            parse_page_scraper(Some(" Firecrawl ")),
+            PageScraperBackend::Firecrawl
+        );
+        // Obscura was evaluated and dropped; its name must not enable anything.
+        for other in ["obscura", "", "firecraw"] {
+            assert_eq!(
+                parse_page_scraper(Some(other)),
+                PageScraperBackend::Disabled,
+                "{other:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scraper_timeout_defaults_to_thirty_seconds_and_stays_under_the_job_budget() {
+        assert_eq!(parse_scraper_timeout(None), 30);
+        assert_eq!(parse_scraper_timeout(Some(" 45 ")), 45);
+        assert_eq!(parse_scraper_timeout(Some("600")), 120);
+        for bad in ["0", "-5", "", "nope"] {
+            assert_eq!(
+                parse_scraper_timeout(Some(bad)),
+                DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn scraper_budget_is_uncapped_unless_set() {
+        assert_eq!(parse_scraper_budget(None), 0);
+        assert_eq!(parse_scraper_budget(Some("200")), 200);
+        assert_eq!(parse_scraper_budget(Some("wrong")), 0);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::adapters::net::{
 use crate::domain::error::CF_CHALLENGE_MSG;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher, FetchedArticle};
 use crate::domain::search::{
-    ARTICLE_TEXT_CAP_BYTES, ARTICLE_TEXT_CAP_CHARS, SNIPPET_START, SNIPPET_STOP,
+    ARTICLE_TEXT_CAP_BYTES, ARTICLE_TEXT_CAP_CHARS, ContentSource, SNIPPET_START, SNIPPET_STOP,
 };
 use encoding_rs::{Encoding, UTF_8};
 use reqwest::StatusCode;
@@ -205,6 +205,7 @@ impl HtmlArticleFetcher {
             text,
             final_url,
             html_bytes,
+            source: ContentSource::Fetched,
         })
     }
 }

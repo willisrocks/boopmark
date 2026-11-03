@@ -1,7 +1,7 @@
 use crate::domain::error::DomainError;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher};
 use crate::domain::ports::search_repo::SearchRepository;
-use crate::domain::search::{ContentSource, IngestFailure, IngestJob, IngestStatus, retry_delay};
+use crate::domain::search::{IngestFailure, IngestJob, IngestStatus, retry_delay};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -133,7 +133,7 @@ where
             Ok(article) => {
                 let hash = format!("{:x}", Sha256::digest(article.text.as_bytes()));
                 self.repo
-                    .store_article(&job, &article.text, &hash, ContentSource::Fetched)
+                    .store_article(&job, &article.text, &hash, article.source)
                     .await
             }
             Err(err) => {
@@ -167,7 +167,7 @@ where
 mod tests {
     use super::*;
     use crate::domain::ports::article_fetcher::FetchedArticle;
-    use crate::domain::search::{SearchHit, SearchQuery};
+    use crate::domain::search::{ContentSource, SearchHit, SearchQuery};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -257,6 +257,7 @@ mod tests {
                         text: "article body".into(),
                         final_url: url,
                         html_bytes: 100,
+                        source: ContentSource::Fetched,
                     }),
                     "slow" => {
                         tokio::time::sleep(Duration::from_secs(600)).await;

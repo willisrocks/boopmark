@@ -1,3 +1,4 @@
+use crate::domain::search::ContentSource;
 use std::future::Future;
 use std::pin::Pin;
 use thiserror::Error;
@@ -9,6 +10,9 @@ pub struct FetchedArticle {
     /// The URL after redirects.
     pub final_url: String,
     pub html_bytes: usize,
+    /// Which path produced the text: the direct fetch, or the scraper
+    /// fallback. A browser capture never comes through this port.
+    pub source: ContentSource,
 }
 
 /// Why no article came back. The ingest worker retries `Transient` errors
