@@ -46,12 +46,17 @@ pub trait SearchRepository: Send + Sync {
 
     /// Store text captured from the browser that displayed the page: the row
     /// is `fetched` with `source = 'captured'`, and any fetch already in
-    /// flight loses its claim, so its result is dropped. Returns false when
-    /// the bookmark was deleted or is not this user's.
+    /// flight loses its claim, so its result is dropped.
+    ///
+    /// `url` is the bookmark URL the request (or the queued page) was
+    /// checked against: if the bookmark has been pointed at another page
+    /// since, nothing is stored. Returns false when the bookmark was
+    /// deleted, is not this user's, or no longer has that URL.
     async fn store_capture(
         &self,
         bookmark_id: Uuid,
         user_id: Uuid,
+        url: &str,
         text: &str,
         content_hash: &str,
     ) -> Result<bool, DomainError>;

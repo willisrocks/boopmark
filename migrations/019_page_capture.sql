@@ -51,6 +51,9 @@ BEGIN
         IF TG_OP = 'UPDATE' AND to_regclass('bookmark_chunks') IS NOT NULL THEN
             DELETE FROM bookmark_chunks WHERE bookmark_id = NEW.id;
         END IF;
+        -- A capture queued for the old page would be indexed against the new
+        -- URL; it is dropped with it.
+        DELETE FROM bookmark_page_captures WHERE bookmark_id = NEW.id;
         PERFORM pg_notify('bookmark_ingest', '');
     ELSE
         UPDATE bookmark_contents SET

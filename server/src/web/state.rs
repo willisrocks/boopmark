@@ -57,6 +57,9 @@ pub struct AppState {
     pub capture_extractor: Arc<HtmlExtractor>,
     /// Woken after a capture is stored, so the embed worker picks it up.
     pub embed_wake: Arc<tokio::sync::Notify>,
+    /// Woken when the route queues a capture, so the drain parses it now
+    /// instead of on its idle poll.
+    pub capture_wake: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]

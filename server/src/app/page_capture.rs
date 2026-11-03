@@ -1,23 +1,23 @@
 //! The capture queue: HTML the browser sent that the capture route accepted
-//! but did not parse in the request (the `queued` answer). The ingest worker
-//! drains it before claiming fetch jobs.
+//! but did not parse in the request (the `queued` answer). A dedicated loop
+//! drains it, so it runs whether or not the article fetcher does.
 
-use crate::adapters::article::readability::HtmlExtractor;
+use crate::adapters::article::readability::{CaptureExtractError, HtmlExtractor};
 use crate::domain::error::DomainError;
 use crate::domain::ports::page_capture_repo::{CaptureQueueRepository, NewCapture, QueuedCapture};
 use crate::domain::ports::search_repo::SearchRepository;
 use crate::domain::search::ContentSource;
-use flate2::bufread::GzDecoder;
+use crate::domain::url_match::same_page;
 use sha2::{Digest, Sha256};
-use std::future::Future;
-use std::io::Read;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
-/// One drain parses at most this many payloads, however many slots are free.
+/// One drain parses at most this many payloads.
 const DRAIN_BATCH: usize = 32;
+/// How long the drain sleeps when nothing arrives; it also carries the
+/// hourly sweep of expired payloads.
+const IDLE_POLL: Duration = Duration::from_secs(60);
 /// A payload that has waited this long is deleted unparsed: whatever made
 /// the request time out will not get better by waiting a day.
 const MAX_QUEUE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -25,46 +25,8 @@ const MAX_QUEUE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const PURGE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const MAX_ERROR_CHARS: usize = 500;
 
-/// Why a captured payload was refused before any parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GzipError {
-    /// Over the decompressed cap: a gzip bomb, or a page too large for
-    /// either cap.
-    TooLarge,
-    /// Not gzip, truncated, or empty.
-    Corrupt,
-}
-
-/// Inflate a gzip body, never producing more than `cap` bytes: the output is
-/// bounded while inflating, so a bomb costs milliseconds, not memory. A
-/// second gzip member or bytes after the compressed stream are `Corrupt`:
-/// the extension sends one gzip stream of one document.
-pub fn gunzip_capped(gz: &[u8], cap: usize) -> Result<Vec<u8>, GzipError> {
-    let mut out = Vec::new();
-    let mut decoder = GzDecoder::new(gz);
-    // One byte more than the cap tells "exactly at the cap" from "over it".
-    let limit = (cap as u64).saturating_add(1);
-    decoder
-        .by_ref()
-        .take(limit)
-        .read_to_end(&mut out)
-        .map_err(|_| GzipError::Corrupt)?;
-    if out.len() > cap {
-        return Err(GzipError::TooLarge);
-    }
-    if out.is_empty() {
-        return Err(GzipError::Corrupt);
-    }
-    // `bufread::GzDecoder` stops at the end of its one member, so leftover
-    // input is trailing garbage.
-    if !decoder.get_ref().is_empty() {
-        return Err(GzipError::Corrupt);
-    }
-    Ok(out)
-}
-
 /// The capture write path: text stored now, or a payload queued for the
-/// ingest worker (the route answers `202 indexed` or `202 queued`).
+/// drain (the route answers `202 indexed` or `202 queued`).
 pub struct CaptureService<R> {
     repo: Arc<R>,
 }
@@ -77,17 +39,19 @@ where
         Self { repo }
     }
 
-    /// Store captured text as `source = 'captured'`. False when the bookmark
-    /// was deleted or is not the user's.
+    /// Store captured text as `source = 'captured'`, for the bookmark URL the
+    /// request was checked against. False when the bookmark was deleted, is
+    /// not the user's, or no longer has that URL.
     pub async fn store_capture(
         &self,
         bookmark_id: uuid::Uuid,
         user_id: uuid::Uuid,
+        url: &str,
         text: &str,
     ) -> Result<bool, DomainError> {
         let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
         self.repo
-            .store_capture(bookmark_id, user_id, text, &hash)
+            .store_capture(bookmark_id, user_id, url, text, &hash)
             .await
     }
 
@@ -95,17 +59,6 @@ where
     pub async fn queue_capture(&self, capture: &NewCapture) -> Result<bool, DomainError> {
         self.repo.enqueue_capture(capture).await
     }
-}
-
-/// What the ingest worker calls to drain the capture queue, without knowing
-/// the repository's other bounds.
-pub trait CaptureDrain: Send + Sync {
-    /// Parse up to `limit` waiting payloads, store what parses, and return
-    /// how many payloads were taken.
-    fn drain(
-        &self,
-        limit: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<usize, DomainError>> + Send + '_>>;
 }
 
 /// Parses the capture queue through the same `HtmlExtractor` as a fetch.
@@ -138,6 +91,32 @@ where
     pub fn notify_on_stored(mut self, notify: Arc<Notify>) -> Self {
         self.on_stored = Some(notify);
         self
+    }
+
+    /// Run forever on a background task. `wake` is the route's "a capture is
+    /// waiting"; the idle poll covers the expired-payload sweep. This is not
+    /// part of the ingest worker, so captures drain with
+    /// `ARTICLE_INGEST_ENABLED=0` too.
+    pub fn spawn(self, wake: Arc<Notify>) {
+        tokio::spawn(async move {
+            tracing::info!("capture drain started");
+            loop {
+                loop {
+                    match self.drain_once(DRAIN_BATCH).await {
+                        Ok(0) => break,
+                        Ok(captures) => tracing::debug!(captures, "parsed captured pages"),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "draining the capture queue failed");
+                            break;
+                        }
+                    }
+                }
+                tokio::select! {
+                    _ = wake.notified() => {}
+                    _ = tokio::time::sleep(IDLE_POLL) => {}
+                }
+            }
+        });
     }
 
     /// Sweep expired payloads, then claim and parse up to `limit`. Returns
@@ -182,18 +161,6 @@ where
     }
 }
 
-impl<R> CaptureDrain for CaptureWorker<R>
-where
-    R: SearchRepository + CaptureQueueRepository + 'static,
-{
-    fn drain(
-        &self,
-        limit: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<usize, DomainError>> + Send + '_>> {
-        Box::pin(async move { self.drain_once(limit).await })
-    }
-}
-
 /// One claimed payload and what it needs to become stored text.
 struct CaptureTask<R> {
     repo: Arc<R>,
@@ -208,33 +175,61 @@ where
 {
     async fn process(&self, capture: QueuedCapture) {
         let bookmark_id = capture.bookmark_id;
-        let html = match gunzip_capped(&capture.html_gz, self.max_bytes) {
-            Ok(html) => html,
-            Err(e) => {
-                // The route validated the same bytes; this is a bug or a
-                // hand-written row. Keep no payload either way.
-                tracing::warn!(%bookmark_id, error = ?e, "queued capture is not usable gzip");
+        // The bookmark may have been pointed at another page since the
+        // capture was queued: the old page's text must not be indexed
+        // against the new URL.
+        if !same_page(&capture.bookmark_url, &capture.page_url) {
+            tracing::debug!(
+                %bookmark_id,
+                page_url = %capture.page_url,
+                bookmark_url = %capture.bookmark_url,
+                "queued capture dropped: the bookmark now has another URL"
+            );
+            return;
+        }
+        let text = match self
+            .extractor
+            .extract_captured(
+                Arc::new(capture.html_gz),
+                self.max_bytes,
+                Some("text/html; charset=utf-8"),
+                &capture.page_url,
+            )
+            .await
+        {
+            Ok(text) => text,
+            // The route validated the same bytes; this is a bug or a
+            // hand-written row. Keep no payload either way.
+            Err(CaptureExtractError::Gzip(err)) => {
+                tracing::warn!(%bookmark_id, error = ?err, "queued capture is not usable gzip");
                 self.fail(bookmark_id, "captured page could not be decoded")
                     .await;
                 return;
             }
-        };
-        let text = match self
-            .extractor
-            .extract(html, Some("text/html; charset=utf-8"), &capture.page_url)
-            .await
-        {
-            Ok(text) => text,
-            Err(err) => {
+            Err(CaptureExtractError::NoArticle(err)) => {
                 tracing::debug!(%bookmark_id, error = %err, "queued capture has no article");
                 self.fail(bookmark_id, "no readable article").await;
+                return;
+            }
+            Err(CaptureExtractError::Unfinished(err)) => {
+                // Do not report a timeout as "no readable article": the page
+                // may well have one.
+                tracing::warn!(%bookmark_id, error = %err, "queued capture was not parsed");
+                self.fail(bookmark_id, &format!("parse failed: {err}"))
+                    .await;
                 return;
             }
         };
         let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
         match self
             .repo
-            .store_capture(bookmark_id, capture.user_id, &text, &hash)
+            .store_capture(
+                bookmark_id,
+                capture.user_id,
+                &capture.bookmark_url,
+                &text,
+                &hash,
+            )
             .await
         {
             Ok(true) => {
@@ -244,7 +239,7 @@ where
                 }
             }
             Ok(false) => {
-                tracing::debug!(%bookmark_id, "capture result dropped: bookmark gone")
+                tracing::debug!(%bookmark_id, "capture result dropped: bookmark gone or moved")
             }
             Err(e) => tracing::warn!(%bookmark_id, error = %e, "storing a capture failed"),
         }
@@ -261,7 +256,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ports::page_capture_repo::NewCapture;
     use crate::domain::search::{IngestFailure, IngestJob, SearchHit, SearchQuery};
     use std::io::Write;
     use std::sync::Mutex;
@@ -284,7 +278,7 @@ mod tests {
     struct FakeRepo {
         queued: Mutex<Vec<QueuedCapture>>,
         claimed: Mutex<Vec<i64>>,
-        stored: Mutex<Vec<(Uuid, Uuid, String)>>,
+        stored: Mutex<Vec<(Uuid, Uuid, String, String)>>,
         failures: Mutex<Vec<(Uuid, String)>>,
         purges: Mutex<Vec<Duration>>,
     }
@@ -351,28 +345,55 @@ mod tests {
             &self,
             bookmark_id: Uuid,
             user_id: Uuid,
+            url: &str,
             text: &str,
             _content_hash: &str,
         ) -> Result<bool, DomainError> {
-            self.stored
-                .lock()
-                .unwrap()
-                .push((bookmark_id, user_id, text.to_string()));
+            self.stored.lock().unwrap().push((
+                bookmark_id,
+                user_id,
+                url.to_string(),
+                text.to_string(),
+            ));
             Ok(true)
         }
     }
 
     fn capture(html: &[u8]) -> QueuedCapture {
+        let page_url = "https://example.com/article".to_string();
         QueuedCapture {
             bookmark_id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),
-            page_url: "https://example.com/article".into(),
+            bookmark_url: page_url.clone(),
+            page_url,
             html_gz: gzip(html),
         }
     }
 
     fn worker(repo: &Arc<FakeRepo>, cap: usize) -> CaptureWorker<FakeRepo> {
         CaptureWorker::new(repo.clone(), Arc::new(HtmlExtractor::new(1)), cap)
+    }
+
+    /// Wait, without sleeping, until the drain has claimed `n` times.
+    async fn claimed_at_least(repo: &FakeRepo, n: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while repo.claimed.lock().unwrap().len() < n {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the drain loop claimed");
+    }
+
+    /// Wait, without sleeping, until the drain has stored `n` captures.
+    async fn stored_at_least(repo: &FakeRepo, n: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while repo.stored.lock().unwrap().len() < n {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the drain stored the capture");
     }
 
     #[tokio::test]
@@ -395,7 +416,11 @@ mod tests {
             assert_eq!(stored.len(), 2);
             assert_eq!(stored[0].0, first.bookmark_id);
             assert_eq!(stored[0].1, first.user_id);
-            assert!(stored[0].2.contains("The borrow checker enforces"));
+            assert_eq!(
+                stored[0].2, first.bookmark_url,
+                "stored for the checked URL"
+            );
+            assert!(stored[0].3.contains("The borrow checker enforces"));
             assert!(repo.failures.lock().unwrap().is_empty());
         }
         // The embed worker is woken for the stored capture.
@@ -426,10 +451,48 @@ mod tests {
         let repo = Arc::new(FakeRepo::default());
         let page =
             capture(format!("<html><body><p>{}</p></body></html>", "x".repeat(4096)).as_bytes());
-        *repo.queued.lock().unwrap() = vec![page.clone()];
+        let id = page.bookmark_id;
+        *repo.queued.lock().unwrap() = vec![page];
         assert_eq!(worker(&repo, 1024).drain_once(4).await.unwrap(), 1);
         assert!(repo.stored.lock().unwrap().is_empty());
-        assert_eq!(repo.failures.lock().unwrap().len(), 1);
+        assert_eq!(
+            repo.failures.lock().unwrap().as_slice(),
+            [(id, "captured page could not be decoded".to_string())]
+        );
+    }
+
+    /// A bookmark pointed at another page since the capture was queued keeps
+    /// its text alone; the payload is dropped silently.
+    #[tokio::test]
+    async fn a_capture_of_another_page_is_dropped() {
+        let repo = Arc::new(FakeRepo::default());
+        let mut page = capture(ARTICLE.as_bytes());
+        page.bookmark_url = "https://example.com/another-page".into();
+        *repo.queued.lock().unwrap() = vec![page];
+        assert_eq!(
+            worker(&repo, 5 * 1024 * 1024).drain_once(4).await.unwrap(),
+            1
+        );
+        assert!(repo.stored.lock().unwrap().is_empty());
+        assert!(
+            repo.failures.lock().unwrap().is_empty(),
+            "a moved bookmark is not a parse failure"
+        );
+    }
+
+    /// The drain is its own loop: it runs at spawn, and the route's wake
+    /// makes it look again without waiting for the idle poll.
+    #[tokio::test]
+    async fn the_drain_loop_runs_and_is_woken_by_a_new_capture() {
+        let repo = Arc::new(FakeRepo::default());
+        let wake = Arc::new(Notify::new());
+        worker(&repo, 5 * 1024 * 1024).spawn(wake.clone());
+        claimed_at_least(&repo, 1).await;
+
+        *repo.queued.lock().unwrap() = vec![capture(ARTICLE.as_bytes())];
+        wake.notify_one();
+        claimed_at_least(&repo, 2).await;
+        stored_at_least(&repo, 1).await;
     }
 
     #[tokio::test]
@@ -441,40 +504,5 @@ mod tests {
         assert_eq!(*repo.claimed.lock().unwrap(), [DRAIN_BATCH as i64, 2]);
         // The sweep runs once, then waits an hour.
         assert_eq!(repo.purges.lock().unwrap().as_slice(), [MAX_QUEUE_AGE]);
-    }
-
-    #[test]
-    fn gzip_caps_are_exact_and_bombs_are_rejected() {
-        let payload = vec![b'a'; 1000];
-        let gz = gzip(&payload);
-        assert_eq!(
-            gunzip_capped(&gz, 1000).unwrap(),
-            payload,
-            "exactly at the cap"
-        );
-        assert_eq!(gunzip_capped(&gz, 999), Err(GzipError::TooLarge));
-        assert_eq!(gunzip_capped(&gz, 5000).unwrap().len(), 1000);
-
-        // A 100:1 bomb is refused at the output cap, not inflated whole.
-        let bomb = gzip(&vec![0u8; 5 * 1024 * 1024]);
-        assert_eq!(gunzip_capped(&bomb, 1024 * 1024), Err(GzipError::TooLarge));
-
-        assert_eq!(gunzip_capped(b"not gzip", 100), Err(GzipError::Corrupt));
-        assert_eq!(gunzip_capped(&[], 100), Err(GzipError::Corrupt));
-        // Truncated inside the CRC trailer, with room for all the output.
-        assert_eq!(
-            gunzip_capped(&gz[..gz.len() - 3], 5000),
-            Err(GzipError::Corrupt)
-        );
-        assert_eq!(gunzip_capped(&gzip(b""), 100), Err(GzipError::Corrupt));
-
-        let mut trailing = gz.clone();
-        trailing.extend_from_slice(b"garbage");
-        assert_eq!(gunzip_capped(&trailing, 1000), Err(GzipError::Corrupt));
-        // The extension sends one stream of one document: a second gzip
-        // member is trailing input, and `Corrupt`.
-        let mut two_members = gz.clone();
-        two_members.extend_from_slice(&gzip(b"second"));
-        assert_eq!(gunzip_capped(&two_members, 5000), Err(GzipError::Corrupt));
     }
 }

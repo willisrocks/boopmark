@@ -1,4 +1,3 @@
-use crate::app::page_capture::CaptureDrain;
 use crate::domain::error::DomainError;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher};
 use crate::domain::ports::search_repo::SearchRepository;
@@ -56,8 +55,6 @@ pub struct IngestWorker<R, F> {
     /// Woken after each stored result, so the embedding worker picks it up
     /// at once.
     on_stored: Option<Arc<Notify>>,
-    /// Captured pages waiting for a parse; drained before fetch jobs.
-    captures: Option<Arc<dyn CaptureDrain>>,
 }
 
 impl<R, F> IngestWorker<R, F>
@@ -71,20 +68,12 @@ where
             fetcher,
             concurrency: concurrency.max(1),
             on_stored: None,
-            captures: None,
         }
     }
 
     /// Notify `notify` whenever a result (article or failure) is stored.
     pub fn notify_on_stored(mut self, notify: Arc<Notify>) -> Self {
         self.on_stored = Some(notify);
-        self
-    }
-
-    /// Parse captured pages waiting in the capture queue, using the free
-    /// slots, before claiming fetch jobs.
-    pub fn with_capture_drain(mut self, drain: Arc<dyn CaptureDrain>) -> Self {
-        self.captures = Some(drain);
         self
     }
 
@@ -101,9 +90,6 @@ where
         );
         let mut in_flight = JoinSet::new();
         loop {
-            // A capture answers `queued` only when its parse did not fit the
-            // request, so it is the user's pending text: parse it first.
-            self.drain_captures(&in_flight).await;
             if let Err(e) = self.clone().fill(&mut in_flight).await {
                 tracing::warn!(error = %e, "article ingest: claiming jobs failed");
             }
@@ -137,23 +123,6 @@ where
             in_flight.spawn(async move { worker.process(job).await });
         }
         Ok(())
-    }
-
-    /// Parse waiting captures on the free slots. The drain parses them to
-    /// completion, so the slots it uses are not added to `in_flight`.
-    async fn drain_captures(&self, in_flight: &JoinSet<()>) {
-        let Some(drain) = &self.captures else {
-            return;
-        };
-        let free = self.concurrency.saturating_sub(in_flight.len());
-        if free == 0 {
-            return;
-        }
-        match drain.drain(free).await {
-            Ok(0) => {}
-            Ok(captures) => tracing::debug!(captures, "parsed captured pages"),
-            Err(e) => tracing::warn!(error = %e, "draining the capture queue failed"),
-        }
     }
 
     async fn process(&self, job: IngestJob) {
@@ -210,8 +179,6 @@ mod tests {
         claims: Mutex<Vec<i64>>,
         stored: Mutex<Vec<(IngestJob, String, String)>>,
         failures: Mutex<Vec<(IngestJob, IngestFailure)>>,
-        /// What the worker did, in order: `drain` or `claim`.
-        calls: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl SearchRepository for FakeRepo {
@@ -228,7 +195,6 @@ mod tests {
             limit: i64,
             _lease: Duration,
         ) -> Result<Vec<IngestJob>, DomainError> {
-            self.calls.lock().unwrap().push("claim");
             self.claims.lock().unwrap().push(limit);
             let mut queue = self.queue.lock().unwrap();
             let n = queue.len().min(limit as usize);
@@ -266,6 +232,7 @@ mod tests {
             &self,
             _bookmark_id: Uuid,
             _user_id: Uuid,
+            _url: &str,
             _text: &str,
             _content_hash: &str,
         ) -> Result<bool, DomainError> {
@@ -421,39 +388,5 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].1.status, IngestStatus::Pending);
         assert_eq!(failures[0].1.error, "timed out");
-    }
-
-    /// The drain answers a capture the route accepted but could not parse in
-    /// the request, so it runs before any fetch job is claimed.
-    struct FakeDrain {
-        calls: Arc<Mutex<Vec<&'static str>>>,
-        taken: usize,
-    }
-
-    impl CaptureDrain for FakeDrain {
-        fn drain(
-            &self,
-            limit: usize,
-        ) -> Pin<Box<dyn Future<Output = Result<usize, DomainError>> + Send + '_>> {
-            self.calls.lock().unwrap().push("drain");
-            let taken = self.taken.min(limit);
-            Box::pin(async move { Ok(taken) })
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn the_capture_queue_is_drained_before_fetch_jobs_are_claimed() {
-        let repo = Arc::new(FakeRepo::default());
-        let wake = Arc::new(Notify::new());
-        IngestWorker::new(repo.clone(), Arc::new(FakeFetcher), 2)
-            .with_capture_drain(Arc::new(FakeDrain {
-                calls: repo.calls.clone(),
-                taken: 5,
-            }))
-            .spawn(wake);
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let calls = repo.calls.lock().unwrap();
-        assert!(calls.len() >= 2, "{calls:?}");
-        assert_eq!(&calls[..2], ["drain", "claim"]);
     }
 }

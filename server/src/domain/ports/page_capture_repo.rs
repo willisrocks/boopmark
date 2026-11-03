@@ -27,6 +27,10 @@ pub struct NewCapture {
 pub struct QueuedCapture {
     pub bookmark_id: Uuid,
     pub user_id: Uuid,
+    /// The bookmark's URL when the payload was claimed: the capture is only
+    /// stored if `page_url` is still that page.
+    pub bookmark_url: String,
+    /// `X-Page-Url` when the payload was queued.
     pub page_url: String,
     pub html_gz: Vec<u8>,
 }

@@ -236,6 +236,7 @@ mod tests {
             &self,
             _bookmark_id: Uuid,
             _user_id: Uuid,
+            _url: &str,
             _text: &str,
             _content_hash: &str,
         ) -> Result<bool, DomainError> {

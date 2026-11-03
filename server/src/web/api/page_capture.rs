@@ -17,11 +17,11 @@ use serde::Serialize;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
+use crate::adapters::article::gzip::GzipError;
+use crate::adapters::article::readability::CaptureExtractError;
 use crate::adapters::net::mime_type;
-use crate::app::page_capture::{GzipError, gunzip_capped};
 use crate::domain::bookmark::Bookmark;
 use crate::domain::error::DomainError;
-use crate::domain::ports::article_fetcher::ArticleFetchError;
 use crate::domain::ports::page_capture_repo::NewCapture;
 use crate::domain::url_match::{parse_web_url, same_page};
 use crate::web::extractors::AuthUser;
@@ -215,45 +215,50 @@ async fn capture(
     let cap = state.config.page_capture_max_bytes;
     check_content_length(headers, cap)?;
 
-    let gz = read_capped(body, cap).await?;
-    let html = gunzip_capped(&gz, cap).map_err(|e| match e {
-        GzipError::TooLarge => CaptureError::TooLarge,
-        GzipError::Corrupt => CaptureError::BadGzip,
-    })?;
+    let gz = std::sync::Arc::new(read_capped(body, cap).await?);
 
+    // Inflating and parsing happen in one blocking task, so neither runs on
+    // an async worker thread.
     match state
         .capture_extractor
-        .extract(html, Some(&content_type), page.as_str())
+        .extract_captured(gz.clone(), cap, Some(&content_type), page.as_str())
         .await
     {
         Ok(text) => {
             // `store_capture` clears any claim in flight and drops the old
-            // text; the embed worker re-chunks when the text changed.
-            if !state.page_capture.store_capture(id, user_id, &text).await? {
+            // text; the embed worker re-chunks when the text changed. It is
+            // scoped to the URL this request was checked against, so a
+            // bookmark moved in the meantime keeps its own state.
+            if !state
+                .page_capture
+                .store_capture(id, user_id, &bookmark.url, &text)
+                .await?
+            {
                 return Err(CaptureError::NotFound);
             }
             state.embed_wake.notify_one();
             Ok("indexed")
         }
         // The parse did not fit the request's budget: keep the payload and
-        // let the ingest worker parse it.
-        Err(ArticleFetchError::Transient(_)) => {
+        // let the drain parse it.
+        Err(CaptureExtractError::Unfinished(_)) => {
             let capture = NewCapture {
                 bookmark_id: id,
                 user_id,
                 page_url: page.to_string(),
-                html_gz: gz,
+                html_gz: (*gz).clone(),
             };
             if state.page_capture.queue_capture(&capture).await? {
+                state.capture_wake.notify_one();
                 Ok("queued")
             } else {
                 Err(CaptureError::Busy)
             }
         }
+        Err(CaptureExtractError::Gzip(GzipError::TooLarge)) => Err(CaptureError::TooLarge),
+        Err(CaptureExtractError::Gzip(GzipError::Corrupt)) => Err(CaptureError::BadGzip),
         // Readability found no article, or the document is unreadable.
-        Err(ArticleFetchError::Permanent(_)) | Err(ArticleFetchError::Skipped(_)) => {
-            Err(CaptureError::NoArticle)
-        }
+        Err(CaptureExtractError::NoArticle(_)) => Err(CaptureError::NoArticle),
     }
 }
 
@@ -421,6 +426,7 @@ mod tests {
             page_capture: Arc::new(CaptureService::new(db)),
             capture_extractor: Arc::new(HtmlExtractor::new(2)),
             embed_wake: Arc::new(tokio::sync::Notify::new()),
+            capture_wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -885,6 +891,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(queued, 0, "the drain took the payload");
+
+        // A capture queued for the page the bookmark is then pointed away
+        // from is dropped with the URL change, and the drain stores nothing.
+        sqlx::query(
+            "UPDATE bookmark_contents SET text = NULL, source = NULL WHERE bookmark_id = $1",
+        )
+        .bind(page.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(service.queue_capture(&capture).await.unwrap());
+        sqlx::query(
+            "UPDATE bookmarks SET url = 'https://medium.com/@writer/another-post' WHERE id = $1",
+        )
+        .bind(page.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM bookmark_page_captures WHERE bookmark_id = $1",
+        )
+        .bind(page.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(queued, 0, "the URL change dropped the queued payload");
+        assert_eq!(worker.drain_once(8).await.unwrap(), 0);
+        assert_eq!(contents(&pool, page.id).await.1, None);
 
         sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(owner)

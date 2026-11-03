@@ -1,3 +1,4 @@
+use crate::adapters::article::gzip::{GzipError, gunzip_capped};
 use crate::adapters::metadata::html::{is_cloudflare_challenge, is_cloudflare_challenge_response};
 use crate::adapters::net::{
     CappedReadError, GuardedGetError, HostThrottle, Lookup, SystemLookup, UrlGuard,
@@ -56,6 +57,18 @@ pub struct HtmlExtractor {
     slots: Arc<Semaphore>,
 }
 
+/// Why a captured body produced no text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureExtractError {
+    /// The body is not usable gzip, or inflates past the cap.
+    Gzip(GzipError),
+    /// The parse found no article (or the document is unreadable).
+    NoArticle(ArticleFetchError),
+    /// The extraction did not finish: it timed out, or its task failed. The
+    /// caller keeps the payload and the drain tries again.
+    Unfinished(String),
+}
+
 impl HtmlExtractor {
     /// `slots` bounds the blocking threads that parse pages.
     pub fn new(slots: usize) -> Self {
@@ -64,33 +77,52 @@ impl HtmlExtractor {
         }
     }
 
-    /// A captured page: decode and parse. No challenge check — if the user's
-    /// browser rendered a challenge, there is no article, and saying so is
-    /// honest.
-    pub async fn extract(
+    /// A captured page: inflate, decode and parse on one blocking slot, so
+    /// no work for a 5 MiB body happens on an async worker thread. The body
+    /// is shared, not moved, so a caller that gets [`CaptureExtractError::Unfinished`]
+    /// can still keep it for the drain.
+    ///
+    /// There is no challenge check: if the user's browser rendered a
+    /// challenge, there is no article, and saying so is honest.
+    pub async fn extract_captured(
         &self,
-        body: Vec<u8>,
+        gz: Arc<Vec<u8>>,
+        max_bytes: usize,
         content_type: Option<&str>,
         url: &str,
-    ) -> Result<String, ArticleFetchError> {
-        run_extraction(&self.slots, body, content_type, url, None).await
+    ) -> Result<String, CaptureExtractError> {
+        let content_type = content_type.map(str::to_string);
+        let url = url.to_string();
+        let parsed = run_bounded(&self.slots, EXTRACT_TIMEOUT, move || {
+            let html = gunzip_capped(&gz, max_bytes).map_err(CaptureExtractError::Gzip)?;
+            let html = decode_html(html, content_type.as_deref());
+            extract_text(&html, &url).map_err(CaptureExtractError::NoArticle)
+        })
+        .await;
+        match parsed {
+            Ok(result) => result,
+            Err(err) => Err(CaptureExtractError::Unfinished(err.to_string())),
+        }
     }
 
-    /// A fetched page: as `extract`, but a challenge page is reported as
-    /// such rather than as "no readable article".
+    /// A fetched page: decode and parse, and report a challenge page as such
+    /// rather than as "no readable article".
     pub async fn extract_fetched(
         &self,
         body: Vec<u8>,
         content_type: Option<&str>,
         url: &str,
     ) -> Result<String, ArticleFetchError> {
-        fn refuse_challenge(html: &str) -> Result<(), ArticleFetchError> {
-            if is_cloudflare_challenge(html) {
+        let content_type = content_type.map(str::to_string);
+        let url = url.to_string();
+        run_bounded(&self.slots, EXTRACT_TIMEOUT, move || {
+            let html = decode_html(body, content_type.as_deref());
+            if is_cloudflare_challenge(&html) {
                 return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
             }
-            Ok(())
-        }
-        run_extraction(&self.slots, body, content_type, url, Some(refuse_challenge)).await
+            extract_text(&html, &url)
+        })
+        .await?
     }
 }
 
@@ -183,31 +215,6 @@ impl ArticleFetcher for HtmlArticleFetcher {
         let url = url.to_string();
         Box::pin(async move { self.fetch_article(&url).await })
     }
-}
-
-/// A refusal check over the decoded page, run before the parse (the fetch
-/// path refuses a Cloudflare challenge there).
-type PageCheck = fn(&str) -> Result<(), ArticleFetchError>;
-
-/// Decode an HTML body, let `check` refuse it, then parse: one blocking
-/// slot, one decode.
-async fn run_extraction(
-    slots: &Arc<Semaphore>,
-    body: Vec<u8>,
-    content_type: Option<&str>,
-    url: &str,
-    check: Option<PageCheck>,
-) -> Result<String, ArticleFetchError> {
-    let content_type = content_type.map(str::to_string);
-    let url = url.to_string();
-    run_bounded(slots, EXTRACT_TIMEOUT, move || {
-        let html = decode_html(body, content_type.as_deref());
-        if let Some(check) = check {
-            check(&html)?;
-        }
-        extract_text(&html, &url)
-    })
-    .await?
 }
 
 /// Run `work` on the blocking pool once one of `slots` is free, waiting at
@@ -682,6 +689,13 @@ mod tests {
         ));
     }
 
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
     /// The capture path and the fetch path run the same parse: the text of a
     /// captured page is the text the fetcher would have stored.
     #[tokio::test]
@@ -690,35 +704,72 @@ mod tests {
         let url = format!("{base}/article");
         let fetched = fetcher.fetch(&url).await.unwrap();
         let captured = HtmlExtractor::new(1)
-            .extract(ARTICLE.as_bytes().to_vec(), Some("text/html"), &url)
+            .extract_captured(
+                Arc::new(gzip(ARTICLE.as_bytes())),
+                5 * 1024 * 1024,
+                Some("text/html"),
+                &url,
+            )
             .await
             .unwrap();
         assert_eq!(captured, fetched.text);
     }
 
     #[tokio::test]
-    async fn a_capture_with_no_article_is_permanent_and_not_a_challenge() {
+    async fn a_capture_with_no_article_is_an_honest_refusal() {
         let extractor = HtmlExtractor::new(1);
+        let cap = 5 * 1024 * 1024;
         let empty = extractor
-            .extract(
-                b"<html><body></body></html>".to_vec(),
+            .extract_captured(
+                Arc::new(gzip(b"<html><body></body></html>")),
+                cap,
                 Some("text/html"),
                 "https://example.com/",
             )
             .await;
-        assert!(matches!(empty, Err(ArticleFetchError::Permanent(_))));
+        assert!(matches!(empty, Err(CaptureExtractError::NoArticle(_))));
         // The browser rendered what it rendered: a challenge page from a
         // capture is reported as having no article, not as a fetch block.
         let challenge = extractor
-            .extract(
-                b"<html><head><title>Just a moment...</title></head></html>".to_vec(),
+            .extract_captured(
+                Arc::new(gzip(
+                    b"<html><head><title>Just a moment...</title></head></html>",
+                )),
+                cap,
                 Some("text/html"),
                 "https://example.com/",
             )
             .await;
         assert!(
-            matches!(&challenge, Err(ArticleFetchError::Permanent(msg)) if !msg.contains(CF_CHALLENGE_MSG)),
+            matches!(
+                &challenge,
+                Err(CaptureExtractError::NoArticle(ArticleFetchError::Permanent(msg)))
+                    if !msg.contains(CF_CHALLENGE_MSG)
+            ),
             "{challenge:?}"
+        );
+        // A body that is not gzip, or over the cap, never reaches the parse.
+        assert_eq!(
+            extractor
+                .extract_captured(
+                    Arc::new(b"not gzip".to_vec()),
+                    cap,
+                    Some("text/html"),
+                    "https://example.com/"
+                )
+                .await,
+            Err(CaptureExtractError::Gzip(GzipError::Corrupt))
+        );
+        assert_eq!(
+            extractor
+                .extract_captured(
+                    Arc::new(gzip(b"<html><body><p>a</p></body></html>")),
+                    4,
+                    Some("text/html"),
+                    "https://example.com/"
+                )
+                .await,
+            Err(CaptureExtractError::Gzip(GzipError::TooLarge))
         );
     }
 

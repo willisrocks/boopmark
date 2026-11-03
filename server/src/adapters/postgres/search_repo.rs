@@ -466,12 +466,15 @@ impl SearchRepository for PostgresPool {
         &self,
         bookmark_id: Uuid,
         user_id: Uuid,
+        url: &str,
         text: &str,
         content_hash: &str,
     ) -> Result<bool, DomainError> {
         // The row's search document is rebuilt from the bookmark as it is at
         // write time, and `claim_token = NULL` drops a fetch already in
-        // flight (its `store_article` then updates no row).
+        // flight (its `store_article` then updates no row). `b.url = $5` is
+        // the page the text was checked against: a bookmark moved to another
+        // URL in the meantime keeps its own state.
         let result = sqlx::query(
             "UPDATE bookmark_contents c
              SET status = 'fetched', source = 'captured', claim_token = NULL,
@@ -484,12 +487,13 @@ impl SearchRepository for PostgresPool {
                  search = bookmark_search_document(b.title, b.description, b.url, b.tags, $3),
                  fetched_at = now(), updated_at = now()
              FROM bookmarks b
-             WHERE b.id = $1 AND c.bookmark_id = b.id AND c.user_id = $2",
+             WHERE b.id = $1 AND c.bookmark_id = b.id AND c.user_id = $2 AND b.url = $5",
         )
         .bind(bookmark_id)
         .bind(user_id)
         .bind(text)
         .bind(content_hash)
+        .bind(url)
         .execute(&self.pool)
         .await
         .map_err(|e| DomainError::Internal(e.to_string()))?;
@@ -1212,6 +1216,7 @@ pub(crate) mod search_tests {
     #[tokio::test]
     #[ignore = "requires a migrated Postgres database (DATABASE_URL)"]
     async fn a_captured_page_stores_wins_over_a_fetch_in_flight_and_re_embeds() {
+        const PAGE_URL: &str = "https://medium.com/@writer/a-post";
         let _serial = SERIAL.lock().await;
         let pool = pool().await;
         let repo = PostgresPool::new(pool.clone());
@@ -1248,7 +1253,7 @@ pub(crate) mod search_tests {
         // claim the fetch held is gone, so its late result updates nothing.
         let captured = "capture-only passage about the borrow checker";
         assert!(
-            repo.store_capture(page.id, owner, captured, "h-capture")
+            repo.store_capture(page.id, owner, PAGE_URL, captured, "h-capture")
                 .await
                 .unwrap()
         );
@@ -1277,13 +1282,19 @@ pub(crate) mod search_tests {
         // not exist, stores nothing.
         assert!(
             !repo
-                .store_capture(fetched.id, other, "not mine", "h")
+                .store_capture(
+                    fetched.id,
+                    other,
+                    "https://example.org/plain",
+                    "not mine",
+                    "h"
+                )
                 .await
                 .unwrap()
         );
         assert!(
             !repo
-                .store_capture(Uuid::new_v4(), owner, "x", "h")
+                .store_capture(Uuid::new_v4(), owner, "https://nowhere.test/", "x", "h")
                 .await
                 .unwrap()
         );
@@ -1299,7 +1310,7 @@ pub(crate) mod search_tests {
             .await
             .unwrap();
         assert!(
-            repo.store_capture(page.id, owner, captured, "h-capture")
+            repo.store_capture(page.id, owner, PAGE_URL, captured, "h-capture")
                 .await
                 .unwrap()
         );
@@ -1318,7 +1329,7 @@ pub(crate) mod search_tests {
 
         let recaptured = "a longer capture that says something else entirely";
         assert!(
-            repo.store_capture(page.id, owner, recaptured, "h-recapture")
+            repo.store_capture(page.id, owner, PAGE_URL, recaptured, "h-recapture")
                 .await
                 .unwrap()
         );
@@ -1343,6 +1354,16 @@ pub(crate) mod search_tests {
         assert_eq!(status, "pending");
         assert_eq!(source, None);
         assert_eq!(text, None);
+        // A capture already in flight for the old page stores nothing: the
+        // text belonged to the URL the bookmark no longer has.
+        assert!(
+            !repo
+                .store_capture(page.id, owner, PAGE_URL, "the old page's text", "h-old")
+                .await
+                .unwrap()
+        );
+        let (status, source, text) = contents(&pool, page.id).await;
+        assert_eq!((status.as_str(), source, text), ("pending", None, None));
 
         // Each source is recorded as given.
         let scraped = bookmark(&repo, owner, "https://example.org/s", "S", None, &[]).await;

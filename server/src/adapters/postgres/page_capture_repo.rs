@@ -12,9 +12,16 @@ fn db_error(e: sqlx::Error) -> DomainError {
 
 impl CaptureQueueRepository for PostgresPool {
     async fn enqueue_capture(&self, capture: &NewCapture) -> Result<bool, DomainError> {
-        // The capacity check and the insert are one statement, so two
-        // captures cannot both see room for the last slot. A re-capture of
-        // the same bookmark replaces its payload and does not count twice.
+        // The capacity check and the insert are one statement, but READ
+        // COMMITTED lets two of them both see room for the last slot: the
+        // transaction takes the queue's lock first, so they queue up behind
+        // each other. A re-capture of the same bookmark replaces its payload
+        // and does not count twice.
+        let mut tx = self.pool.begin().await.map_err(db_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('boopmark.capture_queue', 0))")
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
         let queued: Option<Uuid> = sqlx::query_scalar(
             "INSERT INTO bookmark_page_captures (bookmark_id, user_id, page_url, html_gz)
              SELECT $1, $2, $3, $4
@@ -35,9 +42,10 @@ impl CaptureQueueRepository for PostgresPool {
         .bind(&capture.html_gz)
         .bind(CAPTURE_QUEUE_ROWS)
         .bind(CAPTURE_QUEUE_BYTES)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(db_error)?;
+        tx.commit().await.map_err(db_error)?;
         Ok(queued.is_some())
     }
 
@@ -45,16 +53,22 @@ impl CaptureQueueRepository for PostgresPool {
         // Deleting the row in the claim makes each payload parse exactly once
         // and keeps no lock held across the parse. A worker that dies with
         // payloads in hand loses them, which the queue's 24 h expiry would
-        // have done anyway.
+        // have done anyway. The bookmark URL rides along, so the drain can
+        // refuse a page that is no longer this bookmark's.
         sqlx::query_as::<_, QueuedCapture>(
-            "DELETE FROM bookmark_page_captures
-             WHERE bookmark_id IN (
+            "WITH picked AS (
                  SELECT bookmark_id FROM bookmark_page_captures
                  ORDER BY created_at, bookmark_id
                  LIMIT $1
                  FOR UPDATE SKIP LOCKED
+             ), taken AS (
+                 DELETE FROM bookmark_page_captures c
+                 USING picked p
+                 WHERE c.bookmark_id = p.bookmark_id
+                 RETURNING c.bookmark_id, c.user_id, c.page_url, c.html_gz
              )
-             RETURNING bookmark_id, user_id, page_url, html_gz",
+             SELECT t.bookmark_id, t.user_id, b.url AS bookmark_url, t.page_url, t.html_gz
+             FROM taken t JOIN bookmarks b ON b.id = t.bookmark_id",
         )
         .bind(limit)
         .fetch_all(&self.pool)
