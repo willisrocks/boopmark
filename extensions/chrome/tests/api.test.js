@@ -305,3 +305,27 @@ test('capturePage bounds the upload with a timeout signal', async () => {
   await second.capturePage(CAPTURE_ID, { pageUrl: 'https://example.com/a', body: new Uint8Array([1]), signal: supplied.signal });
   assert.equal(request.init.signal, supplied.signal);
 });
+
+test('capturePage scales the upload timeout with the gzip body size', async () => {
+  const original = AbortSignal.timeout;
+  const delays = [];
+  AbortSignal.timeout = milliseconds => {
+    delays.push(milliseconds);
+    return original.call(AbortSignal, milliseconds);
+  };
+  try {
+    const client = new ApiClient({
+      server: 'https://boopmark.com', apiKey: 'key',
+      fetchImpl: async () => response(202, { status: 'indexed' }),
+    });
+    const pageUrl = 'https://example.com/article';
+    // 15 s base + 10 s per MiB of the compressed body, capped at 90 s.
+    await client.capturePage(CAPTURE_ID, { pageUrl, body: new Uint8Array(1024) });
+    await client.capturePage(CAPTURE_ID, { pageUrl, body: new Uint8Array(3 * 1024 * 1024) });
+    await client.capturePage(CAPTURE_ID, { pageUrl, body: new Uint8Array(5 * 1024 * 1024) });
+    await client.capturePage(CAPTURE_ID, { pageUrl, body: new Uint8Array(8 * 1024 * 1024) });
+  } finally {
+    AbortSignal.timeout = original;
+  }
+  assert.deepEqual(delays, [15010, 45000, 65000, 90000]);
+});

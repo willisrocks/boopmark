@@ -9,14 +9,23 @@
 
   if (!Core) throw new Error("BoopmarkCore is required by BoopmarkApi");
   var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  var CAPTURE_TIMEOUT_MS = 20000;
+  var CAPTURE_TIMEOUT_BASE_MS = 15000;
+  var CAPTURE_TIMEOUT_PER_MIB_MS = 10000;
+  var CAPTURE_TIMEOUT_MAX_MS = 90000;
 
-  // A hung upload must not keep the extension waiting forever; the save it
-  // annotates is already confirmed, so a timeout only changes the note.
-  function captureSignal(supplied) {
+  // A hung upload must not keep the extension waiting forever, but a 5 MiB
+  // body on a slow uplink needs longer than a fixed budget: 15 s plus 10 s per
+  // MiB of the gzip body, capped at 90 s. A timeout only changes the note: the
+  // save it annotates is already confirmed.
+  function captureSignal(supplied, bodyBytes) {
     if (supplied) return supplied;
-    return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-      ? AbortSignal.timeout(CAPTURE_TIMEOUT_MS) : undefined;
+    if (typeof AbortSignal === "undefined" || typeof AbortSignal.timeout !== "function") return undefined;
+    var megabytes = (Number(bodyBytes) || 0) / (1024 * 1024);
+    var timeout = Math.min(
+      CAPTURE_TIMEOUT_MAX_MS,
+      Math.ceil(CAPTURE_TIMEOUT_BASE_MS + megabytes * CAPTURE_TIMEOUT_PER_MIB_MS)
+    );
+    return AbortSignal.timeout(timeout);
   }
 
   class ApiError extends Error {
@@ -271,7 +280,7 @@
           "X-Page-Url": String(options.pageUrl).trim()
         },
         withMeta: true,
-        signal: captureSignal(options.signal)
+        signal: captureSignal(options.signal, body.byteLength)
       });
       var status = result.status;
       var payload = result.data && typeof result.data === "object" && typeof result.data.status === "string"
