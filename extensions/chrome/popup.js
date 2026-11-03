@@ -7,6 +7,7 @@ let state = {};
 let settingsVisible = false;
 let connecting = false;
 let saving = false;
+let capturing = false;
 let updates = Promise.resolve();
 let writeCount = 0;
 let closeTimer;
@@ -46,6 +47,14 @@ function displayError(id, error) {
   $(id).classList.add('error');
   $(id).hidden = false;
 }
+// The worker sends the design spec's short phrases; a status sentence adds
+// the punctuation the popup needs.
+function sentence(text) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const capitalised = value.charAt(0).toUpperCase() + value.slice(1);
+  return /[.!?]$/.test(capitalised) ? capitalised : `${capitalised}.`;
+}
 function formValues() { return Object.fromEntries(fields.map(field => [field, $(field).value])); }
 function validateForm() {
   const valid = validURL($('url').value);
@@ -77,6 +86,15 @@ function render() {
   const operation = state.operation;
   const locked = saving || Boolean(operation && ['pending', 'unknown', 'success'].includes(operation.state));
   for (const field of fields) $(field).disabled = locked;
+  const existing = state.existing;
+  const canCaptureExisting = Boolean(connected && existing?.status === 'found' && existing.bookmarkId);
+  $('existing').hidden = setup || !canCaptureExisting;
+  $('capture-button').disabled = !canCaptureExisting || capturing || locked;
+  $('capture-button').textContent = capturing ? 'Capturing…' : 'Capture text';
+  $('existing-status').classList.remove('error');
+  $('existing-status').textContent = existing?.capture?.text
+    ? sentence(existing.capture.text)
+    : 'Already saved in Boopmark. Capture the page text so it is searchable.';
   $('save-button').textContent = operation?.state === 'pending' || saving ? 'Saving…' : 'Add Bookmark';
   $('cancel-button').textContent = operation ? 'Close' : 'Cancel';
   $('close-button').setAttribute('aria-label', operation ? 'Close bookmark popup' : 'Cancel and discard bookmark');
@@ -90,7 +108,8 @@ function render() {
     : metadata[draft?.metadataStatus] || 'Review the page details before saving.';
   $('metadata-status').classList.toggle('loading', draft?.metadataStatus === 'loading');
   $('save-status').className = operation?.state === 'success' ? 'success' : operation?.state === 'pending' ? '' : 'error';
-  $('save-status').textContent = operation?.state === 'success' ? 'Saved to Boopmark' : operation?.state === 'pending' ? 'Saving… You can close this popup safely.' : operation?.state === 'unknown' ? 'Save could not be confirmed. Check Boopmark before retrying. Nothing will be resent automatically.' : operation?.error?.message || operation?.error || '';
+  const captureNote = operation?.state === 'success' && operation.capture?.text ? ` · ${operation.capture.text}` : '';
+  $('save-status').textContent = operation?.state === 'success' ? `Saved to Boopmark${captureNote}` : operation?.state === 'pending' ? 'Saving… You can close this popup safely.' : operation?.state === 'unknown' ? 'Save could not be confirmed. Check Boopmark before retrying. Nothing will be resent automatically.' : operation?.error?.message || operation?.error || '';
   $('recovery').hidden = !operation || !['unknown', 'error'].includes(operation.state);
   $('library-link').hidden = operation?.state !== 'unknown';
   $('ack-button').textContent = operation?.state === 'error' ? 'Dismiss this failed save' : 'I checked; dismiss this result';
@@ -99,11 +118,13 @@ function render() {
     closeTimer = undefined;
   }
   if (operation?.state === 'success' && !closeTimer) {
+    // A capture annotation must stay readable before the popup closes itself.
+    const delay = operation.capture?.text ? 2200 : 1300;
     closeTimer = setTimeout(async () => {
       closing = true;
       try { await send({ type: 'ACK', operationId: operation.id }); window.close(); }
       catch (error) { closing = false; displayError('save-status', error); }
-    }, 1300);
+    }, delay);
   }
   validateForm();
 }
@@ -159,6 +180,18 @@ $('bookmark-form').addEventListener('submit', async event => {
 $('autofill-button').addEventListener('click', async () => {
   try { await updates; await send({ type: 'SUGGEST', draftId: state.draft?.id }); await refresh(); }
   catch (error) { displayError('save-status', error); }
+});
+$('capture-button').addEventListener('click', async () => {
+  if (capturing) return;
+  const draftId = state.draft?.id;
+  let failure;
+  capturing = true;
+  render();
+  try { await updates; await send({ type: 'CAPTURE_EXISTING', draftId }); }
+  catch (error) { failure = error; }
+  capturing = false;
+  if (failure) { render(); displayError('existing-status', failure); return; }
+  await refresh().catch(error => displayError('existing-status', error));
 });
 async function dismiss() {
   closing = true;

@@ -6,9 +6,16 @@ const Api = globalThis.BoopmarkApi;
 const SETTINGS_KEY = "boopmark.settings";
 const OPERATION_KEY = "boopmark.operation";
 const DRAFT_PREFIX = "boopmark-draft:";
+const CAPTURE_PREFIX = "boopmark-capture:";
 const activeSaves = new Set();
 const activeSuggestions = new Map();
 const autoSuggestionTimers = new Map();
+// Captured pages are kept compressed and keyed by draft ID.  The body is
+// never persisted in a draft: it is dropped on save, cancel and disconnect.
+const captures = new Map();
+// One lookup per popup open, cached by connection and URL so a refresh never
+// repeats the request.
+const existingBookmarks = new Map();
 
 function invoke(owner, methodName, args = []) {
   const method = owner && owner[methodName];
@@ -35,6 +42,59 @@ const sessionArea = () => chrome.storage.session;
 const read = async (area, key) => (await invoke(area, "get", [key])) || {};
 const write = (area, value) => invoke(area, "set", [value]);
 const remove = (area, keys) => invoke(area, "remove", [Array.isArray(keys) ? keys : [keys]]);
+
+// Injected into the active tab by chrome.scripting.executeScript.  It must stay
+// free of outer references so Chrome can serialise it into the page, and it
+// reads nothing but the current document.
+function readPage() {
+  return {
+    href: location.href,
+    contentType: document.contentType,
+    html: document.documentElement ? document.documentElement.outerHTML : "",
+  };
+}
+
+function byteStream(bytes) {
+  return new ReadableStream({
+    start(controller) { controller.enqueue(bytes); controller.close(); },
+  });
+}
+
+async function collectBytes(stream) {
+  const reader = stream.getReader();
+  const parts = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    total += value.length;
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) { joined.set(part, offset); offset += part.length; }
+  return joined;
+}
+
+async function gzipBytes(bytes) {
+  return collectBytes(byteStream(bytes).pipeThrough(new CompressionStream("gzip")));
+}
+
+function toBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
+}
+
+function fromBase64(text) {
+  const binary = atob(String(text));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
 
 // Restrict credentials and drafts before processing any command. Unsupported
 // or failing access controls fail closed, including in the test harness.
@@ -77,10 +137,20 @@ async function clearAllDrafts() {
   const keys = Object.keys(await read(sessionArea(), null)).filter(key => key.startsWith(DRAFT_PREFIX));
   if (keys.length) await remove(sessionArea(), keys);
 }
+async function clearCapture(draftId) {
+  if (!draftId) return;
+  captures.delete(draftId);
+  await remove(sessionArea(), CAPTURE_PREFIX + draftId).catch(() => {});
+}
+async function clearAllCaptures() {
+  captures.clear();
+  const keys = Object.keys(await read(sessionArea(), null)).filter(key => key.startsWith(CAPTURE_PREFIX));
+  if (keys.length) await remove(sessionArea(), keys);
+}
 function safeError(error) {
   return { kind: String(error?.kind || "error"), message: String(error?.message || "Boopmark request failed."), status: Number(error?.status) || 0 };
 }
-function state(settings, draft, operation = null) {
+function state(settings, draft, operation = null, live = null) {
   return {
     connection: {
       server: settings?.server || "", connected: Boolean(settings && !settings.authError), epoch: settings?.epoch || "",
@@ -88,6 +158,9 @@ function state(settings, draft, operation = null) {
     },
     draft: draft ? Core.normalizeDraft(draft) : null,
     operation,
+    // Both are advisory: the popup must never claim a capture it does not have.
+    capture: live?.capture || captureSummary(draft ? captures.get(draft.id) : null),
+    existing: live?.existing || null,
   };
 }
 function publish() {
@@ -176,6 +249,210 @@ function queueAutoSuggestion(draftId) {
   }, 350));
 }
 
+function captureFor(draft) {
+  if (!draft) return null;
+  const record = captures.get(draft.id);
+  if (!record || record.url !== (draft.originalUrl || draft.url)) return null;
+  return record;
+}
+
+function captureSummary(record) {
+  if (!record) return null;
+  return { status: record.status, reason: record.reason || "", message: record.message || "" };
+}
+
+// Short phrases, rendered by the popup behind "Saved to Boopmark · " (or as a
+// sentence for the Capture text action).  They mirror the design spec's mapping.
+function captureText(reason) {
+  if (reason === "too_large") return "page too large to capture";
+  if (reason === "not_html") return "this page is not HTML";
+  return "article text not captured";
+}
+
+function captureOutcome(response, failure) {
+  if (!failure) {
+    return response.outcome === "queued"
+      ? { state: "pending", text: "article text pending" }
+      : { state: "captured", text: "article text captured" };
+  }
+  const status = Number(failure.status) || 0;
+  if (failure.kind === "auth" || status === 401 || status === 403) {
+    return { state: "auth", text: "reconnect Boopmark to capture page text" };
+  }
+  if (status === 404) return { state: "off", text: "capture is off on this server" };
+  if (status === 409) return { state: "mismatch", text: "the page does not match this bookmark's URL" };
+  if (status === 413) return { state: "too_large", text: "page too large to capture" };
+  if (status === 422) return { state: "no_article", text: "no article text on this page" };
+  if (status === 503) return { state: "pending", text: "article text pending" };
+  return { state: "failed", text: "article text not captured" };
+}
+
+/**
+ * Read the active tab once per invocation and keep the page gzipped.  A page
+ * that is too large, not HTML, or on a restricted scheme is marked
+ * unavailable: the save always proceeds, it just carries no page text.
+ */
+function startCapture(settings, draft) {
+  if (!settings || settings.authError) return null;
+  if (!draft || !Number.isInteger(draft.tabId) || draft.tabId < 0) return null;
+  if (!Core.capturableURL(draft.originalUrl || draft.url)) return null;
+  const existing = captureFor(draft);
+  if (existing && existing.status !== "failed") return existing;
+  const record = {
+    url: draft.originalUrl || draft.url,
+    pageUrl: "",
+    status: "capturing",
+    reason: "",
+    message: "",
+    body: null,
+    promise: null,
+  };
+  captures.set(draft.id, record);
+  record.promise = captureInto(record, draft).catch(() => record).finally(() => {
+    if (captures.get(draft.id) === record) publish();
+  });
+  record.promise.catch(() => {});
+  return record;
+}
+
+async function captureInto(record, draft) {
+  const key = CAPTURE_PREFIX + draft.id;
+  // A session copy survives an MV3 worker eviction between popup messages.
+  try {
+    const stored = (await read(sessionArea(), key))[key];
+    if (stored && typeof stored.body === "string" && typeof stored.url === "string"
+        && Core.samePage(stored.url, record.url)) {
+      try {
+        const bytes = fromBase64(stored.body);
+        if (bytes.length && bytes.length <= Core.PAGE_CAPTURE_MAX_BYTES) {
+          record.pageUrl = stored.url;
+          record.body = bytes;
+          record.status = "ready";
+          return record;
+        }
+      } catch { /* A damaged copy is replaced by a fresh capture. */ }
+      await remove(sessionArea(), key).catch(() => {});
+    }
+  } catch { /* Session storage is best effort. */ }
+
+  let results;
+  try {
+    results = await invoke(chrome.scripting, "executeScript", [{ target: { tabId: draft.tabId }, func: readPage }]);
+  } catch {
+    results = null;
+  }
+  const page = Array.isArray(results) ? results[0]?.result : null;
+  if (!page || typeof page.href !== "string" || typeof page.html !== "string") {
+    record.status = "unavailable";
+    record.reason = "restricted";
+    record.message = "This page cannot be captured.";
+    return record;
+  }
+  const contentType = String(page.contentType || "text/html").split(";")[0].trim().toLowerCase();
+  if (contentType !== "text/html" && contentType !== "application/xhtml+xml") {
+    record.status = "unavailable";
+    record.reason = "not_html";
+    record.message = "This page is not HTML, so it was not captured.";
+    return record;
+  }
+  let bytes;
+  try { bytes = new TextEncoder().encode(page.html); } catch { bytes = null; }
+  if (!bytes || !bytes.length) {
+    record.status = "unavailable";
+    record.reason = "empty";
+    record.message = "This page has no HTML to capture.";
+    return record;
+  }
+  // Check the size before compressing and uploading; HTML is never truncated,
+  // because a truncated document would extract a truncated article.
+  if (bytes.length > Core.PAGE_CAPTURE_MAX_BYTES) {
+    record.status = "unavailable";
+    record.reason = "too_large";
+    record.message = "This page is too large to capture.";
+    return record;
+  }
+  let compressed;
+  try { compressed = await gzipBytes(bytes); } catch { compressed = null; }
+  if (!compressed || !compressed.length || compressed.length > Core.PAGE_CAPTURE_MAX_BYTES) {
+    record.status = "unavailable";
+    record.reason = compressed ? "too_large" : "compression";
+    record.message = compressed ? "This page is too large to capture." : "This page could not be prepared for capture.";
+    return record;
+  }
+  record.pageUrl = page.href;
+  record.body = compressed;
+  record.status = "ready";
+  try {
+    const encoded = toBase64(compressed);
+    if (encoded.length <= Core.PAGE_CAPTURE_STORAGE_MAX_BASE64) {
+      await write(sessionArea(), { [key]: { url: record.pageUrl, body: encoded, createdAt: Date.now() } });
+    }
+  } catch { /* The in-memory copy is enough; eviction loses only the capture. */ }
+  return record;
+}
+
+async function uploadCapture(settings, draft, bookmarkId) {
+  const record = captureFor(draft);
+  if (!record) return { state: "missing", text: "article text not captured" };
+  if (record.status === "capturing" && record.promise) {
+    try { await record.promise; } catch { /* The record carries its own failure. */ }
+  }
+  if (record.status !== "ready" || !record.body) {
+    return { state: "unavailable", text: captureText(record.reason) };
+  }
+  // The reviewed URL may have been edited after capture; a body for another
+  // page would be rejected, so it is not sent at all.
+  if (!Core.samePage(draft?.url, record.pageUrl)) {
+    return { state: "mismatch", text: "the page does not match this bookmark's URL" };
+  }
+  let response;
+  let failure;
+  try {
+    response = await new Api.BoopmarkApiClient({ server: settings.server, apiKey: settings.apiKey })
+      .capturePage(bookmarkId, { pageUrl: record.pageUrl, body: record.body });
+  } catch (error) { failure = error; }
+  return captureOutcome(response, failure);
+}
+
+function lookupKey(settings, url) { return JSON.stringify([settings?.epoch || "", String(url || "")]); }
+
+function existingFor(settings, draft) {
+  if (!settings || settings.authError || !draft || !Core.validBookmarkURL(draft.url)) return null;
+  const entry = existingBookmarks.get(lookupKey(settings, draft.url));
+  if (!entry) return null;
+  return { status: entry.status, bookmarkId: entry.bookmarkId, capture: entry.capture };
+}
+
+// One lookup per popup open, cached per connection and URL so state refreshes
+// never repeat the request.
+function startLookup(settings, draft) {
+  if (!settings || settings.authError || !draft || !Core.validBookmarkURL(draft.url)) return;
+  const key = lookupKey(settings, draft.url);
+  if (existingBookmarks.has(key)) return;
+  const entry = { status: "loading", bookmarkId: null, capture: null };
+  existingBookmarks.set(key, entry);
+  const token = { server: settings.server, connectionEpoch: settings.epoch };
+  (async () => {
+    let found = null;
+    let failed = false;
+    try {
+      found = await new Api.BoopmarkApiClient({ server: settings.server, apiKey: settings.apiKey }).lookupByURL(draft.url);
+    } catch { failed = true; }
+    if (existingBookmarks.get(key) !== entry) return;
+    const current = await getSettings();
+    if (!sameConnection(current, token)) { existingBookmarks.delete(key); return; }
+    entry.status = failed ? "error" : found ? "found" : "none";
+    entry.bookmarkId = found ? found.id : null;
+    // Never offer a capture for a bookmark of a different page, even if a
+    // server without the `url` filter answers with its newest bookmark.
+    if (entry.status === "found" && !Core.samePage(found.url || draft.url, draft.url)) {
+      entry.status = "none";
+      entry.bookmarkId = null;
+    }
+    publish();
+  })().catch(() => {});
+}
+
 async function connect(message) {
   const server = Core.normalizeServer(message?.server);
   const apiKey = typeof message?.apiKey === "string" ? message.apiKey.trim() : "";
@@ -191,8 +468,10 @@ async function connect(message) {
     if (previous?.server && previous.server !== server) {
       await removePermissionVerified(previous.server);
       await clearAllDrafts();
+      await clearAllCaptures();
     }
     stopSuggestions();
+    existingBookmarks.clear();
     const settings = { server, apiKey, epoch: Core.randomId(), authError: false };
     await putSettings(settings);
     publish();
@@ -228,15 +507,20 @@ async function open(message) {
   }
 
   const tab = message?.tab || {};
-  const capture = {
+  const context = {
     server: settings.server, connectionEpoch: settings.epoch,
     tabId: Number.isInteger(tab.id) ? tab.id : -1,
     url: typeof tab.url === "string" ? tab.url : "", title: typeof tab.title === "string" ? tab.title : "",
   };
-  const id = Core.makeDraftId(capture);
+  const id = Core.makeDraftId(context);
   let draft = await getDraft(id);
-  if (!draft) draft = await putDraft(Core.createDraft({ ...capture, id }));
+  if (!draft) draft = await putDraft(Core.createDraft({ ...context, id }));
   else if (draft.connectionEpoch !== settings.epoch) draft = await putDraft(Core.rebindDraft(draft, settings.epoch, settings.server));
+  // Invocation is the only moment the page is read: the extension transmits
+  // the DOM only for a page the user opened it on, and only when saving or
+  // capturing explicitly.
+  startCapture(settings, draft);
+  startLookup(settings, draft);
   if (!draft.suggestionAttempted && Core.validBookmarkURL(draft.url) && !settings.authError && !autoSuggestionTimers.has(id)) {
     draft = await beginSuggestion(settings, draft);
   } else if (draft.metadataStatus === "loading" && !activeSuggestions.has(suggestionKey(id, Core.requestToken(draft)))) {
@@ -245,7 +529,7 @@ async function open(message) {
     draft.revision += 1;
     await putDraft(draft);
   }
-  return state(settings, draft);
+  return state(settings, draft, null, { existing: existingFor(settings, draft) });
 }
 
 async function update(message) {
@@ -285,16 +569,28 @@ function executeSave(settings, marker, fields) {
         .create(fields, { idempotencyKey: marker.id });
     }
     catch (error) { failure = error; }
+    // The capture is uploaded only after the create is confirmed, and its
+    // result annotates the saved operation: it never turns a save into a
+    // failure and it is never retried automatically.
+    let capture = null;
+    if (!failure) {
+      const draft = await getDraft(marker.draftId);
+      try { capture = await uploadCapture(settings, draft || { id: marker.draftId, url: fields.url, originalUrl: fields.url }, bookmark.id); }
+      catch { capture = { state: "failed", text: "article text not captured" }; }
+    }
     await serialize(async () => {
       const currentSettings = await getSettings();
       const currentMarker = await getOperation();
       if (!sameConnection(currentSettings, marker) || currentMarker?.id !== marker.id) return;
       if (failure?.kind === "auth") { currentSettings.authError = true; await putSettings(currentSettings); }
-      const outcome = !failure ? { state: "success", bookmarkId: bookmark.id }
+      if (capture?.state === "auth") { currentSettings.authError = true; await putSettings(currentSettings); }
+      const outcome = !failure ? { state: "success", bookmarkId: bookmark.id, capture }
         : { state: failure.kind === "unknown" ? "unknown" : "error", error: failure.message };
       await putOperation(Core.transitionOperation(marker, outcome));
-      if (!failure) await clearDraft(marker.draftId);
-      else {
+      if (!failure) {
+        await clearDraft(marker.draftId);
+        await clearCapture(marker.draftId);
+      } else {
         const draft = await getDraft(marker.draftId);
         if (draft) { draft.status = "ready"; draft.revision += 1; await putDraft(draft); }
       }
@@ -336,6 +632,7 @@ async function cancel(message) {
   if (operation) return state(await getSettings(), await getDraft(operation.draftId), operation);
   stopSuggestions(message?.draftId);
   await clearDraft(message?.draftId);
+  await clearCapture(message?.draftId);
   publish();
   return state(await getSettings(), null);
 }
@@ -358,10 +655,32 @@ async function disconnect() {
     if (stillGranted) throw new Api.ApiError("permission", "Server access could not be removed. Retry Disconnect.");
   }
   await clearAllDrafts();
+  await clearAllCaptures();
+  existingBookmarks.clear();
   await clearOperation();
   await putSettings(null);
   publish();
   return state(null, null);
+}
+/**
+ * Upload the page captured at invocation into a bookmark that is already
+ * saved, without creating a second one.
+ */
+async function captureExisting(message) {
+  const settings = await requireConnection();
+  const draft = await getDraft(message?.draftId);
+  if (!draft || !sameConnection(settings, draft)) throw new Api.ApiError("state", "This bookmark draft is no longer available.");
+  if (!Core.validBookmarkURL(draft.url)) throw new Api.ApiError("validation", "Open a web page to add a bookmark.");
+  const existing = existingFor(settings, draft);
+  if (!existing || !existing.bookmarkId) throw new Api.ApiError("state", "Save this page before capturing its text.");
+  const record = captureFor(draft) || startCapture(settings, draft);
+  if (!record) throw new Api.ApiError("state", "This page cannot be captured.");
+  const outcome = await uploadCapture(settings, draft, existing.bookmarkId);
+  if (outcome.state === "auth") { settings.authError = true; await putSettings(settings); }
+  const entry = existingBookmarks.get(lookupKey(settings, draft.url));
+  if (entry) entry.capture = outcome;
+  publish();
+  return state(settings, draft, await getOperation(), { existing: existingFor(settings, draft) });
 }
 async function handleMessage(message) {
   switch (message?.type) {
@@ -369,6 +688,7 @@ async function handleMessage(message) {
     case "UPDATE": return update(message);
     case "SUGGEST": return suggest(message);
     case "SAVE": return save(message);
+    case "CAPTURE_EXISTING": return captureExisting(message);
     case "CANCEL": return cancel(message);
     case "CONNECT": return connect(message);
     case "DISCONNECT": return disconnect();

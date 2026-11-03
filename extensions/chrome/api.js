@@ -106,6 +106,15 @@
         headers["Content-Type"] = "application/json";
         init.body = JSON.stringify(body);
       }
+      // A raw body (the captured page) keeps caller-chosen headers: the page
+      // contract is text/html + gzip, not JSON, and is never stringified.
+      if (requestOptions.rawBody !== undefined && requestOptions.rawBody !== null) {
+        init.body = requestOptions.rawBody;
+        var rawHeaders = requestOptions.rawHeaders || {};
+        for (var name in rawHeaders) {
+          if (Object.prototype.hasOwnProperty.call(rawHeaders, name)) headers[name] = String(rawHeaders[name]);
+        }
+      }
       if (requestOptions.signal) init.signal = requestOptions.signal;
 
       var response;
@@ -205,6 +214,58 @@
     }
 
     async createBookmark(fields, options) { return this.create(fields, options); }
+
+    /**
+     * Find a bookmark the user already saved for this URL.  The server
+     * normalizes both sides, so a trailing slash or tracking parameters do
+     * not hide an existing bookmark.  Returns null when nothing matches.
+     */
+    async lookupByURL(value) {
+      var url = canonicalURL(value);
+      var body = await this.request("GET", "/api/v1/bookmarks?url=" + encodeURIComponent(url) + "&limit=1",
+        null, { operation: "lookup" });
+      if (!Array.isArray(body)) throw new ApiError("server", "Boopmark returned an invalid response.");
+      var match = body.find(function (item) { return item && typeof item === "object" && item.id != null; });
+      if (!match) return null;
+      return {
+        id: String(match.id),
+        url: typeof match.url === "string" ? match.url : url,
+        title: typeof match.title === "string" ? match.title : ""
+      };
+    }
+
+    /**
+     * Upload the gzipped HTML of the page that was captured from the tab.
+     * Resolves with `{ status, outcome }` where outcome is `indexed` or
+     * `queued`; every rejection carries the HTTP status so the caller can
+     * annotate an already-successful save without failing it.
+     */
+    async capturePage(bookmarkId, options) {
+      options = options || {};
+      var id = bookmarkId == null ? "" : String(bookmarkId).trim();
+      if (!UUID_PATTERN.test(id)) throw new ApiError("validation", "The bookmark ID to capture into is invalid.");
+      if (typeof options.pageUrl !== "string" || !Core.validBookmarkURL(options.pageUrl)) {
+        throw new ApiError("validation", "Open a web page to capture its text.");
+      }
+      var body = options.body;
+      if (!body || typeof body.byteLength !== "number" || body.byteLength === 0) {
+        throw new ApiError("validation", "There is no captured page to send.");
+      }
+      var result = await this.request("PUT", "/api/v1/bookmarks/" + encodeURIComponent(id) + "/page", null, {
+        operation: "capture",
+        rawBody: body,
+        rawHeaders: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Encoding": "gzip",
+          "X-Page-Url": String(options.pageUrl).trim()
+        },
+        withMeta: true,
+        signal: options.signal
+      });
+      var status = result.status;
+      var payload = result.data && typeof result.data === "object" ? result.data.status : "";
+      return { status: status, outcome: payload === "queued" ? "queued" : "indexed" };
+    }
   }
 
   return {

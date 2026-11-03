@@ -289,3 +289,49 @@ test('Cancel dispatches immediately and suppresses unsent field updates', async 
   await flush();
   assert.deepEqual(ui.messages, ['OPEN', 'UPDATE', 'CANCEL']);
 });
+
+test('an already saved page offers Capture text and never saves a duplicate', async () => {
+  const ui = await setup();
+  assert.equal(ui.elements.existing.hidden, true, 'no row until the lookup finds a bookmark');
+  ui.override(() => ({
+    ...structuredClone(ui.data),
+    existing: { status: 'found', bookmarkId: 'bookmark-1', capture: null },
+  }));
+  ui.change();
+  await flush();
+  assert.equal(ui.elements.existing.hidden, false);
+  assert.equal(ui.elements['capture-button'].disabled, false);
+  assert.match(ui.elements['existing-status'].textContent, /already saved/i);
+  assert.equal(ui.messages.includes('SAVE'), false);
+
+  await ui.fire('capture-button', 'click');
+  await flush();
+  assert.equal(ui.messages.includes('CAPTURE_EXISTING'), true);
+  assert.equal(ui.messages.includes('SAVE'), false, 'capture never dispatches a create');
+});
+
+test('a successful save shows the capture annotation', async () => {
+  const ui = await setup();
+  ui.override(() => ({
+    ...structuredClone(ui.data),
+    draft: null,
+    operation: {
+      state: 'success', id: 'operation-1', bookmarkId: 'bookmark-1',
+      capture: { state: 'captured', text: 'article text captured' },
+    },
+  }));
+  ui.change();
+  await flush();
+  assert.equal(ui.elements['save-status'].textContent, 'Saved to Boopmark · article text captured');
+});
+
+test('an existing bookmark reports the capture result as a sentence', async () => {
+  const ui = await setup();
+  ui.override(() => ({
+    ...structuredClone(ui.data),
+    existing: { status: 'found', bookmarkId: 'bookmark-1', capture: { state: 'mismatch', text: "the page does not match this bookmark's URL" } },
+  }));
+  ui.change();
+  await flush();
+  assert.equal(ui.elements['existing-status'].textContent, "The page does not match this bookmark's URL.");
+});

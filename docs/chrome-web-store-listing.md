@@ -26,12 +26,14 @@ Save the page you're viewing to Boopmark without leaving your tab.
 Boopmark for Chrome brings the same capture-and-review workflow as the Boopmark iOS share extension:
 
 - Capture the active page's URL and title with one click.
+- Save the page's article text with the bookmark, so it stays searchable even when the server cannot fetch the page.
+- Capture the article text of a page you already saved, without creating a duplicate.
 - Automatically suggest a title, description, and tags when AI is enabled in your Boopmark account.
 - Review or edit every field before saving.
 - Preserve your draft if the popup is dismissed.
 - Connect to boopmark.com or your own HTTPS Boopmark server.
 
-The extension runs only when you open it. It does not collect browsing data in the background. Your Boopmark API key is stored locally in Chrome and sent only to the server you choose. Page URLs are sent to that server for metadata lookup and, when enabled in your account, server-side AI enrichment.
+The extension runs only when you open it. It does not collect browsing data in the background. Your Boopmark API key is stored locally in Chrome and sent only to the server you choose. Page URLs are sent to that server for metadata lookup and, when enabled in your account, server-side AI enrichment. When you save a bookmark or choose Capture text, the invoked page's HTML is sent to that same server, gzip-compressed, to extract and index its article text.
 
 ## Privacy disclosures
 
@@ -42,6 +44,7 @@ Single purpose:
 Permission justifications:
 
 - `activeTab`: read the current tab's URL and title only after the user opens Boopmark, so the capture form can be prefilled.
+- `scripting`: read the invoked page's HTML only after the user opens Boopmark and only to send its article text when the user saves the bookmark or chooses Capture text. No content script, no persistent page access, and no background capture.
 - `storage`: retain the selected server and API key locally, preserve an unsaved session draft, and track an in-flight save safely across extension worker restarts.
 - Optional host access: communicate only with the Boopmark server the user explicitly configures and grants. HTTPS is required outside local development.
 
@@ -51,7 +54,7 @@ Data handled:
 
 - Authentication information: the user's Boopmark API key is stored in Chrome extension-local storage and sent only to the configured Boopmark server.
 - Web history / browsing activity: the active page URL and title are read only when the user invokes the extension and are sent to the configured server for metadata lookup and saving.
-- Website content: the configured server may fetch the selected URL to extract metadata and may send the URL and extracted content to its configured AI provider when AI is enabled.
+- Website content: the configured server may fetch the selected URL to extract metadata and may send the URL and extracted content to its configured AI provider when AI is enabled. When the user saves a bookmark or chooses Capture text, the invoked page's HTML is sent to the configured server to extract its article text for search; that HTML is not sent to the AI provider and is not archived.
 - User-provided content: reviewed title, description, and tags are sent to the configured server when saving.
 
 Boopmark does not sell or transfer this data for advertising, creditworthiness, or unrelated purposes. It does not collect data while the extension is closed.
