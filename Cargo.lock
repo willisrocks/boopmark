@@ -893,6 +893,7 @@ dependencies = [
  "dotenvy",
  "encoding_rs",
  "fastembed",
+ "flate2",
  "image",
  "rand 0.9.2",
  "reqwest",

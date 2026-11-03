@@ -461,6 +461,40 @@ impl SearchRepository for PostgresPool {
         .map_err(|e| DomainError::Internal(e.to_string()))?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn store_capture(
+        &self,
+        bookmark_id: Uuid,
+        user_id: Uuid,
+        text: &str,
+        content_hash: &str,
+    ) -> Result<bool, DomainError> {
+        // The row's search document is rebuilt from the bookmark as it is at
+        // write time, and `claim_token = NULL` drops a fetch already in
+        // flight (its `store_article` then updates no row).
+        let result = sqlx::query(
+            "UPDATE bookmark_contents c
+             SET status = 'fetched', source = 'captured', claim_token = NULL,
+                 attempts = 0, error = NULL,
+                 text = $3, text_chars = char_length($3), content_hash = $4,
+                 -- New text needs new chunks; an unchanged capture keeps them.
+                 embedded_model = CASE WHEN c.content_hash IS DISTINCT FROM $4
+                                       THEN NULL ELSE c.embedded_model END,
+                 embed_attempts = 0, embed_next_attempt_at = now(), embed_error = NULL,
+                 search = bookmark_search_document(b.title, b.description, b.url, b.tags, $3),
+                 fetched_at = now(), updated_at = now()
+             FROM bookmarks b
+             WHERE b.id = $1 AND c.bookmark_id = b.id AND c.user_id = $2",
+        )
+        .bind(bookmark_id)
+        .bind(user_id)
+        .bind(text)
+        .bind(content_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DomainError::Internal(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]

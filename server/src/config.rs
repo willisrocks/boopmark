@@ -35,7 +35,18 @@ pub struct Config {
     /// already stored stays searchable.
     pub article_ingest_enabled: bool,
     pub article_ingest_concurrency: usize,
+    /// `PAGE_CAPTURE_ENABLED=0` rejects `PUT /api/v1/bookmarks/{id}/page`
+    /// with 404: a self-hoster who does not want that write surface does not
+    /// get it. On by default, the feature is useless otherwise.
+    pub page_capture_enabled: bool,
+    /// `PAGE_CAPTURE_MAX_BYTES`: the cap on the gzip body, and the same cap
+    /// on the HTML it inflates to.
+    pub page_capture_max_bytes: usize,
 }
+
+/// The measured p90 page was 437 KB, the largest 1.9 MB; 5 MiB leaves room
+/// for a rendered page and matches the fetch path's `MAX_HTML_BYTES`.
+pub const DEFAULT_PAGE_CAPTURE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum ScreenshotBackend {
@@ -121,6 +132,13 @@ impl Config {
             article_ingest_concurrency: parse_ingest_concurrency(
                 env::var("ARTICLE_INGEST_CONCURRENCY").ok().as_deref(),
             ),
+            page_capture_enabled: parse_flag(
+                env::var("PAGE_CAPTURE_ENABLED").ok().as_deref(),
+                true,
+            ),
+            page_capture_max_bytes: parse_capture_max_bytes(
+                env::var("PAGE_CAPTURE_MAX_BYTES").ok().as_deref(),
+            ),
         }
     }
 }
@@ -139,6 +157,16 @@ fn parse_ingest_concurrency(value: Option<&str>) -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|n| *n > 0)
         .map_or(4, |n| n.min(32))
+}
+
+/// The capture body cap, 5 MiB by default. A zero, negative or unparsable
+/// value means "unset", never "no cap": an unbounded write surface is worse
+/// than the default.
+fn parse_capture_max_bytes(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_PAGE_CAPTURE_MAX_BYTES)
 }
 
 fn llm_settings_encryption_key() -> String {
@@ -162,8 +190,8 @@ fn llm_settings_encryption_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, llm_settings_encryption_key,
-        parse_flag, parse_ingest_concurrency,
+        DEFAULT_PAGE_CAPTURE_MAX_BYTES, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend,
+        llm_settings_encryption_key, parse_capture_max_bytes, parse_flag, parse_ingest_concurrency,
     };
 
     /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.
@@ -268,6 +296,20 @@ mod tests {
         assert_eq!(parse_ingest_concurrency(Some("0")), 4);
         assert_eq!(parse_ingest_concurrency(Some("nope")), 4);
         assert_eq!(parse_ingest_concurrency(Some("500")), 32);
+    }
+
+    #[test]
+    fn capture_caps_default_to_five_mib_and_never_disable_themselves() {
+        assert_eq!(parse_capture_max_bytes(None), 5 * 1024 * 1024);
+        assert_eq!(parse_capture_max_bytes(Some("1048576")), 1024 * 1024);
+        assert_eq!(parse_capture_max_bytes(Some(" 2048 ")), 2048);
+        for bad in ["0", "-1", "", "nope"] {
+            assert_eq!(
+                parse_capture_max_bytes(Some(bad)),
+                DEFAULT_PAGE_CAPTURE_MAX_BYTES,
+                "{bad}"
+            );
+        }
     }
 
     #[test]

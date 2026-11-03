@@ -1,3 +1,4 @@
+use crate::app::page_capture::CaptureDrain;
 use crate::domain::error::DomainError;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher};
 use crate::domain::ports::search_repo::SearchRepository;
@@ -57,6 +58,8 @@ pub struct IngestWorker<R, F> {
     /// Woken after each stored result, so the embedding worker picks it up
     /// at once.
     on_stored: Option<Arc<Notify>>,
+    /// Captured pages waiting for a parse; drained before fetch jobs.
+    captures: Option<Arc<dyn CaptureDrain>>,
 }
 
 impl<R, F> IngestWorker<R, F>
@@ -70,12 +73,20 @@ where
             fetcher,
             concurrency: concurrency.max(1),
             on_stored: None,
+            captures: None,
         }
     }
 
     /// Notify `notify` whenever a result (article or failure) is stored.
     pub fn notify_on_stored(mut self, notify: Arc<Notify>) -> Self {
         self.on_stored = Some(notify);
+        self
+    }
+
+    /// Parse captured pages waiting in the capture queue, using the free
+    /// slots, before claiming fetch jobs.
+    pub fn with_capture_drain(mut self, drain: Arc<dyn CaptureDrain>) -> Self {
+        self.captures = Some(drain);
         self
     }
 
@@ -92,6 +103,9 @@ where
         );
         let mut in_flight = JoinSet::new();
         loop {
+            // A capture answers `queued` only when its parse did not fit the
+            // request, so it is the user's pending text: parse it first.
+            self.drain_captures(&in_flight).await;
             if let Err(e) = self.clone().fill(&mut in_flight).await {
                 tracing::warn!(error = %e, "article ingest: claiming jobs failed");
             }
@@ -125,6 +139,23 @@ where
             in_flight.spawn(async move { worker.process(job).await });
         }
         Ok(())
+    }
+
+    /// Parse waiting captures on the free slots. The drain parses them to
+    /// completion, so the slots it uses are not added to `in_flight`.
+    async fn drain_captures(&self, in_flight: &JoinSet<()>) {
+        let Some(drain) = &self.captures else {
+            return;
+        };
+        let free = self.concurrency.saturating_sub(in_flight.len());
+        if free == 0 {
+            return;
+        }
+        match drain.drain(free).await {
+            Ok(0) => {}
+            Ok(captures) => tracing::debug!(captures, "parsed captured pages"),
+            Err(e) => tracing::warn!(error = %e, "draining the capture queue failed"),
+        }
     }
 
     async fn process(&self, job: IngestJob) {
@@ -228,6 +259,16 @@ mod tests {
                 .unwrap()
                 .push((job.clone(), failure.clone()));
             Ok(true)
+        }
+
+        async fn store_capture(
+            &self,
+            _bookmark_id: Uuid,
+            _user_id: Uuid,
+            _text: &str,
+            _content_hash: &str,
+        ) -> Result<bool, DomainError> {
+            unreachable!("the worker never stores a capture through the repo")
         }
     }
 

@@ -43,6 +43,18 @@ pub trait SearchRepository: Send + Sync {
         job: &IngestJob,
         failure: &IngestFailure,
     ) -> Result<bool, DomainError>;
+
+    /// Store text captured from the browser that displayed the page: the row
+    /// is `fetched` with `source = 'captured'`, and any fetch already in
+    /// flight loses its claim, so its result is dropped. Returns false when
+    /// the bookmark was deleted or is not this user's.
+    async fn store_capture(
+        &self,
+        bookmark_id: Uuid,
+        user_id: Uuid,
+        text: &str,
+        content_hash: &str,
+    ) -> Result<bool, DomainError>;
 }
 
 /// The user-facing state of the search index (Settings → Search index).

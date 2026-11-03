@@ -7,7 +7,7 @@ use axum::routing::{get, post};
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::search::{ContentSourceCounts, SearchIndexStatus};
+use crate::domain::search::SearchIndexStatus;
 use crate::web::extractors::AuthUser;
 use crate::web::state::AppState;
 
@@ -140,6 +140,7 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::search::ContentSourceCounts;
 
     fn status() -> SearchIndexStatus {
         SearchIndexStatus {

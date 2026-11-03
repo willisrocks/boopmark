@@ -232,6 +232,15 @@ mod tests {
         ) -> Result<bool, DomainError> {
             unreachable!()
         }
+        async fn store_capture(
+            &self,
+            _bookmark_id: Uuid,
+            _user_id: Uuid,
+            _text: &str,
+            _content_hash: &str,
+        ) -> Result<bool, DomainError> {
+            unreachable!()
+        }
     }
 
     async fn run(filter: BookmarkFilter) -> Option<SearchQuery> {
