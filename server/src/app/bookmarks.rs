@@ -1,3 +1,4 @@
+use crate::adapters::article::fallback::log_host;
 use crate::domain::bookmark::*;
 use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::{
@@ -165,7 +166,7 @@ where
             let metadata_result = self.metadata.extract(&input.url).await;
             if let Err(error) = &metadata_result {
                 tracing::warn!(
-                    url = %input.url,
+                    host = %log_host(&input.url),
                     error = %error,
                     "metadata extraction failed; attempting screenshot fallback"
                 );
@@ -182,7 +183,7 @@ where
             {
                 Ok(url) => input.image_url = Some(url),
                 Err(error) => {
-                    tracing::warn!(url = %input.url, %error, "explicit AI image generation failed; using normal image fallbacks")
+                    tracing::warn!(host = %log_host(&input.url), %error, "explicit AI image generation failed; using normal image fallbacks")
                 }
             }
         }
@@ -840,7 +841,7 @@ where
         let metadata_result = self.metadata.extract(&page_url).await;
         if let Err(error) = &metadata_result {
             tracing::warn!(
-                url = %page_url,
+                host = %log_host(&page_url),
                 error = %error,
                 "metadata extraction failed; attempting screenshot fallback"
             );

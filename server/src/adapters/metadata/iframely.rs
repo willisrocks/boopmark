@@ -63,7 +63,9 @@ impl MetadataExtractor for IframelyExtractor {
                 .query(&[("url", &clean_url), ("api_key", &self.api_key)])
                 .send()
                 .await
-                .map_err(|e| DomainError::Internal(format!("iframely fetch error: {e}")))?;
+                .map_err(|e| {
+                    DomainError::Internal(format!("iframely fetch error: {}", e.without_url()))
+                })?;
 
             if !resp.status().is_success() {
                 return Err(DomainError::Internal(format!(
@@ -72,10 +74,9 @@ impl MetadataExtractor for IframelyExtractor {
                 )));
             }
 
-            let data: IframelyResponse = resp
-                .json()
-                .await
-                .map_err(|e| DomainError::Internal(format!("iframely parse error: {e}")))?;
+            let data: IframelyResponse = resp.json().await.map_err(|e| {
+                DomainError::Internal(format!("iframely parse error: {}", e.without_url()))
+            })?;
 
             let meta = data.meta.unwrap_or(IframelyMeta {
                 title: None,

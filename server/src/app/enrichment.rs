@@ -1,3 +1,4 @@
+use crate::adapters::article::fallback::log_host;
 use crate::app::settings::{SettingsService, TextProviderCredentials};
 use crate::domain::ports::llm_enricher::{EnrichmentInput, LlmEnricher};
 use crate::domain::ports::llm_settings_repo::LlmSettingsRepository;
@@ -382,7 +383,7 @@ where
         let metadata = match metadata {
             Ok(meta) => Some(meta),
             Err(e) => {
-                tracing::warn!(url = %url, error = %e, "metadata scrape failed");
+                tracing::warn!(host = %log_host(url), error = %e, "metadata scrape failed");
                 None
             }
         };
@@ -464,7 +465,7 @@ where
         {
             Ok(output) => output,
             Err(e) => {
-                tracing::warn!(user_id = %user_id, url = %url, error = %e, "LLM enrichment failed, falling back to scrape-only");
+                tracing::warn!(user_id = %user_id, host = %log_host(url), error = %e, "LLM enrichment failed, falling back to scrape-only");
                 return None;
             }
         };
