@@ -7,6 +7,7 @@ pub mod metadata;
 pub mod net;
 pub mod openai_image;
 pub mod postgres;
+pub mod scraper;
 pub mod screenshot;
 pub mod storage;
 pub mod vendor_http;

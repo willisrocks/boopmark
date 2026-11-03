@@ -157,6 +157,10 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `ARTICLE_INGEST_CONCURRENCY` | `4` | Article fetches in parallel (at most one per host per second) |
 | `PAGE_CAPTURE_ENABLED` | `1` | Accept page HTML from the browser extension (`PUT /api/v1/bookmarks/{id}/page`). `0` answers that route with `404`, for self-hosters who do not want that write surface |
 | `PAGE_CAPTURE_MAX_BYTES` | `5242880` | Cap on the gzipped capture body, and on the HTML it inflates to |
+| `PAGE_SCRAPER` | `disabled` | Server-side fallback for URL-only saves: `disabled` or `firecrawl`. Only consulted when the direct fetch fails, returns under 300 characters, or gets a member-only preview |
+| `PAGE_SCRAPER_API_KEY` | — | Firecrawl key (operator account). `PAGE_SCRAPER=firecrawl` without it logs a warning and stays disabled |
+| `PAGE_SCRAPER_TIMEOUT_SECONDS` | `30` | One scrape's timeout, retries excluded. Capped at `45` with a warning at startup: a longer scrape cannot finish inside an ingest job's budget (which must also cover the extraction), and a timed-out job still pays for the page |
+| `PAGE_SCRAPER_MONTHLY_BUDGET_PAGES` | `0` | Pages per calendar month; `0` is no cap. Past it, no scrape is attempted until the next month |
 | `ENABLE_E2E_AUTH` | `0` | Set to `1` for E2E test auth bypass |
 
 ## Deployment Guides

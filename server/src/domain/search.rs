@@ -139,9 +139,6 @@ pub enum ContentSource {
     /// The browser that displayed the page sent its HTML.
     Captured,
     /// The server-side scraper rendered the page.
-    // The scraper port and its decorator are a later step; the column value
-    // and its count land with this migration so there is one schema change.
-    #[allow(dead_code)]
     Scraped,
 }
 

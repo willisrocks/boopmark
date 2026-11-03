@@ -310,7 +310,8 @@ mod tests {
     use crate::app::tag_consolidation::TagConsolidationService;
     use crate::app::tag_llm::LlmClientEnricher;
     use crate::config::{
-        Config, LoginAdapter, MetadataFallbackBackend, ScreenshotBackend, StorageBackend,
+        Config, DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, LoginAdapter, MetadataFallbackBackend,
+        PageScraperBackend, ScreenshotBackend, StorageBackend,
     };
     use crate::domain::ports::embedder::Embedder;
     use crate::domain::ports::llm_client::LlmClient;
@@ -364,6 +365,10 @@ mod tests {
             article_ingest_concurrency: 2,
             page_capture_enabled,
             page_capture_max_bytes,
+            page_scraper: PageScraperBackend::Disabled,
+            page_scraper_api_key: None,
+            page_scraper_timeout_seconds: DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS,
+            page_scraper_monthly_budget_pages: 0,
         }
     }
 
