@@ -55,7 +55,9 @@ impl MetadataExtractor for OpengraphIoExtractor {
                 .query(&[("app_id", &self.api_key)])
                 .send()
                 .await
-                .map_err(|e| DomainError::Internal(format!("opengraph.io fetch error: {e}")))?;
+                .map_err(|e| {
+                    DomainError::Internal(format!("opengraph.io fetch error: {}", e.without_url()))
+                })?;
 
             if !resp.status().is_success() {
                 return Err(DomainError::Internal(format!(
@@ -64,10 +66,9 @@ impl MetadataExtractor for OpengraphIoExtractor {
                 )));
             }
 
-            let data: OpengraphIoResponse = resp
-                .json()
-                .await
-                .map_err(|e| DomainError::Internal(format!("opengraph.io parse error: {e}")))?;
+            let data: OpengraphIoResponse = resp.json().await.map_err(|e| {
+                DomainError::Internal(format!("opengraph.io parse error: {}", e.without_url()))
+            })?;
 
             let graph = data.hybrid_graph.unwrap_or(HybridGraph {
                 title: None,

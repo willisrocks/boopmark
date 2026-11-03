@@ -1,3 +1,4 @@
+use crate::adapters::article::fallback::log_host;
 use crate::domain::bookmark::UrlMetadata;
 use crate::domain::error::{CF_CHALLENGE_MSG, DomainError};
 use crate::domain::ports::metadata::MetadataExtractor;
@@ -39,7 +40,7 @@ impl MetadataExtractor for FallbackMetadataExtractor {
                         );
                     }
                     Err(e) => {
-                        tracing::warn!(url = %url, error = %e, "metadata extractor failed, trying next");
+                        tracing::warn!(host = %log_host(&url), error = %e, "metadata extractor failed, trying next");
                         if cf_err.is_none() && e.to_string().contains(CF_CHALLENGE_MSG) {
                             cf_err = Some(DomainError::Internal(CF_CHALLENGE_MSG.to_string()));
                         }

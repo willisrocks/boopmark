@@ -55,7 +55,7 @@ impl MetadataExtractor for HtmlMetadataExtractor {
                         DomainError::Internal("fetch error: too many redirects".to_string())
                     }
                     GuardedGetError::Request(e) => {
-                        DomainError::Internal(format!("fetch error: {e}"))
+                        DomainError::Internal(format!("fetch error: {}", e.without_url()))
                     }
                 })?;
 
@@ -67,7 +67,7 @@ impl MetadataExtractor for HtmlMetadataExtractor {
             let html = resp
                 .text()
                 .await
-                .map_err(|e| DomainError::Internal(format!("read error: {e}")))?;
+                .map_err(|e| DomainError::Internal(format!("read error: {}", e.without_url())))?;
 
             if is_cloudflare_challenge(&html) {
                 return Err(DomainError::Internal(CF_CHALLENGE_MSG.to_string()));
