@@ -23,8 +23,7 @@ Three paths close the gap, in order of reach:
 2. **A server-side scraper as a fallback** for URL-only saves (web paste, iOS share from
    a non-Safari app). A new `PageScraper` port sits behind the existing `ArticleFetcher`
    as a decorator: it is consulted only when the guarded direct fetch fails or returns no
-   article. Candidates are Obscura (self-hosted) and Firecrawl (hosted); the adapter is
-   **chosen by the companion eval, not here**.
+   article. The companion eval chose Firecrawl (hosted); Obscura was dropped.
 3. **The iOS Safari share extension** returns the page HTML through
    `NSExtensionJavaScriptPreprocessingFile` and `PUT`s it the same way. This is an
    optional proposal, not a commitment.
@@ -88,7 +87,8 @@ These are inputs, not open questions:
   keep the existing extraction timeout.
 - Captured text wins over a later *failed* server fetch.
 - Server-side scraper only as a fallback for URL-only saves, behind a `PageScraper` port
-  with a disabled adapter and env configuration. "Chosen adapter" is TBD by eval.
+  with a disabled adapter and env configuration. The adapter is Firecrawl, chosen by the
+  eval.
 - iOS Safari share extension: propose only.
 
 ## Brainstorming decisions (auto-pilot)
@@ -137,7 +137,7 @@ flowchart LR
   WEB --> QUEUE[("bookmark_contents<br/>pending")]
   QUEUE --> FETCH{"guarded direct fetch"}
   FETCH -->|"ok, ≥300 chars"| STORE2[("source=fetched")]
-  FETCH -->|"permanent / short"| SCRAPE["PageScraper port<br/>disabled | obscura | firecrawl"]
+  FETCH -->|"permanent / short"| SCRAPE["PageScraper port<br/>disabled | firecrawl"]
   SCRAPE --> STORE3[("source=scraped")]
   STORE --> EMBED
   STORE2 --> EMBED
@@ -156,16 +156,17 @@ Added to `Config` (`server/src/config.rs`), parsed like the existing backend enu
 ```
 PAGE_CAPTURE_ENABLED=1                 # default 1; 0 rejects the PUT with 404
 PAGE_CAPTURE_MAX_BYTES=5242880         # gzip body cap, and the decompressed cap
-PAGE_SCRAPER=disabled                  # default disabled | obscura | firecrawl
-PAGE_SCRAPER_URL=                      # obscura only: base URL of the self-hosted browser
-PAGE_SCRAPER_API_KEY=                  # firecrawl only
-PAGE_SCRAPER_TIMEOUT_SECONDS=30        # one scrape, retries excluded
+PAGE_SCRAPER=disabled                  # default disabled | firecrawl
+PAGE_SCRAPER_API_KEY=                  # firecrawl only; the operator's key
+PAGE_SCRAPER_TIMEOUT_SECONDS=30        # one scrape, retries excluded (at most 120)
 PAGE_SCRAPER_MONTHLY_BUDGET_PAGES=0    # 0 = no cap; otherwise pages per calendar month
 ```
 
-`PAGE_SCRAPER=obscura` without `PAGE_SCRAPER_URL`, or `firecrawl` without
-`PAGE_SCRAPER_API_KEY`, fails startup with a message naming the variable, as
-`SCREENSHOT_BACKEND=playwright` does today (`main.rs:106`).
+`PAGE_SCRAPER=firecrawl` without `PAGE_SCRAPER_API_KEY` logs a warning naming the variable
+and runs the disabled scraper; it does not fail startup. The key is not deployed
+everywhere yet, and an app that cannot boot without it could not be deployed at all. A
+scrape is then refused before the vendor is called, exactly as with
+`PAGE_SCRAPER=disabled`.
 
 `PAGE_CAPTURE_ENABLED=0` exists for self-hosters who consider the endpoint a write
 surface they do not want; it is on by default because the feature is useless otherwise.
@@ -536,43 +537,48 @@ after invocation, only to the configured Boopmark server, only to enable article
 For saves that never had a browser involved: web paste, iOS share from a non-Safari app,
 imports, the CLI.
 
-**Port** (`server/src/domain/ports/page_scraper.rs`, mirroring `article_fetcher.rs`):
+**Port** (`server/src/domain/ports/page_scraper.rs`, mirroring `embedder.rs` with a boxed
+future so the decorator can hold an `Arc<dyn PageScraper>`):
 
 ```rust
 pub struct ScrapedPage {
     pub html: String,
     pub final_url: String,
     pub html_bytes: usize,
+    /// The vendor's page is a paywalled or member-only preview.
+    pub locked: bool,
 }
 
 pub trait PageScraper: Send + Sync {
     fn enabled(&self) -> bool { true }
-    fn scrape(&self, url: &str)
-        -> Pin<Box<dyn Future<Output = Result<ScrapedPage, DomainError>> + Send + '_>>;
+    fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, DomainError>>;
 }
 ```
 
 Adapters in `server/src/adapters/scraper/`:
 
-- `obscura.rs` — `ObscuraScraper { base_url, client }`, posts the URL to the self-hosted
-  headless browser and returns the rendered HTML. Built with
-  `reqwest::Client` (`PAGE_SCRAPER_TIMEOUT_SECONDS`); no redirect following is needed
-  because the browser follows redirects and reports the final URL.
-- `firecrawl.rs` — `FirecrawlScraper { api_key, client }`, the hosted vendor's scrape
-  endpoint with the HTML format, reading `data.html` and its reported source URL.
+- `firecrawl.rs` — `FirecrawlScraper { api_key, client }`, `POST {base}/v2/scrape` with
+  `formats: ["rawHtml", "html"]` and no crawl. Reads `data.rawHtml` (falling back to
+  `data.html`) and `metadata.sourceURL`. A page is a preview when `metadata.isLocked` is
+  true or the HTML holds Medium's `"isLocked":true` page state; the eval showed the marker
+  is required, because 49 member-only previews of 1,500–2,400 characters otherwise look
+  like articles. A `metadata.statusCode` outside 2xx/304 is final: the vendor succeeded,
+  but the page is an error page.
 - `disabled.rs` — `DisabledScraper`: `enabled() == false`, `scrape` returns
   `DomainError::InvalidInput("page scraper disabled")`. The default.
-- `router.rs` — `PageScraperRouter::from_config(&Config)`, like `EmbedderRouter`.
+- `router.rs` — `page_scraper(&Config)`, like `EmbedderRouter`, including the warn-and-run
+  disabled path for a missing key.
 
-`scrape` returns the vendor's HTML; error mapping copies `Embedder`'s contract:
-`InvalidInput` = never retry (disabled, bad key, 400/401/403), `Internal` = everything
-else (timeout, 429, 5xx).
+`scrape` returns the vendor's HTML; error mapping is `vendor_http`'s with
+`KeyOwner::Operator`: `InvalidInput` = never retry (disabled, 400, a payload without HTML),
+`Internal` = everything else (network, timeout, 408/409, 429, 5xx, and 401/403 because the
+key is the operator's and rotated out of band, which the retry schedule covers).
 
 **Where it is used.** A decorator, so `IngestWorker` stays byte-identical:
 
 ```rust
 // server/src/adapters/article/fallback.rs
-pub struct FallbackFetcher<F, S> { direct: F, scraper: S, extractor: HtmlExtractor }
+pub struct FallbackFetcher<F, S> { direct: F, scraper: S, extractor: HtmlExtractor, … }
 ```
 
 `fetch(url)`:
@@ -582,13 +588,16 @@ pub struct FallbackFetcher<F, S> { direct: F, scraper: S, extractor: HtmlExtract
 2. On `Ok(short)` or `Err(Permanent(_))`, and only if `scraper.enabled()`: refuse the URL
    first with `net::validate_public_url(url)` (a URL the app may not fetch, the vendor must
    not be asked to fetch either — that is the SSRF boundary for a hosted scraper, whose own
-   fetch is the vendor's responsibility), check the monthly budget, then
-   `scraper.scrape(url)`; on success run `extractor.extract(vendor_html, Some("text/html"),
-   url)` and return `source = scraped`.
+   fetch is the vendor's responsibility), reserve a page of the monthly budget, then
+   `scraper.scrape(url)`; on success run `extract_fetched(vendor_html, Some("text/html"),
+   final_url)` and return `source = scraped` when the text is non-empty and, for a short
+   direct result, longer than it. Stored text never gets shorter.
 3. On `Err(Transient(_))` or `Err(Skipped(_))`: no scrape (the retry schedule or the
    non-HTML verdict already decides).
-4. If the scrape fails or the budget is exhausted, return the *original* direct result, so
-   the bookmark lands in `failed`/`skipped` exactly as today.
+4. If the scrape fails, the page is a locked preview, the extraction finds no article or no
+   better text, or the budget is exhausted, return the *original* direct result, so the
+   bookmark lands in `failed`/`skipped` exactly as today. A locked preview is the one
+   answer recorded instead: `error = 'preview only (locked)'`, final, no retry.
 
 `FetchedArticle` gains `pub source: ContentSource`, and `SearchRepository::store_article`
 takes it, so the row records which path produced the text. `ContentSource`
@@ -601,35 +610,40 @@ takes it, so the row records which path produced the text. `ContentSource`
 `Permanent`, so it does not. The per-host `HostThrottle` (1 s) still paces the direct
 fetch; the scraper is a vendor call and is not throttled by host.
 
-**Spend caps.** Before each scrape the decorator reads `scraper_usage` for the current
-month (one `INSERT … ON CONFLICT DO UPDATE … RETURNING pages`), and when
-`PAGE_SCRAPER_MONTHLY_BUDGET_PAGES > 0` and the month's count has reached it, no scrape is
-attempted: the decorator behaves exactly as if the scraper were disabled, and Settings
-shows "Scraper budget used for this month (N pages)". Failures increment `failures`, not
-`pages`. This is a page cap, not a dollar cap, because only the hosted candidate has a
-price and the eval establishes it; a dollar figure is a round number on top of the same
-counter and needs no design.
+**Spend caps.** Before each scrape the decorator reserves a page of `scraper_usage` for the
+current UTC month (one `INSERT … ON CONFLICT DO UPDATE … RETURNING pages`, whose `WHERE`
+makes "the month is full" return no row), and when `PAGE_SCRAPER_MONTHLY_BUDGET_PAGES > 0`
+and the month's count has reached it, no scrape is attempted: the decorator behaves exactly
+as if the scraper were disabled and logs one warning for the process. A scrape that
+produced no stored text refunds the page and increments `failures` instead. An unreadable
+`scraper_usage` skips the scrape: spending without accounting is worse than not spending.
+This is a page cap, not a dollar cap, because only the hosted candidate has a price and the
+eval establishes it; a dollar figure is a round number on top of the same counter and needs
+no design.
 
 **SSRF.** The direct fetch keeps every guard (`net.rs`: `PublicOnlyResolver`, checked
 redirects, `guarded_get`). For a hosted scraper the vendor performs the fetch, so the SSRF
 surface is theirs — but the app still refuses any URL that `validate_public_url` rejects
-before calling the vendor, so it never uses a vendor as an SSRF proxy. For Obscura, which
-runs on infrastructure the operator controls, the same pre-check plus the existing
-per-host interval applies to whatever the operator's browser does on the app's behalf.
+before calling the vendor, so it never uses a vendor as an SSRF proxy.
 
-**Which adapter ships.** TBD by the companion evaluation. Decision criteria, in order:
+**Chosen adapter: Firecrawl.** The companion eval
+([`assets/2026-11-03-scraper-eval.md`](assets/2026-11-03-scraper-eval.md)) measured
+Firecrawl returning the full article for 26 of 84 pages with no block page anywhere and no
+host machine, against 6 from Obscura on a residential IP, blocked on all 65 Medium-family
+pages and needing a second Fly app. Firecrawl ships; Obscura is dropped, so there is no
+`obscura` value and no Obscura adapter. The criteria that decided it, in order:
 
 | Criterion | Why it decides |
 |---|---|
 | success rate on the 82 | the point of the feature; report per domain, not only overall |
 | extracted text quality vs the browser-captured text for the same URLs | a scrape that returns a paywall teaser or a challenge page is a failure with a 200 |
 | p50/p95 latency | one scrape sits inside an ingest job's 2-minute `JOB_TIMEOUT`; a slow vendor serialises the queue |
-| cost per page and per 1,000 bookmarks | Firecrawl bills per page; Obscura bills machine time |
-| memory and CPU on the Fly machine | the app runs on `shared-cpu-1x` with **512 MB** (`fly.toml`); a self-hosted browser cannot share that machine, so Obscura implies a second machine (and a monthly fixed cost) |
+| cost per page and per 1,000 bookmarks | a hosted vendor bills per page; a self-hosted browser bills machine time |
+| memory and CPU on the Fly machine | the app runs on `shared-cpu-1x` with **512 MB** (`fly.toml`); a self-hosted browser cannot share that machine |
 | operational surface | a second Fly app to deploy and monitor, versus an API key |
 
-The spec ships `DisabledScraper` and the decorator either way; switching adapters is one
-enum arm and one env value.
+The decorator and `DisabledScraper` work with any adapter; switching is one enum arm and
+one env value.
 
 ### Settings → Search index
 
@@ -795,9 +809,10 @@ Server and extension can start in parallel: the interface above is fixed.
    extension task immediately.
 3. **Extension** — `scripting`, capture at open, gzip, PUT after create, capture action,
    privacy statement amendment, tests. (Depends on 2 only through the interface.)
-4. **`PageScraper` port + decorator + `DisabledScraper`**, wired in `main.rs`, with the
-   fake-vendor tests. Ships without changing behaviour (disabled by default).
-5. **Chosen adapter** after the eval task, plus the Fly/deploy change it implies.
+4. **`PageScraper` port + decorator + `DisabledScraper` + Firecrawl adapter**, wired in
+   `main.rs`, with the fake-vendor tests. Disabled by default, so it changes no behaviour
+   until `PAGE_SCRAPER=firecrawl` and a key are set.
+5. **Fly/deploy change** the chosen adapter implies (the key and the budget), owner-side.
 6. **iOS proposal**, separately scheduled.
 
 ## Alternatives considered
@@ -805,8 +820,8 @@ Server and extension can start in parallel: the interface above is fixed.
 - **Server fetches through the existing screenshot service.** It already renders with
   headless Chrome (`SCREENSHOT_BACKEND`, `adapters/screenshot/playwright.rs`). Rejected as
   the primary path: it shares the 512 MB Fly machine with the app, it still hits the same
-  blocks from a datacenter IP, and it cannot see a paywall-rendered page. It remains the
-  Obscura-style self-hosted option in the eval.
+  blocks from a datacenter IP, and it cannot see a paywall-rendered page. It was the
+  candidate the eval measured as Obscura's approach, and Obscura was dropped.
 - **Medium's RSS or `?format=json`.** Rejected: one vendor's shape, undocumented, and it
   does not generalise to `generativeai.pub` or `builders.ramp.com`.
 - **LLM extraction of the captured HTML.** Rejected by the owner: cost, latency and a
@@ -822,8 +837,9 @@ Server and extension can start in parallel: the interface above is fixed.
 
 ## Open questions
 
-1. **Chosen scraper adapter** — by the companion eval (criteria above). Nothing in this
-   design changes with the answer.
+1. **Chosen scraper adapter** — resolved: Firecrawl (`assets/2026-11-03-scraper-eval.md`),
+   built in the `PageScraper` step. The budget is a page cap, so the price per page the
+   eval measured is the only remaining input for a dollar estimate.
 2. **Retention of `bookmark_page_captures` rows** — 24 h is a guess; production will show
    whether the queued path happens at all. If it never does, the table and the drain can
    be deleted (the route would then answer `503` on extraction timeout).
@@ -852,7 +868,7 @@ Server and extension can start in parallel: the interface above is fixed.
 | CSRF/same-origin for session-auth PUT, noted | HTTP interface → *CSRF / same-origin* |
 | `PageScraper` port, adapters, disabled, env config | [Server-side scraper fallback](#server-side-scraper-fallback-pagescraper) |
 | Used only when direct fetch fails or yields no article | Scraper → *Where it is used* |
-| Obscura / Firecrawl, criteria, adapter TBD by eval | Scraper → *Which adapter ships* |
+| Firecrawl chosen by the eval; criteria | Scraper → *Chosen adapter: Firecrawl* |
 | Guarded client rules; hosted vendor SSRF note | Scraper → *SSRF* |
 | iOS Safari share extension via JS preprocessing (proposal) | [iOS proposal](#ios-safari-share-extension-proposal-only) |
 | Re-capture overwrites | Precedence; Errors and edge cases |
