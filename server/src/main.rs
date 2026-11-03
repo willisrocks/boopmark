@@ -4,6 +4,7 @@ mod config;
 mod domain;
 mod web;
 
+use adapters::article::fallback::FallbackFetcher;
 use adapters::article::readability::{HtmlArticleFetcher, HtmlExtractor};
 use adapters::embedder::{DisabledEmbedder, EmbedderRouter};
 use adapters::llm_client::{LlmClientConfig, LlmClientRouter};
@@ -39,6 +40,7 @@ use domain::ports::llm_client::LlmClient;
 use domain::ports::llm_enricher::LlmEnricher;
 use domain::ports::llm_prompt_assistant::LlmPromptAssistant;
 use domain::ports::login_provider::LoginProvider;
+use domain::ports::scraper_usage_repo::ScraperUsageRepository;
 use domain::ports::screenshot::ScreenshotProvider;
 use domain::ports::tag_resolver::TagResolver;
 use domain::ports::tag_vocabulary::TagVocabulary;
@@ -262,14 +264,34 @@ async fn main() {
             .connect(&config.database_url)
             .await
             .expect("Failed to connect the article ingest worker to the database");
+        // The scraper's monthly spend is read through the ingest worker's own
+        // connection: it is written beside the fetch it belongs to.
+        let ingest_db = Arc::new(PostgresPool::new(ingest_pool));
+        let scraper_usage: Arc<dyn ScraperUsageRepository> = ingest_db.clone();
+        let page_scraper = adapters::scraper::page_scraper(&config);
+        tracing::info!(
+            backend = if page_scraper.enabled() {
+                "firecrawl"
+            } else {
+                "disabled"
+            },
+            monthly_budget_pages = config.page_scraper_monthly_budget_pages,
+            "page scraper"
+        );
         let wake = Arc::new(tokio::sync::Notify::new());
         adapters::postgres::ingest_listener::spawn_ingest_listener(
             config.database_url.clone(),
             wake.clone(),
         );
         app::ingest::IngestWorker::new(
-            Arc::new(PostgresPool::new(ingest_pool)),
-            Arc::new(HtmlArticleFetcher::new(config.article_ingest_concurrency)),
+            ingest_db,
+            Arc::new(FallbackFetcher::new(
+                HtmlArticleFetcher::new(config.article_ingest_concurrency),
+                page_scraper,
+                config.article_ingest_concurrency,
+                scraper_usage,
+                config.page_scraper_monthly_budget_pages,
+            )),
             config.article_ingest_concurrency,
         )
         .notify_on_stored(embed_wake.clone())
