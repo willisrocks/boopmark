@@ -24,3 +24,7 @@ mobile/ios/DerivedData/
 mobile/ios/archives/
 mobile/ios/AppStoreMedia/
 .litmus/
+.firecrawl/
+scripts/eval/scraper/data/
+scripts/eval/scraper/extract/target/
+scripts/eval/scraper/__pycache__/
