@@ -745,8 +745,8 @@ mod embedding_tests {
                 "h2",
                 ContentSource::Fetched,
             )
-                .await
-                .unwrap()
+            .await
+            .unwrap()
         );
         assert_eq!(embedded_model(&pool, article.id).await, None);
         embed_all(&pool, &repo, &embedder, &[owner]).await;

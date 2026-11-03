@@ -12,19 +12,8 @@ use url::Url;
 /// `ref` and `source` are deliberately absent: Medium's `?source=` changes
 /// what the page shows.
 const TRACKING_PARAMS: &[&str] = &[
-    "fbclid",
-    "gclid",
-    "gbraid",
-    "wbraid",
-    "msclkid",
-    "yclid",
-    "dclid",
-    "mc_cid",
-    "mc_eid",
-    "igshid",
-    "_hsenc",
-    "_hsmi",
-    "ref_src",
+    "fbclid", "gclid", "gbraid", "wbraid", "msclkid", "yclid", "dclid", "mc_cid", "mc_eid",
+    "igshid", "_hsenc", "_hsmi", "ref_src",
 ];
 
 /// A page URL as the capture endpoint accepts it: absolute, `http` or
@@ -48,10 +37,8 @@ pub fn parse_web_url(raw: &str) -> Option<Url> {
 ///   of `(name, value)` pairs, so order does not matter;
 /// - fragment: ignored, it is never part of a page's identity.
 pub fn same_page(bookmark_url: &str, page_url: &str) -> bool {
-    let (Some(bookmark), Some(page)) = (
-        parse_web_url(bookmark_url),
-        parse_web_url(page_url),
-    ) else {
+    let (Some(bookmark), Some(page)) = (parse_web_url(bookmark_url), parse_web_url(page_url))
+    else {
         return false;
     };
     if has_userinfo(&bookmark) || has_userinfo(&page) {
@@ -107,14 +94,23 @@ mod tests {
         assert!(same_page("https://example.com/a/b/?x=1", BOOKMARK));
         assert!(same_page("https://example.com/", "https://example.com"));
         // Exactly one trailing slash is ignored, not a run of them.
-        assert!(!same_page("https://example.com/a", "https://example.com/a//"));
-        assert!(!same_page("https://example.com/a/", "https://example.com/A"));
+        assert!(!same_page(
+            "https://example.com/a",
+            "https://example.com/a//"
+        ));
+        assert!(!same_page(
+            "https://example.com/a/",
+            "https://example.com/A"
+        ));
     }
 
     #[test]
     fn fragments_never_matter() {
         assert!(same_page(BOOKMARK, "https://example.com/a/b?x=1#section-3"));
-        assert!(same_page("https://example.com/a#top", "https://example.com/a"));
+        assert!(same_page(
+            "https://example.com/a#top",
+            "https://example.com/a"
+        ));
     }
 
     #[test]
@@ -140,8 +136,14 @@ mod tests {
             "https://example.com/a/b?ref=home",
             "https://example.com/a/b"
         ));
-        assert!(!same_page("https://example.com/a?x=1", "https://example.com/a?x=2"));
-        assert!(!same_page("https://example.com/a?x=1", "https://example.com/a?x=1&y=2"));
+        assert!(!same_page(
+            "https://example.com/a?x=1",
+            "https://example.com/a?x=2"
+        ));
+        assert!(!same_page(
+            "https://example.com/a?x=1",
+            "https://example.com/a?x=1&y=2"
+        ));
     }
 
     #[test]
@@ -156,7 +158,10 @@ mod tests {
             "https://example.com/a"
         ));
         // 80 is http's default (so no explicit port) but not https's.
-        assert!(!same_page("http://example.com:80/a", "https://example.com:80/a"));
+        assert!(!same_page(
+            "http://example.com:80/a",
+            "https://example.com:80/a"
+        ));
     }
 
     #[test]
@@ -168,14 +173,23 @@ mod tests {
             "https://example.com/a"
         ));
         assert!(crate::domain::url_match::parse_web_url("https://user@example.com/a").is_some());
-        assert!(!has_userinfo(&parse_web_url("https://example.com/a").unwrap()));
+        assert!(!has_userinfo(
+            &parse_web_url("https://example.com/a").unwrap()
+        ));
     }
 
     #[test]
     fn only_absolute_http_urls_are_page_urls() {
         assert!(parse_web_url("https://example.com/a").is_some());
         assert!(parse_web_url("http://example.com").is_some());
-        for raw in ["", "  ", "example.com/a", "/a", "file:///etc/passwd", "ftp://example.com/a"] {
+        for raw in [
+            "",
+            "  ",
+            "example.com/a",
+            "/a",
+            "file:///etc/passwd",
+            "ftp://example.com/a",
+        ] {
             assert!(parse_web_url(raw).is_none(), "{raw}");
         }
         assert!(!same_page(BOOKMARK, "not a url"));

@@ -90,14 +90,7 @@ impl HtmlExtractor {
             }
             Ok(())
         }
-        run_extraction(
-            &self.slots,
-            body,
-            content_type,
-            url,
-            Some(refuse_challenge),
-        )
-        .await
+        run_extraction(&self.slots, body, content_type, url, Some(refuse_challenge)).await
     }
 }
 
@@ -192,6 +185,10 @@ impl ArticleFetcher for HtmlArticleFetcher {
     }
 }
 
+/// A refusal check over the decoded page, run before the parse (the fetch
+/// path refuses a Cloudflare challenge there).
+type PageCheck = fn(&str) -> Result<(), ArticleFetchError>;
+
 /// Decode an HTML body, let `check` refuse it, then parse: one blocking
 /// slot, one decode.
 async fn run_extraction(
@@ -199,7 +196,7 @@ async fn run_extraction(
     body: Vec<u8>,
     content_type: Option<&str>,
     url: &str,
-    check: Option<fn(&str) -> Result<(), ArticleFetchError>>,
+    check: Option<PageCheck>,
 ) -> Result<String, ArticleFetchError> {
     let content_type = content_type.map(str::to_string);
     let url = url.to_string();

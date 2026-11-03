@@ -498,9 +498,9 @@ impl SearchRepository for PostgresPool {
 }
 
 #[cfg(test)]
-pub(super) mod search_tests {
+pub(crate) mod search_tests {
     use super::*;
-    use crate::domain::bookmark::CreateBookmark;
+    use crate::domain::bookmark::{BookmarkFilter, CreateBookmark};
     use crate::domain::ports::bookmark_repo::BookmarkRepository;
     use crate::domain::search::IngestStatus;
     use sqlx::PgPool;
@@ -1207,5 +1207,266 @@ pub(super) mod search_tests {
             .await
             .unwrap();
         pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a migrated Postgres database (DATABASE_URL)"]
+    async fn a_captured_page_stores_wins_over_a_fetch_in_flight_and_re_embeds() {
+        let _serial = SERIAL.lock().await;
+        let pool = pool().await;
+        let repo = PostgresPool::new(pool.clone());
+        let owner = user(&pool).await;
+        let other = user(&pool).await;
+        let page = bookmark(
+            &repo,
+            owner,
+            "https://medium.com/@writer/a-post",
+            "A post",
+            None,
+            &["reading"],
+        )
+        .await;
+        let fetched = bookmark(
+            &repo,
+            owner,
+            "https://example.org/plain",
+            "Plain",
+            None,
+            &[],
+        )
+        .await;
+        let jobs = claim_mine(&pool, &repo, &[owner]).await;
+
+        // A fetch stores its text as `fetched`.
+        store(&repo, &jobs[&fetched.id], "a fetched passage about compost").await;
+        let (status, source, text) = contents(&pool, fetched.id).await;
+        assert_eq!(status, "fetched");
+        assert_eq!(source.as_deref(), Some("fetched"));
+        assert!(text.unwrap().contains("compost"));
+
+        // The capture wins: the row is fetched-with-captured-text, and the
+        // claim the fetch held is gone, so its late result updates nothing.
+        let captured = "capture-only passage about the borrow checker";
+        assert!(
+            repo.store_capture(page.id, owner, captured, "h-capture")
+                .await
+                .unwrap()
+        );
+        let (status, source, text) = contents(&pool, page.id).await;
+        assert_eq!(status, "fetched");
+        assert_eq!(source.as_deref(), Some("captured"));
+        assert_eq!(text.as_deref(), Some(captured));
+        assert!(
+            !repo
+                .store_article(
+                    &jobs[&page.id],
+                    "late fetch",
+                    "h-late",
+                    ContentSource::Fetched
+                )
+                .await
+                .unwrap(),
+            "a fetch already in flight loses to the capture"
+        );
+        assert_eq!(contents(&pool, page.id).await.2.as_deref(), Some(captured));
+        // The lexical leg finds the captured body at once.
+        let hits = search(&repo, owner, "borrow checker").await;
+        assert_eq!(ids(&hits), [page.id]);
+
+        // A capture of another user's bookmark, or of a bookmark that does
+        // not exist, stores nothing.
+        assert!(
+            !repo
+                .store_capture(fetched.id, other, "not mine", "h")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .store_capture(Uuid::new_v4(), owner, "x", "h")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            contents(&pool, fetched.id).await.1.as_deref(),
+            Some("fetched")
+        );
+
+        // The same text again keeps the vectors; new text drops them.
+        sqlx::query("UPDATE bookmark_contents SET embedded_model = 'stub' WHERE bookmark_id = $1")
+            .bind(page.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            repo.store_capture(page.id, owner, captured, "h-capture")
+                .await
+                .unwrap()
+        );
+        let model: Option<String> = sqlx::query_scalar(
+            "SELECT embedded_model FROM bookmark_contents WHERE bookmark_id = $1",
+        )
+        .bind(page.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            model.as_deref(),
+            Some("stub"),
+            "unchanged text keeps chunks"
+        );
+
+        let recaptured = "a longer capture that says something else entirely";
+        assert!(
+            repo.store_capture(page.id, owner, recaptured, "h-recapture")
+                .await
+                .unwrap()
+        );
+        let model: Option<String> = sqlx::query_scalar(
+            "SELECT embedded_model FROM bookmark_contents WHERE bookmark_id = $1",
+        )
+        .bind(page.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(model, None, "new text re-embeds");
+
+        // A URL change is a new page: the captured text and its source go.
+        sqlx::query(
+            "UPDATE bookmarks SET url = 'https://medium.com/@writer/a-post-v2' WHERE id = $1",
+        )
+        .bind(page.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (status, source, text) = contents(&pool, page.id).await;
+        assert_eq!(status, "pending");
+        assert_eq!(source, None);
+        assert_eq!(text, None);
+
+        // Each source is recorded as given.
+        let scraped = bookmark(&repo, owner, "https://example.org/s", "S", None, &[]).await;
+        let jobs = claim_mine(&pool, &repo, &[owner]).await;
+        assert!(
+            repo.store_article(
+                &jobs[&scraped.id],
+                "a scraped passage",
+                "h-scraped",
+                ContentSource::Scraped
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            contents(&pool, scraped.id).await.1.as_deref(),
+            Some("scraped")
+        );
+
+        sqlx::query("DELETE FROM users WHERE id IN ($1, $2)")
+            .bind(owner)
+            .bind(other)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a migrated Postgres database (DATABASE_URL)"]
+    async fn the_page_url_lookup_is_normalized_and_scoped_to_the_owner() {
+        let _serial = SERIAL.lock().await;
+        let pool = pool().await;
+        let repo = PostgresPool::new(pool.clone());
+        let owner = user(&pool).await;
+        let other = user(&pool).await;
+        let exact = bookmark(
+            &repo,
+            owner,
+            "https://medium.com/@writer/first",
+            "First",
+            None,
+            &[],
+        )
+        .await;
+        let slashed = bookmark(
+            &repo,
+            owner,
+            "https://medium.com/@writer/second/",
+            "Second",
+            None,
+            &[],
+        )
+        .await;
+        let theirs = bookmark(
+            &repo,
+            other,
+            "https://medium.com/@writer/first",
+            "Not mine",
+            None,
+            &[],
+        )
+        .await;
+
+        let lookup = |url: &'static str| {
+            let repo = repo.clone();
+            async move {
+                repo.list(
+                    owner,
+                    BookmarkFilter {
+                        url: Some(url.to_string()),
+                        limit: Some(1),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // An exact match answers first.
+        let hits = lookup("https://medium.com/@writer/first").await;
+        assert_eq!(ids_of(&hits), [exact.id]);
+        // Case in the scheme, a trailing slash and tracking parameters still
+        // find the saved URL; nothing of another user's comes back.
+        let hits = lookup("http://medium.com/@writer/first?utm_source=chrome").await;
+        assert_eq!(ids_of(&hits), [exact.id]);
+        let hits = lookup("https://medium.com/@writer/second?fbclid=abc").await;
+        assert_eq!(ids_of(&hits), [slashed.id]);
+        // A different page on the same host is not this bookmark.
+        assert!(lookup("https://medium.com/@writer/third").await.is_empty());
+        assert!(lookup("not a url").await.is_empty());
+        // The other user's bookmark of the same URL is not visible.
+        let theirs_list = repo
+            .list(
+                other,
+                BookmarkFilter {
+                    url: Some("https://medium.com/@writer/first".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids_of(&theirs_list), [theirs.id]);
+
+        sqlx::query("DELETE FROM users WHERE id IN ($1, $2)")
+            .bind(owner)
+            .bind(other)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+
+    /// `(status, source, text)` of one bookmark's content row.
+    async fn contents(pool: &PgPool, id: Uuid) -> (String, Option<String>, Option<String>) {
+        sqlx::query_as("SELECT status, source, text FROM bookmark_contents WHERE bookmark_id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    fn ids_of(bookmarks: &[Bookmark]) -> Vec<Uuid> {
+        bookmarks.iter().map(|b| b.id).collect()
     }
 }

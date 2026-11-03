@@ -2,9 +2,7 @@ use crate::app::page_capture::CaptureDrain;
 use crate::domain::error::DomainError;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher};
 use crate::domain::ports::search_repo::SearchRepository;
-use crate::domain::search::{
-    ContentSource, IngestFailure, IngestJob, IngestStatus, retry_delay,
-};
+use crate::domain::search::{ContentSource, IngestFailure, IngestJob, IngestStatus, retry_delay};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -212,6 +210,8 @@ mod tests {
         claims: Mutex<Vec<i64>>,
         stored: Mutex<Vec<(IngestJob, String, String)>>,
         failures: Mutex<Vec<(IngestJob, IngestFailure)>>,
+        /// What the worker did, in order: `drain` or `claim`.
+        calls: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl SearchRepository for FakeRepo {
@@ -228,6 +228,7 @@ mod tests {
             limit: i64,
             _lease: Duration,
         ) -> Result<Vec<IngestJob>, DomainError> {
+            self.calls.lock().unwrap().push("claim");
             self.claims.lock().unwrap().push(limit);
             let mut queue = self.queue.lock().unwrap();
             let n = queue.len().min(limit as usize);
@@ -420,5 +421,39 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].1.status, IngestStatus::Pending);
         assert_eq!(failures[0].1.error, "timed out");
+    }
+
+    /// The drain answers a capture the route accepted but could not parse in
+    /// the request, so it runs before any fetch job is claimed.
+    struct FakeDrain {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        taken: usize,
+    }
+
+    impl CaptureDrain for FakeDrain {
+        fn drain(
+            &self,
+            limit: usize,
+        ) -> Pin<Box<dyn Future<Output = Result<usize, DomainError>> + Send + '_>> {
+            self.calls.lock().unwrap().push("drain");
+            let taken = self.taken.min(limit);
+            Box::pin(async move { Ok(taken) })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_capture_queue_is_drained_before_fetch_jobs_are_claimed() {
+        let repo = Arc::new(FakeRepo::default());
+        let wake = Arc::new(Notify::new());
+        IngestWorker::new(repo.clone(), Arc::new(FakeFetcher), 2)
+            .with_capture_drain(Arc::new(FakeDrain {
+                calls: repo.calls.clone(),
+                taken: 5,
+            }))
+            .spawn(wake);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let calls = repo.calls.lock().unwrap();
+        assert!(calls.len() >= 2, "{calls:?}");
+        assert_eq!(&calls[..2], ["drain", "claim"]);
     }
 }

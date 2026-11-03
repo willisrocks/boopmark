@@ -4,9 +4,7 @@
 
 use crate::adapters::article::readability::HtmlExtractor;
 use crate::domain::error::DomainError;
-use crate::domain::ports::page_capture_repo::{
-    CaptureQueueRepository, NewCapture, QueuedCapture,
-};
+use crate::domain::ports::page_capture_repo::{CaptureQueueRepository, NewCapture, QueuedCapture};
 use crate::domain::ports::search_repo::SearchRepository;
 use crate::domain::search::ContentSource;
 use flate2::bufread::GzDecoder;
@@ -277,8 +275,7 @@ mod tests {
         </article></body></html>"#;
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
-        let mut encoder =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(bytes).unwrap();
         encoder.finish().unwrap()
     }
@@ -393,12 +390,14 @@ mod tests {
 
         assert_eq!(worker.drain_once(8).await.unwrap(), 2);
 
-        let stored = repo.stored.lock().unwrap();
-        assert_eq!(stored.len(), 2);
-        assert_eq!(stored[0].0, first.bookmark_id);
-        assert_eq!(stored[0].1, first.user_id);
-        assert!(stored[0].2.contains("The borrow checker enforces"));
-        assert!(repo.failures.lock().unwrap().is_empty());
+        {
+            let stored = repo.stored.lock().unwrap();
+            assert_eq!(stored.len(), 2);
+            assert_eq!(stored[0].0, first.bookmark_id);
+            assert_eq!(stored[0].1, first.user_id);
+            assert!(stored[0].2.contains("The borrow checker enforces"));
+            assert!(repo.failures.lock().unwrap().is_empty());
+        }
         // The embed worker is woken for the stored capture.
         tokio::time::timeout(Duration::from_secs(1), woke)
             .await
@@ -411,7 +410,10 @@ mod tests {
         let repo = Arc::new(FakeRepo::default());
         let page = capture(b"<html><body></body></html>");
         *repo.queued.lock().unwrap() = vec![page.clone()];
-        assert_eq!(worker(&repo, 5 * 1024 * 1024).drain_once(4).await.unwrap(), 1);
+        assert_eq!(
+            worker(&repo, 5 * 1024 * 1024).drain_once(4).await.unwrap(),
+            1
+        );
         assert!(repo.stored.lock().unwrap().is_empty());
         assert_eq!(
             repo.failures.lock().unwrap().as_slice(),
@@ -422,7 +424,8 @@ mod tests {
     #[tokio::test]
     async fn an_oversized_payload_is_dropped_as_a_failure() {
         let repo = Arc::new(FakeRepo::default());
-        let page = capture(format!("<html><body><p>{}</p></body></html>", "x".repeat(4096)).as_bytes());
+        let page =
+            capture(format!("<html><body><p>{}</p></body></html>", "x".repeat(4096)).as_bytes());
         *repo.queued.lock().unwrap() = vec![page.clone()];
         assert_eq!(worker(&repo, 1024).drain_once(4).await.unwrap(), 1);
         assert!(repo.stored.lock().unwrap().is_empty());
@@ -444,7 +447,11 @@ mod tests {
     fn gzip_caps_are_exact_and_bombs_are_rejected() {
         let payload = vec![b'a'; 1000];
         let gz = gzip(&payload);
-        assert_eq!(gunzip_capped(&gz, 1000).unwrap(), payload, "exactly at the cap");
+        assert_eq!(
+            gunzip_capped(&gz, 1000).unwrap(),
+            payload,
+            "exactly at the cap"
+        );
         assert_eq!(gunzip_capped(&gz, 999), Err(GzipError::TooLarge));
         assert_eq!(gunzip_capped(&gz, 5000).unwrap().len(), 1000);
 

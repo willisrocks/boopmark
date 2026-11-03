@@ -124,7 +124,9 @@ impl AppState {
         filter: BookmarkFilter,
     ) -> Result<Vec<SearchHit>, DomainError> {
         let filter = filter.normalized();
-        if filter.search.is_some() {
+        // A page lookup is a plain list even when search text rides along:
+        // the extension wants the one bookmark for that URL.
+        if filter.search.is_some() && filter.url.is_none() {
             return self.search.search(user_id, filter).await;
         }
         let bookmarks = match &self.bookmarks {
