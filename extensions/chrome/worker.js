@@ -8,6 +8,9 @@ const OPERATION_KEY = "boopmark.operation";
 const DRAFT_PREFIX = "boopmark-draft:";
 const CAPTURE_PREFIX = "boopmark-capture:";
 const activeSaves = new Set();
+// Operations whose capture upload is in flight in this worker instance. A
+// success marker that still says `capturing` after a restart lost its upload.
+const activeUploads = new Set();
 const activeSuggestions = new Map();
 const autoSuggestionTimers = new Map();
 // Captured pages are kept compressed and keyed by draft ID.  The body is
@@ -126,6 +129,12 @@ async function getOperation() {
   let marker = (await read(localArea(), OPERATION_KEY))[OPERATION_KEY] || null;
   if (marker?.state === "pending" && !activeSaves.has(marker.id)) {
     marker = Core.recoverOperation(marker, false);
+    await putOperation(marker);
+  }
+  // A capture upload that was in flight when the worker stopped is gone; the
+  // save itself is confirmed, so only the page-text note changes.
+  if (marker?.state === "success" && marker.capture?.state === "capturing" && !activeUploads.has(marker.id)) {
+    marker = { ...marker, capture: { state: "failed", text: "article text not captured" } };
     await putOperation(marker);
   }
   return marker;
@@ -561,6 +570,7 @@ async function suggest(message) {
 }
 
 function executeSave(settings, marker, fields) {
+  activeUploads.add(marker.id);
   (async () => {
     let bookmark;
     let failure;
@@ -569,34 +579,54 @@ function executeSave(settings, marker, fields) {
         .create(fields, { idempotencyKey: marker.id });
     }
     catch (error) { failure = error; }
-    // The capture is uploaded only after the create is confirmed, and its
-    // result annotates the saved operation: it never turns a save into a
-    // failure and it is never retried automatically.
-    let capture = null;
-    if (!failure) {
-      const draft = await getDraft(marker.draftId);
-      try { capture = await uploadCapture(settings, draft || { id: marker.draftId, url: fields.url, originalUrl: fields.url }, bookmark.id); }
-      catch { capture = { state: "failed", text: "article text not captured" }; }
-    }
+    // The confirmed save is recorded before the page is uploaded: a slow or
+    // failed capture must never make a created bookmark look unconfirmed.
+    const draft = await getDraft(marker.draftId);
+    const reviewedDraft = draft || { id: marker.draftId, url: fields.url, originalUrl: fields.url, tabId: -1 };
+    const record = !failure ? captureFor(reviewedDraft) : null;
+    let capture = !record
+      ? { state: "missing", text: "article text not captured" }
+      : record.status === "ready" || record.status === "capturing"
+        ? { state: "capturing", text: "" }
+        : { state: "unavailable", text: captureText(record.reason) };
     await serialize(async () => {
       const currentSettings = await getSettings();
       const currentMarker = await getOperation();
       if (!sameConnection(currentSettings, marker) || currentMarker?.id !== marker.id) return;
       if (failure?.kind === "auth") { currentSettings.authError = true; await putSettings(currentSettings); }
-      if (capture?.state === "auth") { currentSettings.authError = true; await putSettings(currentSettings); }
       const outcome = !failure ? { state: "success", bookmarkId: bookmark.id, capture }
         : { state: failure.kind === "unknown" ? "unknown" : "error", error: failure.message };
       await putOperation(Core.transitionOperation(marker, outcome));
-      if (!failure) {
-        await clearDraft(marker.draftId);
-        await clearCapture(marker.draftId);
-      } else {
+      if (!failure) await clearDraft(marker.draftId);
+      else {
         const draft = await getDraft(marker.draftId);
         if (draft) { draft.status = "ready"; draft.revision += 1; await putDraft(draft); }
       }
       publish();
     });
-  })().catch(() => publish()).finally(() => activeSaves.delete(marker.id));
+    if (failure) return;
+    if (capture.state !== "capturing") {
+      await clearCapture(marker.draftId);
+      return;
+    }
+    try { capture = await uploadCapture(settings, reviewedDraft, bookmark.id); }
+    catch { capture = { state: "failed", text: "article text not captured" }; }
+    await serialize(async () => {
+      const currentSettings = await getSettings();
+      const currentMarker = await getOperation();
+      if (!sameConnection(currentSettings, marker) || currentMarker?.id !== marker.id || currentMarker.state !== "success") {
+        await clearCapture(marker.draftId);
+        return;
+      }
+      if (capture.state === "auth") { currentSettings.authError = true; await putSettings(currentSettings); }
+      await putOperation({ ...currentMarker, capture: { state: capture.state, text: capture.text } });
+      await clearCapture(marker.draftId);
+      publish();
+    });
+  })().catch(() => publish()).finally(() => {
+    activeSaves.delete(marker.id);
+    activeUploads.delete(marker.id);
+  });
 }
 async function save(message) {
   const settings = await getSettings();

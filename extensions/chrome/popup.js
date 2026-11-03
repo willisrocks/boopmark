@@ -113,11 +113,12 @@ function render() {
   $('recovery').hidden = !operation || !['unknown', 'error'].includes(operation.state);
   $('library-link').hidden = operation?.state !== 'unknown';
   $('ack-button').textContent = operation?.state === 'error' ? 'Dismiss this failed save' : 'I checked; dismiss this result';
+  const awaitingCapture = operation?.state === 'success' && operation.capture?.state === 'capturing';
   if (operation?.state !== 'success' && closeTimer) {
     clearTimeout(closeTimer);
     closeTimer = undefined;
   }
-  if (operation?.state === 'success' && !closeTimer) {
+  if (operation?.state === 'success' && !awaitingCapture && !closeTimer) {
     // A capture annotation must stay readable before the popup closes itself.
     const delay = operation.capture?.text ? 2200 : 1300;
     closeTimer = setTimeout(async () => {

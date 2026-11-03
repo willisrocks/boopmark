@@ -335,3 +335,32 @@ test('an existing bookmark reports the capture result as a sentence', async () =
   await flush();
   assert.equal(ui.elements['existing-status'].textContent, "The page does not match this bookmark's URL.");
 });
+
+test('the popup stays open while the page text is still uploading', async () => {
+  const ui = await setup();
+  ui.override(() => ({
+    ...structuredClone(ui.data),
+    draft: null,
+    operation: {
+      state: 'success', id: 'operation-2', bookmarkId: 'bookmark-1',
+      capture: { state: 'capturing', text: '' },
+    },
+  }));
+  ui.change();
+  await flush();
+  assert.equal(ui.elements['save-status'].textContent, 'Saved to Boopmark');
+  assert.equal(ui.timers.filter(Boolean).length, 0, 'no auto-close before the capture result');
+
+  ui.override(() => ({
+    ...structuredClone(ui.data),
+    draft: null,
+    operation: {
+      state: 'success', id: 'operation-2', bookmarkId: 'bookmark-1',
+      capture: { state: 'captured', text: 'article text captured' },
+    },
+  }));
+  ui.change();
+  await flush();
+  assert.equal(ui.elements['save-status'].textContent, 'Saved to Boopmark · article text captured');
+  assert.equal(ui.timers.filter(Boolean).length, 1);
+});

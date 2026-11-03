@@ -1328,3 +1328,110 @@ test('a lookup result for a different page never offers a capture', async () => 
   assert.equal(refused.ok, false);
   assert.match(refused.error.message, /Save this page before capturing its text/);
 });
+
+test('the confirmed save is reported before a slow capture upload finishes', async () => {
+  const pageUrl = 'https://example.com/slow-upload';
+  const gate = deferred();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init: init || {} });
+    if (String(url).includes('?url=') || String(url).includes('?limit=1')) return response(200, []);
+    if (String(url).endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: '', description: '', tags: [] });
+    if (String(url).endsWith('/api/v1/bookmarks') && init?.method === 'POST') return response(201, { id: CAPTURE_BOOKMARK_ID });
+    if (String(url).endsWith(`/api/v1/bookmarks/${CAPTURE_BOOKMARK_ID}/page`)) {
+      await gate.promise;
+      return response(202, { status: 'indexed' });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>slow</body></html>' },
+  });
+  const tab = { id: 41, url: pageUrl, title: 'Slow' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: { url: pageUrl, title: 'Slow', description: '', tags: '' } });
+  await wait(50);
+
+  const during = await ui.send({ type: 'OPEN', tab });
+  assert.equal(during.operation.state, 'success', 'the create is confirmed without waiting for the upload');
+  assert.equal(during.operation.capture.state, 'capturing');
+  assert.equal(during.draft.url, pageUrl, 'the recorded operation still describes the saved page');
+
+  gate.resolve();
+  await wait(50);
+  const after = await ui.send({ type: 'OPEN', tab });
+  assert.equal(after.operation.capture.state, 'captured');
+  assert.equal(calls.filter(call => call.init.method === 'PUT').length, 1);
+});
+
+test('an upload interrupted by a worker restart is reported as not captured', async () => {
+  const operation = {
+    version: 1,
+    id: '5b2e4d1a-7c3f-4a8b-9d10-2e3f4a5b6c7d',
+    state: 'success',
+    server: 'http://127.0.0.1:4011',
+    connectionEpoch: 'epoch-one',
+    draftId: 'boopmark-draft:restart-capture',
+    url: 'https://example.com/restarted',
+    bookmarkId: CAPTURE_BOOKMARK_ID,
+    submittedAt: Date.now(),
+    error: '',
+    capture: { state: 'capturing', text: '' },
+  };
+  let calls = 0;
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings(), 'boopmark.operation': operation },
+    fetchImpl: async () => { calls += 1; return response(200, []); },
+  });
+  const opened = await ui.send({ type: 'OPEN', tab: { id: 1, url: operation.url, title: 'Restarted' } });
+  assert.equal(opened.operation.state, 'success');
+  assert.deepEqual({ ...opened.operation.capture }, { state: 'failed', text: 'article text not captured' });
+  assert.equal(calls, 0, 'a lost upload is never retried');
+});
+
+test('a failed save keeps the captured page for the explicit retry', async () => {
+  const pageUrl = 'https://example.com/retry-capture';
+  let createCount = 0;
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    const text = String(url);
+    calls.push({ url: text, init: init || {} });
+    if (text.includes('?url=') || text.includes('?limit=1')) return response(200, []);
+    if (text.endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: 'Suggested', description: '', tags: [] });
+    if (text.endsWith('/api/v1/bookmarks') && init?.method === 'POST') {
+      createCount += 1;
+      return createCount === 1
+        ? response(422, { error: 'invalid reviewed fields' })
+        : response(201, { id: CAPTURE_BOOKMARK_ID });
+    }
+    if (text.endsWith(`/api/v1/bookmarks/${CAPTURE_BOOKMARK_ID}/page`)) return response(202, { status: 'indexed' });
+    throw new Error(`unexpected URL ${text}`);
+  };
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>retry article</body></html>' },
+  });
+  const tab = { id: 51, url: pageUrl, title: 'Retry' };
+  const fields = { url: pageUrl, title: 'Retry', description: '', tags: '' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields });
+  await wait(40);
+  const failed = await ui.send({ type: 'OPEN', tab });
+  assert.equal(failed.operation.state, 'error');
+  assert.equal(calls.filter(call => call.init.method === 'PUT').length, 0);
+
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields });
+  await wait(50);
+  const saved = await ui.send({ type: 'OPEN', tab });
+  assert.equal(saved.operation.state, 'success');
+  const puts = calls.filter(call => call.init.method === 'PUT');
+  assert.equal(puts.length, 1, 'the retried save still uploads the captured page');
+  assert.equal(puts[0].init.headers['X-Page-Url'], pageUrl);
+});
