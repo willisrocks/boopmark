@@ -1,10 +1,12 @@
 # Boopmark Chrome Web Store listing
 
-Release package: `dist/boopmark-chrome-0.1.0.zip`
+Release package: `boopmark-chrome-0.10.0.zip` (GitHub release v0.10.0)
 
 Chrome Web Store item ID: `oncfakjpmbjhmahhccdboahbhgjihgbo`
 
-Dashboard status on August 30, 2026: version 0.1.0 submitted and **Pending review**. The package, listing copy, icon, screenshot, privacy disclosures, limited-use certifications, confidential reviewer instructions, and public/free/all-regions distribution are configured. Automatic publishing is enabled for approval. The optional small promo tile was prepared but is not required for review.
+Dashboard status on November 3, 2026: version 0.1.0 **Published - public**; version 0.10.0 (page capture, new `scripting` permission) submitted and **Pending review**.
+
+On August 30, 2026: version 0.1.0 submitted and **Pending review**. The package, listing copy, icon, screenshot, privacy disclosures, limited-use certifications, confidential reviewer instructions, and public/free/all-regions distribution are configured. Automatic publishing is enabled for approval. The optional small promo tile was prepared but is not required for review.
 
 ## Store listing
 
@@ -43,7 +45,7 @@ Single purpose:
 
 Permission justifications:
 
-- `activeTab`: read the current tab's URL and title only after the user opens Boopmark, so the capture form can be prefilled.
+- `activeTab`: read the current tab's URL and title only after the user opens Boopmark, so the capture form can be prefilled; and, with `scripting`, read that tab's HTML when the user saves the bookmark or chooses Capture text, to send its article text to the user's Boopmark server.
 - `scripting`: read the invoked page's HTML only after the user opens Boopmark and only to send its article text when the user saves the bookmark or chooses Capture text. No content script, no persistent page access, and no background capture.
 - `storage`: retain the selected server and API key locally, preserve an unsaved session draft, and track an in-flight save safely across extension worker restarts.
 - Optional host access: communicate only with the Boopmark server the user explicitly configures and grants. HTTPS is required outside local development.
