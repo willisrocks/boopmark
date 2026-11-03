@@ -93,6 +93,12 @@ jobs:
           adapters::postgres::search_repo::search_tests
           adapters::postgres::embedding_repo::embedding_tests
           adapters::postgres::vector_schema::vector_schema_tests::pgvector_ready_is_idempotent
+      - name: Test page capture DB
+        run: >-
+          cargo test -p boopmark-server
+          -- --ignored
+          adapters::postgres::page_capture_repo::page_capture_postgres_tests
+          web::api::page_capture::tests
       - name: Test tag consolidation DB
         run: >-
           cargo test -p boopmark-server
