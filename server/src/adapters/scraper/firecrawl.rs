@@ -3,25 +3,26 @@
 //! answers with the HTML, which the app then extracts with its own Readability
 //! pass.
 //!
-//! `formats: ["rawHtml", "html"]` is one credit either way; the raw HTML is
-//! what holds Medium's page state, and therefore the lock marker, so it is
-//! preferred and the cleaned `html` is the fallback.
+//! One format is requested (`rawHtml`): the cleaned `html` would double the
+//! answer for text nobody reads, and the raw document is what carries the
+//! page's own state. The response is read with a cap, and the page itself is
+//! checked against the same ceiling as the direct fetch before it is parsed.
 
-use crate::adapters::vendor_http::{KeyOwner, post_json};
+use crate::adapters::article::readability::MAX_HTML_BYTES;
+use crate::adapters::net::{CappedReadError, read_capped};
+use crate::adapters::vendor_http::{KeyOwner, http_status_error, transport_error};
 use crate::domain::error::DomainError;
-use crate::domain::ports::page_scraper::{BoxFuture, PageScraper, ScrapedPage};
+use crate::domain::ports::page_scraper::{BoxFuture, PageScraper, ScrapeError, ScrapedPage};
+use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::time::Duration;
 
 const VENDOR: &str = "Firecrawl";
 const SCRAPE_PATH: &str = "/v2/scrape";
-pub const DEFAULT_BASE_URL: &str = "https://api.firecrawl.dev";
-
-/// Medium marks a member-only story in the page state it embeds, so the HTML
-/// of a signed-out reader holds the preview, not the article. The eval found
-/// this marker necessary: without it 49 previews of 1,500–2,400 characters
-/// counted as full articles.
-pub const LOCKED_MARKER: &str = "\"isLocked\":true";
+const DEFAULT_BASE_URL: &str = "https://api.firecrawl.dev";
+/// The JSON envelope carries the HTML as an escaped string, so the body can be
+/// larger than the page. Read with headroom, then check the page itself.
+const MAX_RESPONSE_BYTES: usize = MAX_HTML_BYTES + 2 * 1024 * 1024;
 
 pub struct FirecrawlScraper {
     client: reqwest::Client,
@@ -49,7 +50,6 @@ struct ScrapeResponse {
 struct ScrapeData {
     #[serde(rename = "rawHtml")]
     raw_html: Option<String>,
-    html: Option<String>,
     metadata: Option<ScrapeMetadata>,
 }
 
@@ -84,43 +84,122 @@ impl FirecrawlScraper {
         }
     }
 
-    /// The page's HTML plus the vendor's verdict on it.
-    ///
-    /// The API's own status is checked first (the `post_json` mapping, with
-    /// the operator owning the key); then `success: false` and a payload
-    /// without HTML are final, since the same request cannot return a page
-    /// later. A target page that answered a non-2xx status is final too: a
-    /// "404 Not Found" body is not an article.
-    fn interpret(payload: Value, requested_url: &str) -> Result<ScrapedPage, DomainError> {
-        let parsed: ScrapeResponse = serde_json::from_value(payload).map_err(|_| {
-            DomainError::Internal(format!("{VENDOR} returned a malformed response"))
+    /// One scrape: the API's own status decides whether a page was billed,
+    /// then the payload's `success`, the target page's status and the HTML
+    /// itself decide what came back.
+    async fn scrape_page(&self, url: &str) -> Result<ScrapedPage, ScrapeError> {
+        let body = json!({
+            "url": url,
+            "formats": ["rawHtml"],
+            // The article's own body is what Readability needs; the vendor's
+            // main-content guess would drop parts of it.
+            "onlyMainContent": false,
+        });
+        let request = self
+            .client
+            .post(format!("{}{SCRAPE_PATH}", self.base_url))
+            .bearer_auth(&self.api_key);
+        let response = request.json(&body).send().await.map_err(|error| {
+            // Nothing came back: no 2xx, so no page was billed.
+            match transport_error(VENDOR, &error) {
+                DomainError::InvalidInput(message) => ScrapeError::Final {
+                    message,
+                    billed: false,
+                },
+                DomainError::Internal(message) => ScrapeError::Retryable {
+                    message,
+                    billed: false,
+                },
+                other => ScrapeError::Final {
+                    message: other.to_string(),
+                    billed: false,
+                },
+            }
         })?;
-        if parsed.success == Some(false) {
-            return Err(DomainError::InvalidInput(format!(
-                "{VENDOR} refused the scrape"
-            )));
+
+        let status = response.status();
+        if status == StatusCode::PAYMENT_REQUIRED {
+            return Err(ScrapeError::OutOfCredits);
         }
-        let data = parsed
-            .data
-            .ok_or_else(|| DomainError::Internal(format!("{VENDOR} returned no page")))?;
+        if !status.is_success() {
+            return Err(
+                match http_status_error(VENDOR, status, KeyOwner::Operator) {
+                    DomainError::Internal(message) => ScrapeError::Retryable {
+                        message,
+                        billed: false,
+                    },
+                    other => ScrapeError::Final {
+                        message: other.to_string(),
+                        billed: false,
+                    },
+                },
+            );
+        }
+
+        // From here on the request was accepted, so the page is paid for even
+        // when this adapter cannot use it.
+        let bytes =
+            read_capped(response, MAX_RESPONSE_BYTES)
+                .await
+                .map_err(|error| match error {
+                    CappedReadError::TooBig => ScrapeError::Final {
+                        message: format!("{VENDOR} response exceeded {MAX_RESPONSE_BYTES} bytes"),
+                        billed: true,
+                    },
+                    CappedReadError::Read(_) => ScrapeError::Retryable {
+                        message: format!("{VENDOR} response read failed"),
+                        billed: true,
+                    },
+                })?;
+        let payload: Value = serde_json::from_slice(&bytes).map_err(|_| ScrapeError::Final {
+            message: format!("{VENDOR} returned a malformed response"),
+            billed: true,
+        })?;
+        Self::interpret(payload, url)
+    }
+
+    /// The page from a 2xx payload. Every failure here is `billed: true`.
+    fn interpret(payload: Value, requested_url: &str) -> Result<ScrapedPage, ScrapeError> {
+        let billed = true;
+        let parsed: ScrapeResponse =
+            serde_json::from_value(payload).map_err(|_| ScrapeError::Final {
+                message: format!("{VENDOR} returned a malformed response"),
+                billed,
+            })?;
+        if parsed.success == Some(false) {
+            return Err(ScrapeError::Final {
+                message: format!("{VENDOR} refused the scrape"),
+                billed,
+            });
+        }
+        let data = parsed.data.ok_or_else(|| ScrapeError::Final {
+            message: format!("{VENDOR} returned no page"),
+            billed,
+        })?;
         let metadata = data.metadata;
         if let Some(status) = metadata.as_ref().and_then(|m| m.status_code)
             && !(200..300).contains(&status)
             && status != 304
         {
-            return Err(DomainError::InvalidInput(format!(
-                "{VENDOR} page returned HTTP {status}"
-            )));
+            return Err(ScrapeError::Final {
+                message: format!("{VENDOR} page returned HTTP {status}"),
+                billed,
+            });
         }
         let html = data
             .raw_html
-            .or(data.html)
             .filter(|html| !html.trim().is_empty())
-            .ok_or_else(|| {
-                DomainError::InvalidInput(format!("{VENDOR} returned no HTML for the page"))
+            .ok_or_else(|| ScrapeError::Final {
+                message: format!("{VENDOR} returned no HTML for the page"),
+                billed,
             })?;
-        let locked = metadata.as_ref().and_then(|m| m.is_locked) == Some(true)
-            || html.contains(LOCKED_MARKER);
+        if html.len() > MAX_HTML_BYTES {
+            return Err(ScrapeError::Final {
+                message: format!("{VENDOR} page exceeded {MAX_HTML_BYTES} bytes"),
+                billed,
+            });
+        }
+        let locked = metadata.as_ref().and_then(|m| m.is_locked) == Some(true);
         let final_url = metadata
             .and_then(|m| m.source_url)
             .unwrap_or_else(|| requested_url.to_string());
@@ -134,42 +213,22 @@ impl FirecrawlScraper {
 }
 
 impl PageScraper for FirecrawlScraper {
-    fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, DomainError>> {
+    fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, ScrapeError>> {
         let url = url.to_string();
-        Box::pin(async move {
-            let body = json!({
-                "url": url,
-                "formats": ["rawHtml", "html"],
-                // The article's own body is what Readability needs; the
-                // vendor's main-content guess would drop parts of it.
-                "onlyMainContent": false,
-            });
-            let request = self
-                .client
-                .post(format!("{}{SCRAPE_PATH}", self.base_url))
-                .bearer_auth(&self.api_key);
-            // A rejected operator key is retryable here as everywhere else
-            // that uses vendor_http: the key is rotated out of band, and the
-            // ingest retry schedule covers the wait.
-            let payload = post_json(request, &body, VENDOR, KeyOwner::Operator).await?;
-            Self::interpret(payload, &url)
-        })
+        Box::pin(async move { self.scrape_page(&url).await })
     }
 }
 
-/// Kept beside the adapter so a test can assert the request body without
-/// restating it.
+/// The request body, so a test asserts it without restating it.
 #[cfg(test)]
 pub(crate) fn expected_request_body(url: &str) -> Value {
-    json!({"url": url, "formats": ["rawHtml", "html"], "onlyMainContent": false})
+    json!({"url": url, "formats": ["rawHtml"], "onlyMainContent": false})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::vendor_http::test_support::{
-        SECRET_BODY, assert_error, closed_port, serve,
-    };
+    use crate::adapters::vendor_http::test_support::{SECRET_BODY, closed_port, serve};
     use axum::extract::Json as AxumJson;
     use axum::http::HeaderMap;
     use axum::routing::post;
@@ -178,14 +237,14 @@ mod tests {
 
     const KEY: &str = "sk-test-firecrawl";
 
-    fn scraper(base_url: String, timeout: Duration) -> FirecrawlScraper {
-        FirecrawlScraper::with_base_url(KEY.to_string(), base_url, timeout)
-    }
-
     /// One request the fake vendor received: its authorization header, and
     /// its JSON body.
     type SeenRequest = (Option<String>, Value);
     type Recorder = Arc<Mutex<Vec<SeenRequest>>>;
+
+    fn scraper(base_url: String, timeout: Duration) -> FirecrawlScraper {
+        FirecrawlScraper::with_base_url(KEY.to_string(), base_url, timeout)
+    }
 
     /// A fake vendor that records the authorization header and body it got,
     /// and answers with `response`.
@@ -229,6 +288,36 @@ mod tests {
         })
     }
 
+    fn assert_retryable(result: Result<ScrapedPage, ScrapeError>, needle: &str, billed: bool) {
+        match result {
+            Err(ScrapeError::Retryable {
+                message,
+                billed: got,
+            }) => {
+                assert_eq!(got, billed, "billed");
+                assert!(message.contains(needle), "{message}");
+                assert!(!message.contains(SECRET_BODY));
+                assert!(!message.contains("sk-test"));
+            }
+            other => panic!("expected a retryable error, got {other:?}"),
+        }
+    }
+
+    fn assert_final(result: Result<ScrapedPage, ScrapeError>, needle: &str, billed: bool) {
+        match result {
+            Err(ScrapeError::Final {
+                message,
+                billed: got,
+            }) => {
+                assert_eq!(got, billed, "billed");
+                assert!(message.contains(needle), "{message}");
+                assert!(!message.contains(SECRET_BODY));
+                assert!(!message.contains("sk-test"));
+            }
+            other => panic!("expected a final error, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn a_scrape_posts_the_page_url_and_returns_the_vendors_html() {
         let article = "<html><body><article><p>The full text</p></article></body></html>";
@@ -252,22 +341,8 @@ mod tests {
         );
     }
 
-    /// The lock marker in the HTML is what a member-only Medium preview
-    /// carries; it must never be stored as the article.
     #[tokio::test]
-    async fn the_medium_lock_marker_is_reported_as_a_preview() {
-        let html = r#"<html><script>window.__APOLLO_STATE__={"isLocked":true}</script><p>teaser</p></html>"#;
-        let (router, _seen) = fake(StatusCode::OK, page(html));
-        let base = serve(router).await;
-        let page = scraper(base, Duration::from_secs(5))
-            .scrape("https://medium.com/@writer/a-post")
-            .await
-            .unwrap();
-        assert!(page.locked);
-    }
-
-    #[tokio::test]
-    async fn a_locked_metadata_flag_is_a_preview_too() {
+    async fn the_vendors_lock_flag_is_reported_as_a_preview() {
         let mut body = page("<html><p>teaser</p></html>");
         body["data"]["metadata"]["isLocked"] = json!(true);
         let (router, _seen) = fake(StatusCode::OK, body);
@@ -279,21 +354,6 @@ mod tests {
         assert!(page.locked);
     }
 
-    #[tokio::test]
-    async fn the_cleaned_html_is_used_when_raw_html_is_absent() {
-        let mut body = page("<html><p>cleaned</p></html>");
-        body["data"]["rawHtml"] = Value::Null;
-        body["data"]["html"] = json!("<html><p>cleaned</p></html>");
-        let (router, _seen) = fake(StatusCode::OK, body);
-        let base = serve(router).await;
-        let page = scraper(base, Duration::from_secs(5))
-            .scrape("https://example.com/a")
-            .await
-            .unwrap();
-        assert_eq!(page.html, "<html><p>cleaned</p></html>");
-        assert_eq!(page.html_bytes, "<html><p>cleaned</p></html>".len());
-    }
-
     /// A 401 is the operator's key: retryable, like every other operator-key
     /// adapter, because the key is rotated out of band.
     #[tokio::test]
@@ -303,12 +363,12 @@ mod tests {
             json!({"success": false, "error": SECRET_BODY}),
         );
         let base = serve(router).await;
-        assert_error(
+        assert_retryable(
             scraper(base, Duration::from_secs(5))
                 .scrape("https://example.com/a")
                 .await,
-            true,
             "401",
+            false,
         );
     }
 
@@ -322,14 +382,31 @@ mod tests {
         ] {
             let (router, _seen) = fake(code, json!({"success": false, "error": SECRET_BODY}));
             let base = serve(router).await;
-            assert_error(
+            assert_retryable(
                 scraper(base, Duration::from_secs(5))
                     .scrape("https://example.com/a")
                     .await,
-                true,
                 &code.as_u16().to_string(),
+                false,
             );
         }
+    }
+
+    /// Out of credits is not a per-page failure: no scrape can work until the
+    /// account is topped up, so the fallback has to switch itself off.
+    #[tokio::test]
+    async fn out_of_credits_is_reported_as_such() {
+        let (router, _seen) = fake(
+            StatusCode::PAYMENT_REQUIRED,
+            json!({"success": false, "error": SECRET_BODY}),
+        );
+        let base = serve(router).await;
+        let error = scraper(base, Duration::from_secs(5))
+            .scrape("https://example.com/a")
+            .await
+            .unwrap_err();
+        assert_eq!(error, ScrapeError::OutOfCredits);
+        assert!(!error.billed());
     }
 
     #[tokio::test]
@@ -339,17 +416,18 @@ mod tests {
             json!({"success": false, "error": SECRET_BODY}),
         );
         let base = serve(router).await;
-        assert_error(
+        assert_final(
             scraper(base, Duration::from_secs(5))
                 .scrape("https://example.com/a")
                 .await,
-            false,
             "400",
+            false,
         );
     }
 
+    /// A timeout got no answer at all, so no page was billed.
     #[tokio::test]
-    async fn a_timeout_is_retryable() {
+    async fn a_timeout_is_retryable_and_unbilled() {
         let router = Router::new().route(
             SCRAPE_PATH,
             post(|| async {
@@ -358,66 +436,73 @@ mod tests {
             }),
         );
         let base = serve(router).await;
-        let error = scraper(base, Duration::from_millis(200))
+        let result = scraper(base, Duration::from_millis(200))
             .scrape("https://example.com/a")
-            .await
-            .unwrap_err();
-        assert!(matches!(error, DomainError::Internal(_)), "{error:?}");
-        assert!(!error.to_string().contains(KEY));
+            .await;
+        assert_retryable(result, "timed out", false);
     }
 
     #[tokio::test]
-    async fn a_refusal_a_malformed_answer_and_a_missing_page_are_reported() {
-        let cases = [
+    async fn a_refusal_or_a_message_without_html_is_final_but_billed() {
+        for body in [
             json!({"success": false}),
             json!({"success": true, "data": {"metadata": {}}}),
             json!({"success": true, "data": {"rawHtml": "  "}}),
             json!({"nonsense": []}),
-        ];
-        for body in cases {
+        ] {
             let (router, _seen) = fake(StatusCode::OK, body);
             let base = serve(router).await;
-            let error = scraper(base, Duration::from_secs(5))
+            let result = scraper(base, Duration::from_secs(5))
                 .scrape("https://example.com/a")
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(
-                    error,
-                    DomainError::InvalidInput(_) | DomainError::Internal(_)
-                ),
-                "{error:?}"
-            );
-            assert!(!error.to_string().contains(SECRET_BODY));
+                .await;
+            match result {
+                Err(ScrapeError::Final { billed, .. }) => assert!(billed, "a 2xx was paid for"),
+                other => panic!("expected a final error, got {other:?}"),
+            }
         }
     }
 
     /// The vendor succeeded, but the page itself answered 404: an error page,
     /// not an article, and no retry can change it.
     #[tokio::test]
-    async fn a_page_error_status_is_final() {
+    async fn a_page_error_status_is_final_and_billed() {
         let mut body = page("<html><h1>Not Found</h1></html>");
         body["data"]["metadata"]["statusCode"] = json!(404);
         let (router, _seen) = fake(StatusCode::OK, body);
         let base = serve(router).await;
-        assert_error(
+        assert_final(
             scraper(base, Duration::from_secs(5))
                 .scrape("https://example.com/gone")
                 .await,
-            false,
             "404",
+            true,
+        );
+    }
+
+    /// A page over the shared ceiling is refused before anyone parses it.
+    #[tokio::test]
+    async fn an_oversized_page_is_final_and_billed() {
+        let huge = "x".repeat(MAX_HTML_BYTES + 1);
+        let (router, _seen) = fake(StatusCode::OK, page(&huge));
+        let base = serve(router).await;
+        assert_final(
+            scraper(base, Duration::from_secs(30))
+                .scrape("https://example.com/huge")
+                .await,
+            "exceeded",
+            true,
         );
     }
 
     #[tokio::test]
-    async fn a_closed_port_is_retryable() {
+    async fn a_closed_port_is_retryable_and_unbilled() {
         let base = closed_port().await;
-        assert_error(
+        assert_retryable(
             scraper(base, Duration::from_millis(500))
                 .scrape("https://example.com/a")
                 .await,
-            true,
             "Firecrawl",
+            false,
         );
     }
 }

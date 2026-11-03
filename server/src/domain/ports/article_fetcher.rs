@@ -13,6 +13,10 @@ pub struct FetchedArticle {
     /// Which path produced the text: the direct fetch, or the scraper
     /// fallback. A browser capture never comes through this port.
     pub source: ContentSource,
+    /// The publisher served a paywalled preview of the article, not the
+    /// article. The text is what a signed-out reader sees, so it is never
+    /// stored as a full fetch.
+    pub preview: bool,
 }
 
 /// Why no article came back. The ingest worker retries `Transient` errors

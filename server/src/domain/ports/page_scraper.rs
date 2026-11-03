@@ -8,7 +8,7 @@
 //! Like `Embedder`, a request carries no API key: the scraper is the
 //! operator's account, so the key lives in the adapter's configuration.
 
-use crate::domain::error::DomainError;
+use std::fmt;
 
 pub use crate::domain::ports::llm_client::BoxFuture;
 
@@ -21,9 +21,9 @@ pub struct ScrapedPage {
     pub final_url: String,
     /// Size of `html`, recorded like a direct fetch's body size.
     pub html_bytes: usize,
-    /// The vendor's page is a paywalled or member-only preview: the HTML
-    /// holds the teaser, not the article. The caller decides what to do with
-    /// it; this port only reports it.
+    /// The vendor says the page is a paywalled or member-only preview (its
+    /// metadata flag). The HTML itself is checked again at extraction, so a
+    /// vendor that does not report the flag still yields a preview verdict.
     pub locked: bool,
 }
 
@@ -32,6 +32,51 @@ pub struct ScrapedPage {
 /// browser capture stores a member-only story's full text.
 pub const PREVIEW_LOCKED_MSG: &str = "preview only (locked)";
 
+/// Why a scrape produced no page.
+///
+/// The vendor is paid per page it renders, so every variant says whether a
+/// 2xx came back: the monthly cap must count what was paid for, even when the
+/// page turned out unusable. Only a request that never got a 2xx is refunded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScrapeError {
+    /// A retry may succeed: a timeout, a connection error, 408/409, 429, 5xx,
+    /// or a 401/403 on the operator's key, which is rotated out of band.
+    Retryable { message: String, billed: bool },
+    /// The same request will not succeed later: a rejected payload, a page
+    /// that answered an error status, an answer without HTML.
+    Final { message: String, billed: bool },
+    /// The account is out of credits (HTTP 402). No scrape can work until the
+    /// credits reset, so the fallback switches itself off for the rest of the
+    /// month instead of burning a request per bookmark.
+    OutOfCredits,
+}
+
+impl ScrapeError {
+    /// Whether the vendor charged for the page: a 2xx came back.
+    pub fn billed(&self) -> bool {
+        match self {
+            Self::Retryable { billed, .. } | Self::Final { billed, .. } => *billed,
+            Self::OutOfCredits => false,
+        }
+    }
+
+    /// The message, carrying the HTTP status and never a key or a body.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Retryable { message, .. } | Self::Final { message, .. } => message,
+            Self::OutOfCredits => "the scraper account is out of credits",
+        }
+    }
+}
+
+impl fmt::Display for ScrapeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for ScrapeError {}
+
 /// A shared scraper is itself a scraper, so the decorator can take the
 /// router's `Arc<dyn PageScraper>` without caring which backend it holds.
 impl<T: PageScraper + ?Sized> PageScraper for std::sync::Arc<T> {
@@ -39,7 +84,7 @@ impl<T: PageScraper + ?Sized> PageScraper for std::sync::Arc<T> {
         (**self).enabled()
     }
 
-    fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, DomainError>> {
+    fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, ScrapeError>> {
         let url = url.to_string();
         Box::pin(async move { (**self).scrape(&url).await })
     }
@@ -53,14 +98,8 @@ pub trait PageScraper: Send + Sync {
         true
     }
 
-    /// Fetch one page's HTML. Errors:
-    ///
-    /// - `InvalidInput`: the request will never be accepted (disabled, a
-    ///   malformed URL or vendor payload, HTTP 400). Do not retry.
-    /// - `Internal`: transient, vendor-side or operator-fixable (network,
-    ///   timeout, 401/403 for the operator's key, 408, 409, 429, 5xx, a
-    ///   malformed response). The ingest worker retries with backoff.
-    ///
-    /// Messages carry the HTTP status, never a key or a response body.
-    fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, DomainError>>;
+    /// Fetch one page's HTML. The error says whether the vendor billed for
+    /// it; see `ScrapeError`. Messages carry the HTTP status, never a key or
+    /// a response body.
+    fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, ScrapeError>>;
 }

@@ -216,13 +216,15 @@ fn parse_page_scraper(value: Option<&str>) -> PageScraperBackend {
     }
 }
 
-/// One scrape's timeout, 30 s by default and at most 2 minutes: a scrape sits
-/// inside an ingest job's 2-minute budget.
+/// One scrape's timeout, 30 s by default and at most 60 s. A scrape runs
+/// inside an ingest job's 2-minute budget, after the direct fetch (up to 15 s),
+/// a possible slot wait and the extraction: a longer timeout could not finish
+/// there, and a job that times out still pays for the page.
 fn parse_scraper_timeout(value: Option<&str>) -> u64 {
     value
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
-        .map_or(DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, |n| n.min(120))
+        .map_or(DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, |n| n.min(60))
 }
 
 /// The monthly page cap, 0 (no cap) by default.
@@ -402,7 +404,12 @@ mod tests {
     fn scraper_timeout_defaults_to_thirty_seconds_and_stays_under_the_job_budget() {
         assert_eq!(parse_scraper_timeout(None), 30);
         assert_eq!(parse_scraper_timeout(Some(" 45 ")), 45);
-        assert_eq!(parse_scraper_timeout(Some("600")), 120);
+        assert_eq!(parse_scraper_timeout(Some("60")), 60);
+        assert_eq!(
+            parse_scraper_timeout(Some("600")),
+            60,
+            "a scrape that cannot finish inside the job's budget was billed for nothing"
+        );
         for bad in ["0", "-5", "", "nope"] {
             assert_eq!(
                 parse_scraper_timeout(Some(bad)),

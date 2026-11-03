@@ -1,3 +1,4 @@
+use crate::adapters::article::preview;
 use crate::adapters::metadata::html::{is_cloudflare_challenge, is_cloudflare_challenge_response};
 use crate::adapters::net::{
     CappedReadError, GuardedGetError, HostThrottle, Lookup, SystemLookup, UrlGuard,
@@ -17,9 +18,10 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use url::Url;
 
-/// Larger responses are skipped. The measured p90 page was 437 KB, the
+/// Larger responses are skipped, by the direct fetch and by the scraper, so
+/// both paths share one ceiling. The measured p90 page was 437 KB, the
 /// largest 1.9 MB.
-const MAX_HTML_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const MAX_HTML_BYTES: usize = 5 * 1024 * 1024;
 /// Per request, so per redirect hop.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -108,13 +110,15 @@ impl HtmlExtractor {
     }
 
     /// A fetched page: decode and parse, and report a challenge page as such
-    /// rather than as "no readable article".
+    /// rather than as "no readable article". The verdict on a member-only
+    /// preview comes back with the text, so both fetch paths classify the
+    /// same HTML the same way.
     pub async fn extract_fetched(
         &self,
         body: Vec<u8>,
         content_type: Option<&str>,
         url: &str,
-    ) -> Result<String, ArticleFetchError> {
+    ) -> Result<FetchedText, ArticleFetchError> {
         let content_type = content_type.map(str::to_string);
         let url = url.to_string();
         run_bounded(&self.slots, EXTRACT_TIMEOUT, move || {
@@ -122,10 +126,22 @@ impl HtmlExtractor {
             if is_cloudflare_challenge(&html) {
                 return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
             }
-            extract_text(&html, &url)
+            let preview = preview::is_locked_html(&html, &url);
+            let text = extract_text(&html, &url)?;
+            Ok(FetchedText { text, preview })
         })
         .await?
     }
+}
+
+/// A fetched page's readable text, and whether the publisher served a
+/// paywalled preview of it instead of the article.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedText {
+    pub text: String,
+    /// True for a member-only teaser (see `preview::is_locked_html`): the
+    /// text is the preview, and only a browser capture can do better.
+    pub preview: bool,
 }
 
 impl HtmlArticleFetcher {
@@ -196,16 +212,17 @@ impl HtmlArticleFetcher {
         let html_bytes = body.len();
         // Decoding, the challenge check and extraction all scan the page, so
         // they run off the async threads.
-        let text = self
+        let extracted = self
             .extractor
             .extract_fetched(body, content_type.as_deref(), &final_url)
             .await?;
 
         Ok(FetchedArticle {
-            text,
+            text: extracted.text,
             final_url,
             html_bytes,
             source: ContentSource::Fetched,
+            preview: extracted.preview,
         })
     }
 }

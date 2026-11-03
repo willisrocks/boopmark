@@ -18,7 +18,9 @@ pub trait ScraperUsageRepository: Send + Sync {
     /// exceed the cap.
     fn reserve_page(&self, budget: u64) -> BoxFuture<'_, Result<bool, DomainError>>;
 
-    /// Count a scrape that spent a page but produced nothing usable: the page
-    /// is refunded and a failure recorded.
-    fn record_failure(&self) -> BoxFuture<'_, Result<(), DomainError>>;
+    /// Count a scrape that produced nothing usable. `billed` is the vendor's
+    /// billing: a page it answered 2xx for was paid for and stays counted; a
+    /// request that never got a 2xx is refunded. Either way the failure is
+    /// recorded.
+    fn record_failure(&self, billed: bool) -> BoxFuture<'_, Result<(), DomainError>>;
 }

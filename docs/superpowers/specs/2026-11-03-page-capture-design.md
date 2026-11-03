@@ -105,7 +105,7 @@ the section that carries the consequence.
 | Do we store the HTML or only the text? | Text only, in `bookmark_contents.text`. The HTML is kept solely for the queued case, deleted as soon as it is parsed. | `store_article` writes text; 5 MB × N in a text column would be new weight |
 | New table for captured text, or a column? | A `source` column on `bookmark_contents`; no second content table. | One row per bookmark already (`bookmark_id` PK, `016:22`) |
 | Who fetches for URL-only saves? | A decorator on `ArticleFetcher`, so `IngestWorker` is untouched and a disabled scraper is a no-op. | `IngestWorker::process` calls only `ArticleFetcher::fetch` (`app/ingest.rs:128`) |
-| Which direct-fetch outcomes call the scraper? | `Permanent` failures, and successes whose text is shorter than 300 chars. Not `Transient` (the retry schedule already covers them) and not `Skipped` (not an HTML page). | `failure_for` (`app/ingest.rs:30`); `MIN_CHUNKED_TEXT_CHARS = 300` (`domain/chunking.rs:22`) |
+| Which direct-fetch outcomes call the scraper? | A member-only preview, `Permanent` failures, and successes whose text is shorter than 300 chars. Not `Transient` (the retry schedule already covers them) and not `Skipped` (not an HTML page). | `failure_for` (`app/ingest.rs:30`); `MIN_CHUNKED_TEXT_CHARS = 300` (`domain/chunking.rs:22`); eval recommendation 3 |
 | How is "captured wins" enforced: a rank column or the queue? | The queue. A captured row is `fetched`, so the worker never claims it; a capture clears `claim_token`, so an in-flight fetch's result is dropped by its own guard. No rank arithmetic. | `store_article` requires `status='pending' AND claim_token=$3` (`search_repo.rs:414-434`) |
 | Do we need a persisted normalized-URL column for the lookup and the match? | No. One Rust function normalizes both sides; the lookup is bounded to one user and one origin. | `find_by_url` is exact-match today (`bookmark_repo.rs:304`) |
 | Where does the scraper budget live: memory or the database? | The database, per calendar month, so a restart cannot reset the spend. | In-memory counters do not survive deploys |
@@ -158,7 +158,7 @@ PAGE_CAPTURE_ENABLED=1                 # default 1; 0 rejects the PUT with 404
 PAGE_CAPTURE_MAX_BYTES=5242880         # gzip body cap, and the decompressed cap
 PAGE_SCRAPER=disabled                  # default disabled | firecrawl
 PAGE_SCRAPER_API_KEY=                  # firecrawl only; the operator's key
-PAGE_SCRAPER_TIMEOUT_SECONDS=30        # one scrape, retries excluded (at most 120)
+PAGE_SCRAPER_TIMEOUT_SECONDS=30        # one scrape, retries excluded (at most 60)
 PAGE_SCRAPER_MONTHLY_BUDGET_PAGES=0    # 0 = no cap; otherwise pages per calendar month
 ```
 
@@ -549,30 +549,50 @@ pub struct ScrapedPage {
     pub locked: bool,
 }
 
+/// Billing rides on every failure: the vendor is paid per page it renders,
+/// so the cap must count what was paid for.
+pub enum ScrapeError {
+    Retryable { message: String, billed: bool },
+    Final { message: String, billed: bool },
+    /// HTTP 402: no scrape can work until the credits reset.
+    OutOfCredits,
+}
+
 pub trait PageScraper: Send + Sync {
     fn enabled(&self) -> bool { true }
-    fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, DomainError>>;
+    fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, ScrapeError>>;
 }
 ```
 
 Adapters in `server/src/adapters/scraper/`:
 
 - `firecrawl.rs` — `FirecrawlScraper { api_key, client }`, `POST {base}/v2/scrape` with
-  `formats: ["rawHtml", "html"]` and no crawl. Reads `data.rawHtml` (falling back to
-  `data.html`) and `metadata.sourceURL`. A page is a preview when `metadata.isLocked` is
-  true or the HTML holds Medium's `"isLocked":true` page state; the eval showed the marker
-  is required, because 49 member-only previews of 1,500–2,400 characters otherwise look
-  like articles. A `metadata.statusCode` outside 2xx/304 is final: the vendor succeeded,
-  but the page is an error page.
+  `formats: ["rawHtml"]` only (the cleaned `html` would double the answer for text nobody
+  reads) and no crawl. Reads `data.rawHtml` and `metadata.sourceURL`; the answer is read
+  capped (the JSON envelope adds headroom over the page cap) and the page itself is checked
+  against `MAX_HTML_BYTES`, the direct fetch's ceiling, before anyone parses it. A page is
+  a preview when `metadata.isLocked` is true — and, whatever the vendor says, when the HTML
+  says so (see below). A `metadata.statusCode` outside 2xx/304 is final: the vendor
+  succeeded, but the page is an error page.
 - `disabled.rs` — `DisabledScraper`: `enabled() == false`, `scrape` returns
-  `DomainError::InvalidInput("page scraper disabled")`. The default.
+  `Final { "page scraper disabled", billed: false }`. The default.
 - `router.rs` — `page_scraper(&Config)`, like `EmbedderRouter`, including the warn-and-run
   disabled path for a missing key.
 
-`scrape` returns the vendor's HTML; error mapping is `vendor_http`'s with
-`KeyOwner::Operator`: `InvalidInput` = never retry (disabled, 400, a payload without HTML),
-`Internal` = everything else (network, timeout, 408/409, 429, 5xx, and 401/403 because the
-key is the operator's and rotated out of band, which the retry schedule covers).
+Status mapping is `vendor_http`'s with `KeyOwner::Operator`: retryable is network, timeout,
+408/409, 429, 5xx and 401/403 (the key is the operator's and rotated out of band, which the
+retry schedule covers); final is a rejected payload, a payload without HTML and a page
+error. HTTP 402 is `OutOfCredits`, which is neither: it switches the fallback off for the
+month.
+
+**Preview detection** (`server/src/adapters/article/preview.rs`, used by both paths):
+Medium serves a teaser to a signed-out reader and marks it in the page state it embeds
+(`window.__APOLLO_STATE__`): the current post's entry has `"isLocked": true`. That state
+also holds related stories, member-only ones included, so the marker is read only from the
+entry whose `canonicalUrl` is this page, and with whitespace tolerance around the colon and
+the value. A page without that state is not classified as a preview: guessing would discard
+real text. `extract_fetched` returns the verdict with the text, so the direct fetch and the
+scrape answer the same question the same way.
 
 **Where it is used.** A decorator, so `IngestWorker` stays byte-identical:
 
@@ -583,43 +603,58 @@ pub struct FallbackFetcher<F, S> { direct: F, scraper: S, extractor: HtmlExtract
 
 `fetch(url)`:
 
-1. `direct.fetch(url)`; on `Ok(article)` with `article.text.chars().count() >= 300`, return
-   it with `source = fetched`.
-2. On `Ok(short)` or `Err(Permanent(_))`, and only if `scraper.enabled()`: refuse the URL
-   first with `net::validate_public_url(url)` (a URL the app may not fetch, the vendor must
-   not be asked to fetch either — that is the SSRF boundary for a hosted scraper, whose own
-   fetch is the vendor's responsibility), reserve a page of the monthly budget, then
-   `scraper.scrape(url)`; on success run `extract_fetched(vendor_html, Some("text/html"),
-   final_url)` and return `source = scraped` when the text is non-empty and, for a short
-   direct result, longer than it. Stored text never gets shorter.
+1. `direct.fetch(url)`; on `Ok(article)` with `article.text.chars().count() >= 300` and no
+   preview verdict, return it with `source = fetched`.
+2. On a direct preview, `Ok(short)` or `Err(Permanent(_))`, and only if
+   `scraper.enabled()`: skip when this month's credits are gone (402 earlier) or when the
+   job's remaining budget is shorter than a scrape; refuse the URL with
+   `net::validate_public_url(url)` (a URL the app may not fetch, the vendor must not be
+   asked to fetch either — that is the SSRF boundary for a hosted scraper, whose own fetch
+   is the vendor's responsibility); reserve a page of the monthly budget; then
+   `scraper.scrape(url)` inside `PAGE_SCRAPER_TIMEOUT_SECONDS`. On success run
+   `extract_fetched(vendor_html, Some("text/html"), final_url)` and return
+   `source = scraped` when the text is non-empty and, for a short direct result, longer
+   than it, or when the direct result was a preview (length is not the measure for a
+   teaser). Stored text never gets shorter.
 3. On `Err(Transient(_))` or `Err(Skipped(_))`: no scrape (the retry schedule or the
    non-HTML verdict already decides).
-4. If the scrape fails, the page is a locked preview, the extraction finds no article or no
-   better text, or the budget is exhausted, return the *original* direct result, so the
-   bookmark lands in `failed`/`skipped` exactly as today. A locked preview is the one
-   answer recorded instead: `error = 'preview only (locked)'`, final, no retry.
+4. A scrape that produced no stored text is accounted by its billing and then decided:
+   `Retryable` becomes `ArticleFetchError::Transient`, so 429, 5xx, timeouts and an operator
+   401/403 retry on the ingest schedule; `OutOfCredits` switches the fallback off for the
+   rest of the month, with one warning; `Final`, an extraction with no article, or text no
+   better than the direct result returns the *original* direct result, so the bookmark
+   lands in `failed`/`skipped` exactly as today.
+5. A preview, from either path, is recorded as `error = 'preview only (locked)'` and is
+   final: nothing is stored as a full fetch, and no retry can change the answer.
 
-`FetchedArticle` gains `pub source: ContentSource`, and `SearchRepository::store_article`
-takes it, so the row records which path produced the text. `ContentSource`
-(`domain/search.rs`) is `Fetched | Captured | Scraped` with `as_str()`.
+`FetchedArticle` gains `pub source: ContentSource` and `pub preview: bool` (the direct
+fetch's own preview verdict, so a 1,900-character teaser is never stored as a full fetch),
+and `SearchRepository::store_article` takes the source, so the row records which path
+produced the text. `ContentSource` (`domain/search.rs`) is `Fetched | Captured | Scraped`
+with `as_str()`.
 
 **Retry and backoff.** None is added. A decorator result flows into the existing
 `failure_for`/`retry_delay` schedule (1 min → 1 h → 24 h → `failed`) and the existing
-`MAX_INGEST_ATTEMPTS = 6` sweep. A scrape that fails with `Internal` becomes
-`ArticleFetchError::Transient`, so it retries on that schedule; `InvalidInput` becomes
-`Permanent`, so it does not. The per-host `HostThrottle` (1 s) still paces the direct
-fetch; the scraper is a vendor call and is not throttled by host.
+`MAX_INGEST_ATTEMPTS = 6` sweep. A scrape that fails with `Retryable` becomes
+`ArticleFetchError::Transient`, so it retries on that schedule; `Final` returns the direct
+result, so it keeps the direct verdict. The per-host `HostThrottle` (1 s) still paces the
+direct fetch; the scraper is a vendor call and is not throttled by host.
 
 **Spend caps.** Before each scrape the decorator reserves a page of `scraper_usage` for the
 current UTC month (one `INSERT … ON CONFLICT DO UPDATE … RETURNING pages`, whose `WHERE`
 makes "the month is full" return no row), and when `PAGE_SCRAPER_MONTHLY_BUDGET_PAGES > 0`
 and the month's count has reached it, no scrape is attempted: the decorator behaves exactly
-as if the scraper were disabled and logs one warning for the process. A scrape that
-produced no stored text refunds the page and increments `failures` instead. An unreadable
-`scraper_usage` skips the scrape: spending without accounting is worse than not spending.
-This is a page cap, not a dollar cap, because only the hosted candidate has a price and the
-eval establishes it; a dollar figure is a round number on top of the same counter and needs
-no design.
+as if the scraper were disabled and logs one warning for the process. The count follows the
+vendor's billing, because 51 of the eval's 84 pages were previews: a page is refunded only
+when no 2xx came back (network, timeout, 4xx, 5xx), while a 2xx that produced a preview, no
+article or no better text keeps its page and increments `failures`. HTTP 402 (out of
+credits) stops the scraping for the rest of the month with one warning, since every later
+bookmark would burn a request for the same answer. A scrape is also not started when the
+job's remaining budget is shorter than `PAGE_SCRAPER_TIMEOUT_SECONDS`: it would be billed
+and then abandoned, and the retry would pay again. An unreadable `scraper_usage` skips the
+scrape: spending without accounting is worse than not spending. This is a page cap, not a
+dollar cap, because only the hosted candidate has a price and the eval establishes it; a
+dollar figure is a round number on top of the same counter and needs no design.
 
 **SSRF.** The direct fetch keeps every guard (`net.rs`: `PublicOnlyResolver`, checked
 redirects, `guarded_get`). For a hosted scraper the vendor performs the fetch, so the SSRF
@@ -664,8 +699,9 @@ pub struct ContentSourceCounts { pub fetched: i64, pub captured: i64, pub scrape
 Indexed 262 of 340 articles · 198 fetched · 48 captured · 16 scraped · 78 couldn't be fetched
 ```
 
-and, when a scraper is configured, its month's page count and budget. The "Retry all" and
-per-card "Refetch" buttons are unchanged; a captured article is not retried.
+and an exhausted scraper budget is a single warning in the log, not a panel figure (see
+open questions). The "Retry all" and per-card "Refetch" buttons are unchanged; a captured
+article is not retried.
 
 `failing_domains` keeps its meaning (hosts with unfetched bookmarks) so the panel still
 shows where the remaining gap is.
@@ -739,10 +775,17 @@ production.
 - `HtmlExtractor`: a fixture article extracts identically through the fetch and capture
   paths (same function); a page with no article → `Permanent`.
 - `FallbackFetcher`: direct ok/long → no scrape; direct `Permanent` → scrape; direct
-  short → scrape; direct `Transient`/`Skipped` → no scrape; scrape failure → the original
-  result (so `failed`/`skipped` are unchanged); budget exhausted → no scrape; scraper
-  disabled → direct result; a private URL → no vendor call. Fake `PageScraper` counting
-  calls, like `StubEmbedder`.
+  short → scrape; direct `Transient`/`Skipped` → no scrape; a `Retryable` scrape failure →
+  `Transient` with the reservation refunded; a `Final` scrape failure → the original result;
+  402 → the fallback stops calling the vendor for the month; a billed failure (preview, no
+  article, no better text) keeps its page; budget exhausted → no scrape; a job budget too
+  short for a scrape → no scrape and no reservation; a slow scrape → `Transient`, refunded;
+  scraper disabled → direct result; a private URL → no vendor call; a direct preview of
+  300+ characters → `preview only (locked)`, replaced by a full scrape. Fake `PageScraper`
+  and `ScraperUsageRepository` counting calls, like `StubEmbedder`.
+- `preview::is_locked_html`: the post's own locked entry; whitespace around the marker; a
+  related member post embedded in a free story's state; a query or trailing slash on
+  either URL; another host; no page state; braces inside a value.
 - `ContentSource::as_str`.
 - `SearchIndexStatus` totals with mixed sources.
 
@@ -754,7 +797,8 @@ production.
 - Recapture with the same text keeps `embedded_model`; different text nulls it.
 - URL change clears `source`, `text` and the chunks (trigger).
 - `store_article` with each source stores the right value.
-- `scraper_usage` increments atomically under concurrency and does not exceed the budget.
+- `scraper_usage` increments atomically under concurrency and does not exceed the budget;
+  an unbilled failure refunds its page, a billed one keeps it.
 - `list` with `url=`: exact hit, normalized hit (trailing slash, tracking params), and no
   cross-user match.
 
@@ -849,6 +893,9 @@ Server and extension can start in parallel: the interface above is fixed.
    fix it and adds a second copy of the URL to keep in sync. Revisit with numbers.
 5. **Refetching captured articles** — the hybrid spec's open question 4 (periodic
    re-crawl) applies unchanged; captured text is treated like any `fetched` text.
+6. **Showing the scraper's month in Settings** — the spend is enforced and logged, but
+   `scraper_usage` is not rendered anywhere. A "N of M scraper pages this month" line on
+   the Search index panel is the obvious next step once the budget is set in production.
 
 ## Coverage of the task brief
 

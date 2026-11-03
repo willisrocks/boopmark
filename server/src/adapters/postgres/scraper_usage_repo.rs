@@ -34,22 +34,31 @@ impl ScraperUsageRepository for PostgresPool {
         })
     }
 
-    fn record_failure(&self) -> BoxFuture<'_, Result<(), DomainError>> {
-        // The reserved page is refunded: a failed scrape must not eat the
-        // month's budget, but the failure is still counted. `greatest` keeps
-        // the count from going negative if a failure is ever recorded without
-        // a matching reservation.
-        Box::pin(async move {
-            sqlx::query(&format!(
+    fn record_failure(&self, billed: bool) -> BoxFuture<'_, Result<(), DomainError>> {
+        // A billed page stays counted: the vendor charged for it even though
+        // the result was unusable. A request that never got a 2xx is
+        // refunded; `greatest` keeps the count from going negative if a
+        // failure is ever recorded without a matching reservation.
+        let statement = if billed {
+            format!(
+                "INSERT INTO scraper_usage (month, failures) VALUES ({THIS_MONTH}, 1)
+                 ON CONFLICT (month) DO UPDATE
+                 SET failures = scraper_usage.failures + 1, updated_at = now()"
+            )
+        } else {
+            format!(
                 "INSERT INTO scraper_usage (month, pages, failures) VALUES ({THIS_MONTH}, 0, 1)
                  ON CONFLICT (month) DO UPDATE
                  SET pages = greatest(0, scraper_usage.pages - 1),
                      failures = scraper_usage.failures + 1,
                      updated_at = now()"
-            ))
-            .execute(&self.pool)
-            .await
-            .map_err(db_error)?;
+            )
+        };
+        Box::pin(async move {
+            sqlx::query(&statement)
+                .execute(&self.pool)
+                .await
+                .map_err(db_error)?;
             Ok(())
         })
     }
@@ -111,9 +120,13 @@ mod scraper_usage_postgres_tests {
         }
         assert_eq!(usage(&pool).await, (5, 0));
 
-        // A failed scrape is refunded and counted as a failure instead.
-        repo.record_failure().await.unwrap();
+        // A request that never got a 2xx is refunded and counted as a failure.
+        repo.record_failure(false).await.unwrap();
         assert_eq!(usage(&pool).await, (4, 1));
+
+        // A page the vendor billed for stays counted, whatever came of it.
+        repo.record_failure(true).await.unwrap();
+        assert_eq!(usage(&pool).await, (4, 2));
 
         clear(&pool).await;
         pool.close().await;

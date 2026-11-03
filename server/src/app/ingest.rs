@@ -258,6 +258,7 @@ mod tests {
                         final_url: url,
                         html_bytes: 100,
                         source: ContentSource::Fetched,
+                        preview: false,
                     }),
                     "slow" => {
                         tokio::time::sleep(Duration::from_secs(600)).await;

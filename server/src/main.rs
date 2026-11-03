@@ -291,6 +291,7 @@ async fn main() {
                 config.article_ingest_concurrency,
                 scraper_usage,
                 config.page_scraper_monthly_budget_pages,
+                std::time::Duration::from_secs(config.page_scraper_timeout_seconds),
             )),
             config.article_ingest_concurrency,
         )

@@ -1,5 +1,4 @@
-use crate::domain::error::DomainError;
-use crate::domain::ports::page_scraper::{BoxFuture, PageScraper, ScrapedPage};
+use crate::domain::ports::page_scraper::{BoxFuture, PageScraper, ScrapeError, ScrapedPage};
 
 /// The default backend: no vendor is called, and the fallback decorator
 /// behaves exactly like the direct fetch.
@@ -10,9 +9,10 @@ impl PageScraper for DisabledScraper {
         false
     }
 
-    fn scrape(&self, _url: &str) -> BoxFuture<'_, Result<ScrapedPage, DomainError>> {
-        Box::pin(std::future::ready(Err(DomainError::InvalidInput(
-            "page scraper disabled".to_string(),
-        ))))
+    fn scrape(&self, _url: &str) -> BoxFuture<'_, Result<ScrapedPage, ScrapeError>> {
+        Box::pin(std::future::ready(Err(ScrapeError::Final {
+            message: "page scraper disabled".to_string(),
+            billed: false,
+        })))
     }
 }
