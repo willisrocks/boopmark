@@ -433,15 +433,19 @@ mod tests {
         assert_eq!(worker.drain_once(8).await.unwrap(), 2);
 
         {
+            // The batch parses in parallel: the order of the results is not
+            // something the drain promises.
             let stored = repo.stored.lock().unwrap();
             assert_eq!(stored.len(), 2);
-            assert_eq!(stored[0].0, first.bookmark_id);
-            assert_eq!(stored[0].1, first.user_id);
-            assert_eq!(
-                stored[0].2, first.bookmark_url,
-                "stored for the checked URL"
-            );
-            assert!(stored[0].3.contains("The borrow checker enforces"));
+            for capture in [&first, &second] {
+                let row = stored
+                    .iter()
+                    .find(|(id, ..)| *id == capture.bookmark_id)
+                    .expect("each claimed payload is stored once");
+                assert_eq!(row.1, capture.user_id);
+                assert_eq!(row.2, capture.bookmark_url, "stored for the checked URL");
+                assert!(row.3.contains("The borrow checker enforces"));
+            }
             assert!(repo.failures.lock().unwrap().is_empty());
         }
         // The embed worker is woken for the stored capture.
