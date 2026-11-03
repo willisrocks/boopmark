@@ -17,7 +17,7 @@ use serde::Serialize;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
-use crate::adapters::article::gzip::GzipError;
+use crate::adapters::article::gzip::{GzipError, inflate_captured};
 use crate::adapters::article::readability::CaptureExtractError;
 use crate::adapters::net::mime_type;
 use crate::domain::bookmark::Bookmark;
@@ -217,11 +217,18 @@ async fn capture(
 
     let gz = std::sync::Arc::new(read_capped(body, cap).await?);
 
-    // Inflating and parsing happen in one blocking task, so neither runs on
-    // an async worker thread.
+    // Inflate off the async threads and outside the parse slots, so a
+    // corrupt or oversized body is refused now, not queued behind a parse.
+    let html = inflate_captured(gz.clone(), cap)
+        .await
+        .map_err(|e| match e {
+            GzipError::TooLarge => CaptureError::TooLarge,
+            GzipError::Corrupt => CaptureError::BadGzip,
+        })?;
+
     match state
         .capture_extractor
-        .extract_captured(gz.clone(), cap, Some(&content_type), page.as_str())
+        .extract(html, Some(&content_type), page.as_str())
         .await
     {
         Ok(text) => {
@@ -255,8 +262,6 @@ async fn capture(
                 Err(CaptureError::Busy)
             }
         }
-        Err(CaptureExtractError::Gzip(GzipError::TooLarge)) => Err(CaptureError::TooLarge),
-        Err(CaptureExtractError::Gzip(GzipError::Corrupt)) => Err(CaptureError::BadGzip),
         // Readability found no article, or the document is unreadable.
         Err(CaptureExtractError::NoArticle(_)) => Err(CaptureError::NoArticle),
     }

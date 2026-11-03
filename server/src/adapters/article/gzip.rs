@@ -41,6 +41,20 @@ pub fn gunzip_capped(gz: &[u8], cap: usize) -> Result<Vec<u8>, GzipError> {
     Ok(out)
 }
 
+/// Inflate off the async threads, and outside the parse slots: a corrupt or
+/// oversized body is refused at once, even while every extraction slot is
+/// busy with a hostile page.
+pub async fn inflate_captured(
+    gz: std::sync::Arc<Vec<u8>>,
+    cap: usize,
+) -> Result<Vec<u8>, GzipError> {
+    tokio::task::spawn_blocking(move || gunzip_capped(&gz, cap))
+        .await
+        // A panic in the inflate is a bug, but the caller treats it like a
+        // body it cannot read.
+        .unwrap_or(Err(GzipError::Corrupt))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

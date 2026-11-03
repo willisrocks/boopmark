@@ -2,6 +2,7 @@
 //! but did not parse in the request (the `queued` answer). A dedicated loop
 //! drains it, so it runs whether or not the article fetcher does.
 
+use crate::adapters::article::gzip::inflate_captured;
 use crate::adapters::article::readability::{CaptureExtractError, HtmlExtractor};
 use crate::domain::error::DomainError;
 use crate::domain::ports::page_capture_repo::{CaptureQueueRepository, NewCapture, QueuedCapture};
@@ -123,7 +124,14 @@ where
     /// how many payloads were claimed.
     pub async fn drain_once(&self, limit: usize) -> Result<usize, DomainError> {
         self.purge_stale().await?;
-        let limit = limit.clamp(1, DRAIN_BATCH);
+        // Never claim more payloads than there are parse slots: a claimed
+        // payload leaves the queue, so one that could not start would be
+        // lost, and its neighbour would time out waiting behind it.
+        let free = self.extractor.free_slots();
+        if free == 0 {
+            return Ok(0);
+        }
+        let limit = limit.clamp(1, DRAIN_BATCH).min(free);
         let captures = self.repo.claim_captures(limit as i64).await?;
         let taken = captures.len();
         let mut tasks = tokio::task::JoinSet::new();
@@ -187,25 +195,26 @@ where
             );
             return;
         }
-        let text = match self
-            .extractor
-            .extract_captured(
-                Arc::new(capture.html_gz),
-                self.max_bytes,
-                Some("text/html; charset=utf-8"),
-                &capture.page_url,
-            )
-            .await
-        {
-            Ok(text) => text,
+        // Inflate first, off the async threads and outside the parse slots:
+        // a corrupt or oversized payload is refused at once, and cannot keep
+        // a parse slot while it is read.
+        let html = match inflate_captured(Arc::new(capture.html_gz), self.max_bytes).await {
+            Ok(html) => html,
             // The route validated the same bytes; this is a bug or a
             // hand-written row. Keep no payload either way.
-            Err(CaptureExtractError::Gzip(err)) => {
+            Err(err) => {
                 tracing::warn!(%bookmark_id, error = ?err, "queued capture is not usable gzip");
                 self.fail(bookmark_id, "captured page could not be decoded")
                     .await;
                 return;
             }
+        };
+        let text = match self
+            .extractor
+            .extract(html, Some("text/html; charset=utf-8"), &capture.page_url)
+            .await
+        {
+            Ok(text) => text,
             Err(CaptureExtractError::NoArticle(err)) => {
                 tracing::debug!(%bookmark_id, error = %err, "queued capture has no article");
                 self.fail(bookmark_id, "no readable article").await;
@@ -370,13 +379,25 @@ mod tests {
         }
     }
 
+    /// Generous enough that a loaded test runner cannot fail the test, short
+    /// enough that a lost wakeup fails instead of hanging.
+    const TEST_WAIT: Duration = Duration::from_secs(30);
+
     fn worker(repo: &Arc<FakeRepo>, cap: usize) -> CaptureWorker<FakeRepo> {
-        CaptureWorker::new(repo.clone(), Arc::new(HtmlExtractor::new(1)), cap)
+        worker_with_slots(repo, cap, DRAIN_BATCH)
+    }
+
+    fn worker_with_slots(
+        repo: &Arc<FakeRepo>,
+        cap: usize,
+        slots: usize,
+    ) -> CaptureWorker<FakeRepo> {
+        CaptureWorker::new(repo.clone(), Arc::new(HtmlExtractor::new(slots)), cap)
     }
 
     /// Wait, without sleeping, until the drain has claimed `n` times.
     async fn claimed_at_least(repo: &FakeRepo, n: usize) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(TEST_WAIT, async {
             while repo.claimed.lock().unwrap().len() < n {
                 tokio::task::yield_now().await;
             }
@@ -387,7 +408,7 @@ mod tests {
 
     /// Wait, without sleeping, until the drain has stored `n` captures.
     async fn stored_at_least(repo: &FakeRepo, n: usize) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(TEST_WAIT, async {
             while repo.stored.lock().unwrap().len() < n {
                 tokio::task::yield_now().await;
             }
@@ -424,7 +445,7 @@ mod tests {
             assert!(repo.failures.lock().unwrap().is_empty());
         }
         // The embed worker is woken for the stored capture.
-        tokio::time::timeout(Duration::from_secs(1), woke)
+        tokio::time::timeout(TEST_WAIT, woke)
             .await
             .expect("the embed worker is woken")
             .unwrap();
@@ -504,5 +525,19 @@ mod tests {
         assert_eq!(*repo.claimed.lock().unwrap(), [DRAIN_BATCH as i64, 2]);
         // The sweep runs once, then waits an hour.
         assert_eq!(repo.purges.lock().unwrap().as_slice(), [MAX_QUEUE_AGE]);
+    }
+
+    /// A claimed payload leaves the queue, so the drain must not claim more
+    /// than it can start: with two parse slots, two payloads, never five.
+    #[tokio::test]
+    async fn the_drain_claims_no_more_than_the_free_slots() {
+        let repo = Arc::new(FakeRepo::default());
+        *repo.queued.lock().unwrap() = (0..5).map(|_| capture(ARTICLE.as_bytes())).collect();
+        let worker = worker_with_slots(&repo, 5 * 1024 * 1024, 2);
+        assert_eq!(worker.drain_once(DRAIN_BATCH).await.unwrap(), 2);
+        assert_eq!(*repo.claimed.lock().unwrap(), [2]);
+        stored_at_least(&repo, 2).await;
+        assert_eq!(repo.stored.lock().unwrap().len(), 2);
+        assert!(repo.failures.lock().unwrap().is_empty());
     }
 }

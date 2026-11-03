@@ -1,4 +1,3 @@
-use crate::adapters::article::gzip::{GzipError, gunzip_capped};
 use crate::adapters::metadata::html::{is_cloudflare_challenge, is_cloudflare_challenge_response};
 use crate::adapters::net::{
     CappedReadError, GuardedGetError, HostThrottle, Lookup, SystemLookup, UrlGuard,
@@ -60,12 +59,11 @@ pub struct HtmlExtractor {
 /// Why a captured body produced no text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureExtractError {
-    /// The body is not usable gzip, or inflates past the cap.
-    Gzip(GzipError),
     /// The parse found no article (or the document is unreadable).
     NoArticle(ArticleFetchError),
-    /// The extraction did not finish: it timed out, or its task failed. The
-    /// caller keeps the payload and the drain tries again.
+    /// The extraction did not finish: it timed out, its task failed, or no
+    /// slot came free. The caller keeps the payload and the drain tries
+    /// again.
     Unfinished(String),
 }
 
@@ -77,30 +75,34 @@ impl HtmlExtractor {
         }
     }
 
-    /// A captured page: inflate, decode and parse on one blocking slot, so
-    /// no work for a 5 MiB body happens on an async worker thread. The body
-    /// is shared, not moved, so a caller that gets [`CaptureExtractError::Unfinished`]
-    /// can still keep it for the drain.
+    /// How many parses could start right now. The capture drain claims at
+    /// most this many payloads, so a batch never queues behind its own
+    /// parses.
+    pub fn free_slots(&self) -> usize {
+        self.slots.available_permits()
+    }
+
+    /// A captured page: decode and parse. The caller has already inflated
+    /// the body (see `gzip::inflate_captured`), so a corrupt or oversized
+    /// one never waits for a slot.
     ///
     /// There is no challenge check: if the user's browser rendered a
     /// challenge, there is no article, and saying so is honest.
-    pub async fn extract_captured(
+    pub async fn extract(
         &self,
-        gz: Arc<Vec<u8>>,
-        max_bytes: usize,
+        body: Vec<u8>,
         content_type: Option<&str>,
         url: &str,
     ) -> Result<String, CaptureExtractError> {
         let content_type = content_type.map(str::to_string);
         let url = url.to_string();
         let parsed = run_bounded(&self.slots, EXTRACT_TIMEOUT, move || {
-            let html = gunzip_capped(&gz, max_bytes).map_err(CaptureExtractError::Gzip)?;
-            let html = decode_html(html, content_type.as_deref());
-            extract_text(&html, &url).map_err(CaptureExtractError::NoArticle)
+            let html = decode_html(body, content_type.as_deref());
+            extract_text(&html, &url)
         })
         .await;
         match parsed {
-            Ok(result) => result,
+            Ok(result) => result.map_err(CaptureExtractError::NoArticle),
             Err(err) => Err(CaptureExtractError::Unfinished(err.to_string())),
         }
     }
@@ -217,28 +219,30 @@ impl ArticleFetcher for HtmlArticleFetcher {
     }
 }
 
-/// Run `work` on the blocking pool once one of `slots` is free, waiting at
-/// most `timeout` in all. A blocking thread cannot be cancelled, so the
-/// permit moves into the closure: a timed-out run keeps its slot until its
-/// thread really ends, and hostile pages can never have more extractions
-/// running than there are slots.
+/// How long a caller waits for a parse slot before giving up. A stuck
+/// thread keeps its slot until it ends, so this bound is what stops a
+/// request from waiting forever behind one.
+const SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run `work` on the blocking pool once one of `slots` is free. The timeout
+/// starts when the work starts: waiting for a slot is queueing, and a batch
+/// of parses must not expire just because it had to take turns. A blocking
+/// thread cannot be cancelled, so the permit moves into the closure: a
+/// timed-out run keeps its slot until its thread really ends, and hostile
+/// pages can never have more extractions running than there are slots.
 async fn run_bounded<T: Send + 'static>(
     slots: &Arc<Semaphore>,
     timeout: Duration,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ArticleFetchError> {
-    let slots = slots.clone();
-    let run = async move {
-        let permit = slots
-            .acquire_owned()
-            .await
-            .expect("the extraction semaphore is never closed");
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            work()
-        })
+    let permit = tokio::time::timeout(SLOT_WAIT_TIMEOUT, slots.clone().acquire_owned())
         .await
-    };
+        .map_err(|_| ArticleFetchError::Transient("no free extraction slot".to_string()))?
+        .expect("the extraction semaphore is never closed");
+    let run = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    });
     tokio::time::timeout(timeout, run)
         .await
         .map_err(|_| ArticleFetchError::Transient("extraction timed out".to_string()))?
@@ -700,16 +704,15 @@ mod tests {
     /// captured page is the text the fetcher would have stored.
     #[tokio::test]
     async fn a_captured_page_extracts_like_a_fetched_one() {
+        use crate::adapters::article::gzip::inflate_captured;
         let (fetcher, base) = fixture().await;
         let url = format!("{base}/article");
         let fetched = fetcher.fetch(&url).await.unwrap();
+        let html = inflate_captured(Arc::new(gzip(ARTICLE.as_bytes())), 5 * 1024 * 1024)
+            .await
+            .unwrap();
         let captured = HtmlExtractor::new(1)
-            .extract_captured(
-                Arc::new(gzip(ARTICLE.as_bytes())),
-                5 * 1024 * 1024,
-                Some("text/html"),
-                &url,
-            )
+            .extract(html, Some("text/html"), &url)
             .await
             .unwrap();
         assert_eq!(captured, fetched.text);
@@ -718,11 +721,9 @@ mod tests {
     #[tokio::test]
     async fn a_capture_with_no_article_is_an_honest_refusal() {
         let extractor = HtmlExtractor::new(1);
-        let cap = 5 * 1024 * 1024;
         let empty = extractor
-            .extract_captured(
-                Arc::new(gzip(b"<html><body></body></html>")),
-                cap,
+            .extract(
+                b"<html><body></body></html>".to_vec(),
                 Some("text/html"),
                 "https://example.com/",
             )
@@ -731,11 +732,8 @@ mod tests {
         // The browser rendered what it rendered: a challenge page from a
         // capture is reported as having no article, not as a fetch block.
         let challenge = extractor
-            .extract_captured(
-                Arc::new(gzip(
-                    b"<html><head><title>Just a moment...</title></head></html>",
-                )),
-                cap,
+            .extract(
+                b"<html><head><title>Just a moment...</title></head></html>".to_vec(),
                 Some("text/html"),
                 "https://example.com/",
             )
@@ -748,28 +746,27 @@ mod tests {
             ),
             "{challenge:?}"
         );
-        // A body that is not gzip, or over the cap, never reaches the parse.
+    }
+
+    /// A parse that has to queue for a slot is not timed out for it: the
+    /// timeout covers the work, not the wait.
+    #[tokio::test]
+    async fn a_queued_parse_is_not_timed_out_while_it_waits_for_a_slot() {
+        let slots = Arc::new(Semaphore::new(1));
+        let held = slots.clone().acquire_owned().await.unwrap();
+        let slots_for_task = slots.clone();
+        let task = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let ran = run_bounded(&slots_for_task, Duration::from_secs(5), || 7).await;
+            (ran, started.elapsed())
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(held);
+        let (ran, _) = task.await.unwrap();
         assert_eq!(
-            extractor
-                .extract_captured(
-                    Arc::new(b"not gzip".to_vec()),
-                    cap,
-                    Some("text/html"),
-                    "https://example.com/"
-                )
-                .await,
-            Err(CaptureExtractError::Gzip(GzipError::Corrupt))
-        );
-        assert_eq!(
-            extractor
-                .extract_captured(
-                    Arc::new(gzip(b"<html><body><p>a</p></body></html>")),
-                    4,
-                    Some("text/html"),
-                    "https://example.com/"
-                )
-                .await,
-            Err(CaptureExtractError::Gzip(GzipError::TooLarge))
+            ran,
+            Ok(7),
+            "the wait for a slot did not use the work budget"
         );
     }
 
@@ -783,7 +780,9 @@ mod tests {
     }
 
     /// A run that outlives its timeout keeps its slot until its thread ends,
-    /// so the next run waits instead of starting a second extraction.
+    /// so the next run waits instead of starting a second extraction — and
+    /// that wait is not charged to the work budget: once the slot frees, the
+    /// queued run still gets its full timeout.
     #[tokio::test]
     async fn a_timed_out_extraction_keeps_its_slot_until_it_ends() {
         let slots = Arc::new(Semaphore::new(1));
@@ -801,12 +800,36 @@ mod tests {
             0,
             "the stuck thread holds the slot"
         );
-        let queued = run_bounded(&slots, Duration::from_millis(50), || 1).await;
-        assert!(queued.is_err(), "no second extraction while the first runs");
+
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = started.clone();
+        let waiting = tokio::spawn({
+            let slots = slots.clone();
+            async move {
+                run_bounded(&slots, Duration::from_secs(5), move || {
+                    probe.store(true, std::sync::atomic::Ordering::SeqCst);
+                    2
+                })
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !started.load(std::sync::atomic::Ordering::SeqCst),
+            "no second extraction while the first runs"
+        );
+        assert!(
+            !waiting.is_finished(),
+            "the queued run is waiting, not failed"
+        );
 
         release.send(()).unwrap();
-        let ran = run_bounded(&slots, Duration::from_secs(5), || 2).await;
+        let ran = tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .expect("the queued run starts once the slot frees")
+            .unwrap();
         assert_eq!(ran, Ok(2));
+        assert!(started.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(slots.available_permits(), 1);
     }
 }
