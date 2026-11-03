@@ -41,8 +41,64 @@ pub struct HtmlArticleFetcher {
     client: reqwest::Client,
     guard: UrlGuard,
     throttle: HostThrottle,
+    extractor: HtmlExtractor,
+}
+
+/// Decode, parse and cap an HTML body: the one Readability pass the app
+/// runs, shared by the fetcher and the capture endpoint, so both have the
+/// same `EXTRACT_TIMEOUT`, the same text caps and the same blocking pool.
+///
+/// Each holder has its own slots; a capture therefore parses even when the
+/// ingest worker's extractor is busy or was never built
+/// (`ARTICLE_INGEST_ENABLED=0`).
+pub struct HtmlExtractor {
     /// Extractions running at once, timed-out ones included.
-    extraction_slots: Arc<Semaphore>,
+    slots: Arc<Semaphore>,
+}
+
+impl HtmlExtractor {
+    /// `slots` bounds the blocking threads that parse pages.
+    pub fn new(slots: usize) -> Self {
+        Self {
+            slots: Arc::new(Semaphore::new(slots.max(1))),
+        }
+    }
+
+    /// A captured page: decode and parse. No challenge check — if the user's
+    /// browser rendered a challenge, there is no article, and saying so is
+    /// honest.
+    pub async fn extract(
+        &self,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+        url: &str,
+    ) -> Result<String, ArticleFetchError> {
+        run_extraction(&self.slots, body, content_type, url, None).await
+    }
+
+    /// A fetched page: as `extract`, but a challenge page is reported as
+    /// such rather than as "no readable article".
+    pub async fn extract_fetched(
+        &self,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+        url: &str,
+    ) -> Result<String, ArticleFetchError> {
+        fn refuse_challenge(html: &str) -> Result<(), ArticleFetchError> {
+            if is_cloudflare_challenge(html) {
+                return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
+            }
+            Ok(())
+        }
+        run_extraction(
+            &self.slots,
+            body,
+            content_type,
+            url,
+            Some(refuse_challenge),
+        )
+        .await
+    }
 }
 
 impl HtmlArticleFetcher {
@@ -50,7 +106,7 @@ impl HtmlArticleFetcher {
     /// ingest worker passes its concurrency.
     pub fn new(extraction_slots: usize) -> Self {
         Self {
-            extraction_slots: Arc::new(Semaphore::new(extraction_slots.max(1))),
+            extractor: HtmlExtractor::new(extraction_slots),
             ..Self::with_lookup(UrlGuard::public(), SystemLookup, PER_HOST_INTERVAL)
         }
     }
@@ -65,7 +121,7 @@ impl HtmlArticleFetcher {
             client,
             guard,
             throttle: HostThrottle::new(per_host_interval),
-            extraction_slots: Arc::new(Semaphore::new(1)),
+            extractor: HtmlExtractor::new(1),
         }
     }
 
@@ -111,17 +167,12 @@ impl HtmlArticleFetcher {
                 CappedReadError::Read(e) => request_error(e),
             })?;
         let html_bytes = body.len();
-        let url_for_parse = final_url.clone();
         // Decoding, the challenge check and extraction all scan the page, so
         // they run off the async threads.
-        let text = run_bounded(&self.extraction_slots, EXTRACT_TIMEOUT, move || {
-            let html = decode_html(body, content_type.as_deref());
-            if is_cloudflare_challenge(&html) {
-                return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
-            }
-            extract_text(&html, &url_for_parse)
-        })
-        .await??;
+        let text = self
+            .extractor
+            .extract_fetched(body, content_type.as_deref(), &final_url)
+            .await?;
 
         Ok(FetchedArticle {
             text,
@@ -139,6 +190,27 @@ impl ArticleFetcher for HtmlArticleFetcher {
         let url = url.to_string();
         Box::pin(async move { self.fetch_article(&url).await })
     }
+}
+
+/// Decode an HTML body, let `check` refuse it, then parse: one blocking
+/// slot, one decode.
+async fn run_extraction(
+    slots: &Arc<Semaphore>,
+    body: Vec<u8>,
+    content_type: Option<&str>,
+    url: &str,
+    check: Option<fn(&str) -> Result<(), ArticleFetchError>>,
+) -> Result<String, ArticleFetchError> {
+    let content_type = content_type.map(str::to_string);
+    let url = url.to_string();
+    run_bounded(slots, EXTRACT_TIMEOUT, move || {
+        let html = decode_html(body, content_type.as_deref());
+        if let Some(check) = check {
+            check(&html)?;
+        }
+        extract_text(&html, &url)
+    })
+    .await?
 }
 
 /// Run `work` on the blocking pool once one of `slots` is free, waiting at
@@ -611,6 +683,46 @@ mod tests {
             extract_text("<html><body></body></html>", "https://example.com/"),
             Err(ArticleFetchError::Permanent(_))
         ));
+    }
+
+    /// The capture path and the fetch path run the same parse: the text of a
+    /// captured page is the text the fetcher would have stored.
+    #[tokio::test]
+    async fn a_captured_page_extracts_like_a_fetched_one() {
+        let (fetcher, base) = fixture().await;
+        let url = format!("{base}/article");
+        let fetched = fetcher.fetch(&url).await.unwrap();
+        let captured = HtmlExtractor::new(1)
+            .extract(ARTICLE.as_bytes().to_vec(), Some("text/html"), &url)
+            .await
+            .unwrap();
+        assert_eq!(captured, fetched.text);
+    }
+
+    #[tokio::test]
+    async fn a_capture_with_no_article_is_permanent_and_not_a_challenge() {
+        let extractor = HtmlExtractor::new(1);
+        let empty = extractor
+            .extract(
+                b"<html><body></body></html>".to_vec(),
+                Some("text/html"),
+                "https://example.com/",
+            )
+            .await;
+        assert!(matches!(empty, Err(ArticleFetchError::Permanent(_))));
+        // The browser rendered what it rendered: a challenge page from a
+        // capture is reported as having no article, not as a fetch block.
+        let challenge = extractor
+            .extract(
+                b"<html><head><title>Just a moment...</title></head></html>".to_vec(),
+                Some("text/html"),
+                "https://example.com/",
+            )
+            .await;
+        assert!(
+            matches!(&challenge, Err(ArticleFetchError::Permanent(msg)) if !msg.contains(CF_CHALLENGE_MSG)),
+            "{challenge:?}"
+        );
     }
 
     #[test]
