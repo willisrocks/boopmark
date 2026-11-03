@@ -99,6 +99,7 @@ jobs:
           -- --ignored
           adapters::postgres::page_capture_repo::page_capture_postgres_tests
           web::api::page_capture::tests
+          adapters::postgres::scraper_usage_repo::scraper_usage_postgres_tests
       - name: Test tag consolidation DB
         run: >-
           cargo test -p boopmark-server
