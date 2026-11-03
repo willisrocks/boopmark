@@ -155,6 +155,8 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `LLM_BACKEND` | — | `llamacpp` sends every LLM request to `LLAMACPP_BASE_URL` (local development) |
 | `ARTICLE_INGEST_ENABLED` | `1` | Fetch the article text of saved pages in the background for search. `0` stops fetching: new bookmarks are searched by their metadata, and article text that was already stored stays searchable |
 | `ARTICLE_INGEST_CONCURRENCY` | `4` | Article fetches in parallel (at most one per host per second) |
+| `PAGE_CAPTURE_ENABLED` | `1` | Accept page HTML from the browser extension (`PUT /api/v1/bookmarks/{id}/page`). `0` answers that route with `404`, for self-hosters who do not want that write surface |
+| `PAGE_CAPTURE_MAX_BYTES` | `5242880` | Cap on the gzipped capture body, and on the HTML it inflates to |
 | `ENABLE_E2E_AUTH` | `0` | Set to `1` for E2E test auth bypass |
 
 ## Deployment Guides

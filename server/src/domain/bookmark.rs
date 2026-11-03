@@ -48,6 +48,10 @@ pub struct UpdateBookmark {
 pub struct BookmarkFilter {
     pub search: Option<String>,
     pub tags: Option<Vec<String>>,
+    /// A page URL to look up (the capture extension's "is this saved?"): the
+    /// user's bookmark for that page, matched with
+    /// `domain::url_match::same_page`. Takes precedence over `search`.
+    pub url: Option<String>,
     pub sort: Option<BookmarkSort>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,

@@ -1,3 +1,4 @@
+use crate::adapters::article::readability::HtmlExtractor;
 use crate::adapters::metadata::fallback::FallbackMetadataExtractor;
 use crate::adapters::postgres::PostgresPool;
 use crate::adapters::storage::local::LocalStorage;
@@ -6,6 +7,7 @@ use crate::app::auth::AuthService;
 use crate::app::bookmarks::BookmarkService;
 use crate::app::enrichment::EnrichmentService;
 use crate::app::invite::InviteService;
+use crate::app::page_capture::CaptureService;
 use crate::app::search::SearchService;
 use crate::app::settings::SettingsService;
 use crate::app::tag_alias::TagAliasService;
@@ -47,6 +49,17 @@ pub struct AppState {
     /// Operator-configured embedder (`EMBEDDING_BACKEND`, disabled by default).
     pub embedder: Arc<dyn Embedder>,
     pub search: Arc<SearchService<PostgresPool>>,
+    /// Stored text and the queue for captured HTML (`PUT
+    /// /api/v1/bookmarks/{id}/page`).
+    pub page_capture: Arc<CaptureService<PostgresPool>>,
+    /// Parses captured HTML; its own slots, so a capture parses even when the
+    /// ingest worker's extractor is busy or was never built.
+    pub capture_extractor: Arc<HtmlExtractor>,
+    /// Woken after a capture is stored, so the embed worker picks it up.
+    pub embed_wake: Arc<tokio::sync::Notify>,
+    /// Woken when the route queues a capture, so the drain parses it now
+    /// instead of on its idle poll.
+    pub capture_wake: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]
@@ -114,7 +127,9 @@ impl AppState {
         filter: BookmarkFilter,
     ) -> Result<Vec<SearchHit>, DomainError> {
         let filter = filter.normalized();
-        if filter.search.is_some() {
+        // A page lookup is a plain list even when search text rides along:
+        // the extension wants the one bookmark for that URL.
+        if filter.search.is_some() && filter.url.is_none() {
             return self.search.search(user_id, filter).await;
         }
         let bookmarks = match &self.bookmarks {

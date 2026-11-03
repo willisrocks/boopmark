@@ -4,6 +4,7 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::bookmark_repo::{
     BookmarkRepository, CreateIdempotency, CreateIdempotencyClaim,
 };
+use crate::domain::url_match::{parse_web_url, same_page};
 use uuid::Uuid;
 
 impl BookmarkRepository for PostgresPool {
@@ -202,6 +203,9 @@ impl BookmarkRepository for PostgresPool {
     ) -> Result<Vec<Bookmark>, DomainError> {
         let limit = filter.limit.unwrap_or(50);
         let offset = filter.offset.unwrap_or(0);
+        if let Some(url) = filter.url.as_deref() {
+            return list_by_page_url(&self.pool, user_id, url, limit, offset).await;
+        }
 
         let order_clause = match filter.sort.unwrap_or_default() {
             BookmarkSort::Newest | BookmarkSort::Relevance => "created_at DESC",
@@ -459,6 +463,63 @@ impl BookmarkRepository for PostgresPool {
         .ok_or(DomainError::NotFound)?;
         Ok(old)
     }
+}
+
+/// A bookmark row's columns, in `Bookmark`'s field order.
+const BOOKMARK_COLUMNS: &str = "id, user_id, url, title, description, image_url, override_image_url, \
+     domain, tags, created_at, updated_at";
+
+/// `GET /api/v1/bookmarks?url=`: an exact match first, then the user's
+/// bookmarks on the same host compared with `same_page`, newest first. The
+/// host prefilter keeps the scan to one site, and no second copy of the URL
+/// is stored.
+async fn list_by_page_url(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    lookup: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Bookmark>, DomainError> {
+    let exact: Option<Bookmark> = sqlx::query_as(&format!(
+        "SELECT {BOOKMARK_COLUMNS} FROM bookmarks
+         WHERE user_id = $1 AND url = $2
+         ORDER BY created_at DESC LIMIT 1"
+    ))
+    .bind(user_id)
+    .bind(lookup)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| DomainError::Internal(e.to_string()))?;
+    if let Some(bookmark) = exact {
+        return Ok(if offset > 0 {
+            Vec::new()
+        } else {
+            vec![bookmark]
+        });
+    }
+    let Some(page) = parse_web_url(lookup) else {
+        return Ok(Vec::new());
+    };
+    let Some(host) = page.host_str() else {
+        return Ok(Vec::new());
+    };
+    let candidates: Vec<Bookmark> = sqlx::query_as(&format!(
+        "SELECT {BOOKMARK_COLUMNS} FROM bookmarks
+         WHERE user_id = $1
+           AND lower(substring(url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)')) = $2
+         ORDER BY created_at DESC"
+    ))
+    .bind(user_id)
+    .bind(host.to_lowercase())
+    .fetch_all(pool)
+    .await
+    .map_err(|e| DomainError::Internal(e.to_string()))?;
+    Ok(candidates
+        .into_iter()
+        .filter(|bookmark| same_page(&bookmark.url, lookup))
+        .skip(offset.max(0) as usize)
+        .take(limit.max(0) as usize)
+        .collect())
 }
 
 #[cfg(test)]

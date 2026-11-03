@@ -2,7 +2,7 @@ use super::PostgresPool;
 use crate::domain::error::DomainError;
 use crate::domain::ports::embedding_repo::EmbeddingRepository;
 use crate::domain::ports::search_repo::SearchIndexRepository;
-use crate::domain::search::{EmbedJob, EmbeddedChunk, SearchIndexStatus};
+use crate::domain::search::{ContentSourceCounts, EmbedJob, EmbeddedChunk, SearchIndexStatus};
 use chrono::{DateTime, Utc};
 use std::fmt::Write;
 use std::time::Duration;
@@ -171,22 +171,23 @@ impl SearchIndexRepository for PostgresPool {
         user_id: Uuid,
         model_id: Option<&str>,
     ) -> Result<SearchIndexStatus, DomainError> {
-        let (total, fetched, pending, unfetched, embedded): (i64, i64, i64, i64, i64) =
-            sqlx::query_as(
-                "SELECT count(*),
-                        count(*) FILTER (WHERE status = 'fetched'),
-                        count(*) FILTER (WHERE status = 'pending'),
-                        count(*) FILTER (WHERE status IN ('failed', 'skipped')),
-                        -- A final embedding failure is done for the model but has
-                        -- no vectors (its error stays set until a success).
-                        count(*) FILTER (WHERE embedded_model = $2 AND embed_error IS NULL)
-                 FROM bookmark_contents WHERE user_id = $1",
-            )
-            .bind(user_id)
-            .bind(model_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(db_error)?;
+        let (total, fetched, captured, scraped, pending, unfetched, embedded) = sqlx::query_as(
+            "SELECT count(*),
+                    count(*) FILTER (WHERE status = 'fetched' AND source = 'fetched'),
+                    count(*) FILTER (WHERE status = 'fetched' AND source = 'captured'),
+                    count(*) FILTER (WHERE status = 'fetched' AND source = 'scraped'),
+                    count(*) FILTER (WHERE status = 'pending'),
+                    count(*) FILTER (WHERE status IN ('failed', 'skipped')),
+                    -- A final embedding failure is done for the model but has
+                    -- no vectors (its error stays set until a success).
+                    count(*) FILTER (WHERE embedded_model = $2 AND embed_error IS NULL)
+             FROM bookmark_contents WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(model_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db_error)?;
         let failing_domains = sqlx::query_as(
             "SELECT coalesce(b.domain,
                              lower(substring(b.url from '^[^:]+://(?:[^@/]*@)?([^/:?#]+)')),
@@ -205,7 +206,11 @@ impl SearchIndexRepository for PostgresPool {
         .map_err(db_error)?;
         Ok(SearchIndexStatus {
             total,
-            fetched,
+            indexed: ContentSourceCounts {
+                fetched,
+                captured,
+                scraped,
+            },
             pending,
             unfetched,
             embedded: model_id.map(|_| embedded),
@@ -287,7 +292,8 @@ mod embedding_tests {
     use crate::domain::ports::bookmark_repo::BookmarkRepository;
     use crate::domain::ports::search_repo::{SearchIndexRepository, SearchRepository};
     use crate::domain::search::{
-        IngestFailure, IngestStatus, MAX_SEARCH_RESULTS, QueryVector, SearchHit, SearchQuery,
+        ContentSource, IngestFailure, IngestStatus, MAX_SEARCH_RESULTS, QueryVector, SearchHit,
+        SearchQuery,
     };
     use sqlx::PgPool;
     use std::sync::Arc;
@@ -652,7 +658,7 @@ mod embedding_tests {
         let jobs = claim_mine(&pool, &repo, &[owner]).await;
         let text = passage("prose", 300);
         assert!(
-            repo.store_article(&jobs[&article.id], &text, "h1")
+            repo.store_article(&jobs[&article.id], &text, "h1", ContentSource::Fetched)
                 .await
                 .unwrap()
         );
@@ -722,7 +728,7 @@ mod embedding_tests {
         refetch(article.id).await;
         let jobs = claim_mine(&pool, &repo, &[owner]).await;
         assert!(
-            repo.store_article(&jobs[&article.id], &text, "h1")
+            repo.store_article(&jobs[&article.id], &text, "h1", ContentSource::Fetched)
                 .await
                 .unwrap()
         );
@@ -733,9 +739,14 @@ mod embedding_tests {
         refetch(article.id).await;
         let jobs = claim_mine(&pool, &repo, &[owner]).await;
         assert!(
-            repo.store_article(&jobs[&article.id], &passage("other", 50), "h2")
-                .await
-                .unwrap()
+            repo.store_article(
+                &jobs[&article.id],
+                &passage("other", 50),
+                "h2",
+                ContentSource::Fetched,
+            )
+            .await
+            .unwrap()
         );
         assert_eq!(embedded_model(&pool, article.id).await, None);
         embed_all(&pool, &repo, &embedder, &[owner]).await;
@@ -933,11 +944,18 @@ mod embedding_tests {
         assert_eq!(
             (
                 status.total,
-                status.fetched,
+                status.indexed.fetched,
                 status.pending,
                 status.unfetched
             ),
             (5, 1, 1, 3)
+        );
+        assert_eq!(
+            status.indexed,
+            ContentSourceCounts {
+                fetched: 1,
+                ..Default::default()
+            }
         );
         assert_eq!(status.embedded, Some(3), "non-pending rows with vectors");
         assert_eq!(

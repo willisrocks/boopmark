@@ -4,7 +4,7 @@ mod config;
 mod domain;
 mod web;
 
-use adapters::article::readability::HtmlArticleFetcher;
+use adapters::article::readability::{HtmlArticleFetcher, HtmlExtractor};
 use adapters::embedder::{DisabledEmbedder, EmbedderRouter};
 use adapters::llm_client::{LlmClientConfig, LlmClientRouter};
 use adapters::login::google::GoogleLoginProvider;
@@ -25,6 +25,7 @@ use app::bookmarks::BookmarkService;
 use app::enrichment::EnrichmentService;
 use app::image_prompt::LlmClientPromptAssistant;
 use app::invite::InviteService;
+use app::page_capture::{CaptureService, CaptureWorker};
 use app::search::SearchService;
 use app::secrets::SecretBox;
 use app::settings::{ConfiguredImageAiSettingsProvider, SettingsService};
@@ -227,8 +228,32 @@ async fn main() {
         SearchService::new(db.clone(), embedder.clone()).vector_unavailable(vector_unavailable),
     );
 
-    // Woken by the ingest worker after each result it stores.
+    // Woken by the ingest worker and by the capture route after each stored
+    // result, so the embedding worker picks it up.
     let embed_wake = Arc::new(tokio::sync::Notify::new());
+    // Woken by the capture route when it stores a payload for later parsing.
+    let capture_wake = Arc::new(tokio::sync::Notify::new());
+    // Sized like the ingest worker's: one parse pool per instance, and the
+    // capture route keeps its own so a capture never queues behind fetches.
+    let capture_extractor = Arc::new(HtmlExtractor::new(config.article_ingest_concurrency));
+    if config.page_capture_enabled {
+        // Its own connection: the drain parses on behalf of the request that
+        // could not, and must not compete for the request pool. It is not
+        // part of the ingest worker, so captures still drain with
+        // ARTICLE_INGEST_ENABLED=0.
+        let capture_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&config.database_url)
+            .await
+            .expect("Failed to connect the capture drain to the database");
+        CaptureWorker::new(
+            Arc::new(PostgresPool::new(capture_pool)),
+            capture_extractor.clone(),
+            config.page_capture_max_bytes,
+        )
+        .notify_on_stored(embed_wake.clone())
+        .spawn(capture_wake.clone());
+    }
     if config.article_ingest_enabled {
         // Its own connection, so background fetching never takes one from
         // the request pool; the listener holds one more.
@@ -258,7 +283,7 @@ async fn main() {
             .await
             .expect("Failed to connect the embedding worker to the database");
         app::embedding::EmbedWorker::new(Arc::new(PostgresPool::new(embed_pool)), embedder.clone())
-            .spawn(embed_wake);
+            .spawn(embed_wake.clone());
     }
 
     let login_provider: Arc<dyn LoginProvider> = match config.login_adapter {
@@ -296,6 +321,10 @@ async fn main() {
         embedder,
 
         search: search_service,
+        page_capture: Arc::new(CaptureService::new(db.clone())),
+        capture_extractor,
+        embed_wake: embed_wake.clone(),
+        capture_wake,
     };
 
     let app = web::router::create_router(state);

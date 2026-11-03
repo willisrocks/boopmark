@@ -12,6 +12,7 @@ pub mod llm_prompt_assistant;
 pub mod llm_settings_repo;
 pub mod login_provider;
 pub mod metadata;
+pub mod page_capture_repo;
 pub mod screenshot;
 pub mod search_repo;
 pub mod session_repo;

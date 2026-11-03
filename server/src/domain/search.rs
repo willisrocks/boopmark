@@ -130,12 +130,53 @@ pub struct QueryVector {
     pub values: Vec<f32>,
 }
 
+/// Where a stored article text came from (`bookmark_contents.source`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContentSource {
+    /// The server fetched the page itself.
+    #[default]
+    Fetched,
+    /// The browser that displayed the page sent its HTML.
+    Captured,
+    /// The server-side scraper rendered the page.
+    // The scraper port and its decorator are a later step; the column value
+    // and its count land with this migration so there is one schema change.
+    #[allow(dead_code)]
+    Scraped,
+}
+
+impl ContentSource {
+    /// The column's value; the migration's `CHECK` lists the same three.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fetched => "fetched",
+            Self::Captured => "captured",
+            Self::Scraped => "scraped",
+        }
+    }
+}
+
+/// Articles with stored text, by where the text came from. Settings → Search
+/// index breaks the indexed count down this way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentSourceCounts {
+    pub fetched: i64,
+    pub captured: i64,
+    pub scraped: i64,
+}
+
+impl ContentSourceCounts {
+    pub fn total(&self) -> i64 {
+        self.fetched + self.captured + self.scraped
+    }
+}
+
 /// One user's search index, for Settings → Search index.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchIndexStatus {
     pub total: i64,
-    /// Article text stored.
-    pub fetched: i64,
+    /// Article text stored, by source.
+    pub indexed: ContentSourceCounts,
     pub pending: i64,
     /// Failed or skipped: searchable by their metadata only.
     pub unfetched: i64,
@@ -352,6 +393,22 @@ impl Snippet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_sources_are_the_column_values_and_add_up() {
+        assert_eq!(ContentSource::Fetched.as_str(), "fetched");
+        assert_eq!(ContentSource::Captured.as_str(), "captured");
+        assert_eq!(ContentSource::Scraped.as_str(), "scraped");
+        assert_eq!(ContentSource::default(), ContentSource::Fetched);
+
+        let counts = ContentSourceCounts {
+            fetched: 1140,
+            captured: 48,
+            scraped: 16,
+        };
+        assert_eq!(counts.total(), 1204);
+        assert_eq!(ContentSourceCounts::default().total(), 0);
+    }
 
     #[test]
     fn retry_schedule_is_one_minute_one_hour_one_day_then_final() {

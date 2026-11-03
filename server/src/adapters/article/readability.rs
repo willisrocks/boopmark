@@ -41,8 +41,91 @@ pub struct HtmlArticleFetcher {
     client: reqwest::Client,
     guard: UrlGuard,
     throttle: HostThrottle,
+    extractor: HtmlExtractor,
+}
+
+/// Decode, parse and cap an HTML body: the one Readability pass the app
+/// runs, shared by the fetcher and the capture endpoint, so both have the
+/// same `EXTRACT_TIMEOUT`, the same text caps and the same blocking pool.
+///
+/// Each holder has its own slots; a capture therefore parses even when the
+/// ingest worker's extractor is busy or was never built
+/// (`ARTICLE_INGEST_ENABLED=0`).
+pub struct HtmlExtractor {
     /// Extractions running at once, timed-out ones included.
-    extraction_slots: Arc<Semaphore>,
+    slots: Arc<Semaphore>,
+}
+
+/// Why a captured body produced no text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureExtractError {
+    /// The parse found no article (or the document is unreadable).
+    NoArticle(ArticleFetchError),
+    /// The extraction did not finish: it timed out, its task failed, or no
+    /// slot came free. The caller keeps the payload and the drain tries
+    /// again.
+    Unfinished(String),
+}
+
+impl HtmlExtractor {
+    /// `slots` bounds the blocking threads that parse pages.
+    pub fn new(slots: usize) -> Self {
+        Self {
+            slots: Arc::new(Semaphore::new(slots.max(1))),
+        }
+    }
+
+    /// How many parses could start right now. The capture drain claims at
+    /// most this many payloads, so a batch never queues behind its own
+    /// parses.
+    pub fn free_slots(&self) -> usize {
+        self.slots.available_permits()
+    }
+
+    /// A captured page: decode and parse. The caller has already inflated
+    /// the body (see `gzip::inflate_captured`), so a corrupt or oversized
+    /// one never waits for a slot.
+    ///
+    /// There is no challenge check: if the user's browser rendered a
+    /// challenge, there is no article, and saying so is honest.
+    pub async fn extract(
+        &self,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+        url: &str,
+    ) -> Result<String, CaptureExtractError> {
+        let content_type = content_type.map(str::to_string);
+        let url = url.to_string();
+        let parsed = run_bounded(&self.slots, EXTRACT_TIMEOUT, move || {
+            let html = decode_html(body, content_type.as_deref());
+            extract_text(&html, &url)
+        })
+        .await;
+        match parsed {
+            Ok(result) => result.map_err(CaptureExtractError::NoArticle),
+            Err(err) => Err(CaptureExtractError::Unfinished(err.to_string())),
+        }
+    }
+
+    /// A fetched page: decode and parse, and report a challenge page as such
+    /// rather than as "no readable article".
+    pub async fn extract_fetched(
+        &self,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+        url: &str,
+    ) -> Result<String, ArticleFetchError> {
+        let content_type = content_type.map(str::to_string);
+        let url = url.to_string();
+        run_bounded(&self.slots, EXTRACT_TIMEOUT, move || {
+            let html = decode_html(body, content_type.as_deref());
+            if is_cloudflare_challenge(&html) {
+                return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
+            }
+            extract_text(&html, &url)
+        })
+        .await?
+    }
 }
 
 impl HtmlArticleFetcher {
@@ -50,7 +133,7 @@ impl HtmlArticleFetcher {
     /// ingest worker passes its concurrency.
     pub fn new(extraction_slots: usize) -> Self {
         Self {
-            extraction_slots: Arc::new(Semaphore::new(extraction_slots.max(1))),
+            extractor: HtmlExtractor::new(extraction_slots),
             ..Self::with_lookup(UrlGuard::public(), SystemLookup, PER_HOST_INTERVAL)
         }
     }
@@ -65,7 +148,7 @@ impl HtmlArticleFetcher {
             client,
             guard,
             throttle: HostThrottle::new(per_host_interval),
-            extraction_slots: Arc::new(Semaphore::new(1)),
+            extractor: HtmlExtractor::new(1),
         }
     }
 
@@ -111,17 +194,12 @@ impl HtmlArticleFetcher {
                 CappedReadError::Read(e) => request_error(e),
             })?;
         let html_bytes = body.len();
-        let url_for_parse = final_url.clone();
         // Decoding, the challenge check and extraction all scan the page, so
         // they run off the async threads.
-        let text = run_bounded(&self.extraction_slots, EXTRACT_TIMEOUT, move || {
-            let html = decode_html(body, content_type.as_deref());
-            if is_cloudflare_challenge(&html) {
-                return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
-            }
-            extract_text(&html, &url_for_parse)
-        })
-        .await??;
+        let text = self
+            .extractor
+            .extract_fetched(body, content_type.as_deref(), &final_url)
+            .await?;
 
         Ok(FetchedArticle {
             text,
@@ -141,28 +219,30 @@ impl ArticleFetcher for HtmlArticleFetcher {
     }
 }
 
-/// Run `work` on the blocking pool once one of `slots` is free, waiting at
-/// most `timeout` in all. A blocking thread cannot be cancelled, so the
-/// permit moves into the closure: a timed-out run keeps its slot until its
-/// thread really ends, and hostile pages can never have more extractions
-/// running than there are slots.
+/// How long a caller waits for a parse slot before giving up. A stuck
+/// thread keeps its slot until it ends, so this bound is what stops a
+/// request from waiting forever behind one.
+const SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run `work` on the blocking pool once one of `slots` is free. The timeout
+/// starts when the work starts: waiting for a slot is queueing, and a batch
+/// of parses must not expire just because it had to take turns. A blocking
+/// thread cannot be cancelled, so the permit moves into the closure: a
+/// timed-out run keeps its slot until its thread really ends, and hostile
+/// pages can never have more extractions running than there are slots.
 async fn run_bounded<T: Send + 'static>(
     slots: &Arc<Semaphore>,
     timeout: Duration,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ArticleFetchError> {
-    let slots = slots.clone();
-    let run = async move {
-        let permit = slots
-            .acquire_owned()
-            .await
-            .expect("the extraction semaphore is never closed");
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            work()
-        })
+    let permit = tokio::time::timeout(SLOT_WAIT_TIMEOUT, slots.clone().acquire_owned())
         .await
-    };
+        .map_err(|_| ArticleFetchError::Transient("no free extraction slot".to_string()))?
+        .expect("the extraction semaphore is never closed");
+    let run = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    });
     tokio::time::timeout(timeout, run)
         .await
         .map_err(|_| ArticleFetchError::Transient("extraction timed out".to_string()))?
@@ -613,6 +693,83 @@ mod tests {
         ));
     }
 
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// The capture path and the fetch path run the same parse: the text of a
+    /// captured page is the text the fetcher would have stored.
+    #[tokio::test]
+    async fn a_captured_page_extracts_like_a_fetched_one() {
+        use crate::adapters::article::gzip::inflate_captured;
+        let (fetcher, base) = fixture().await;
+        let url = format!("{base}/article");
+        let fetched = fetcher.fetch(&url).await.unwrap();
+        let html = inflate_captured(Arc::new(gzip(ARTICLE.as_bytes())), 5 * 1024 * 1024)
+            .await
+            .unwrap();
+        let captured = HtmlExtractor::new(1)
+            .extract(html, Some("text/html"), &url)
+            .await
+            .unwrap();
+        assert_eq!(captured, fetched.text);
+    }
+
+    #[tokio::test]
+    async fn a_capture_with_no_article_is_an_honest_refusal() {
+        let extractor = HtmlExtractor::new(1);
+        let empty = extractor
+            .extract(
+                b"<html><body></body></html>".to_vec(),
+                Some("text/html"),
+                "https://example.com/",
+            )
+            .await;
+        assert!(matches!(empty, Err(CaptureExtractError::NoArticle(_))));
+        // The browser rendered what it rendered: a challenge page from a
+        // capture is reported as having no article, not as a fetch block.
+        let challenge = extractor
+            .extract(
+                b"<html><head><title>Just a moment...</title></head></html>".to_vec(),
+                Some("text/html"),
+                "https://example.com/",
+            )
+            .await;
+        assert!(
+            matches!(
+                &challenge,
+                Err(CaptureExtractError::NoArticle(ArticleFetchError::Permanent(msg)))
+                    if !msg.contains(CF_CHALLENGE_MSG)
+            ),
+            "{challenge:?}"
+        );
+    }
+
+    /// A parse that has to queue for a slot is not timed out for it: the
+    /// timeout covers the work, not the wait.
+    #[tokio::test]
+    async fn a_queued_parse_is_not_timed_out_while_it_waits_for_a_slot() {
+        let slots = Arc::new(Semaphore::new(1));
+        let held = slots.clone().acquire_owned().await.unwrap();
+        let slots_for_task = slots.clone();
+        let task = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let ran = run_bounded(&slots_for_task, Duration::from_secs(5), || 7).await;
+            (ran, started.elapsed())
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(held);
+        let (ran, _) = task.await.unwrap();
+        assert_eq!(
+            ran,
+            Ok(7),
+            "the wait for a slot did not use the work budget"
+        );
+    }
+
     #[test]
     fn content_type_check_ignores_parameters_and_case() {
         assert!(is_html("text/html"));
@@ -623,7 +780,9 @@ mod tests {
     }
 
     /// A run that outlives its timeout keeps its slot until its thread ends,
-    /// so the next run waits instead of starting a second extraction.
+    /// so the next run waits instead of starting a second extraction — and
+    /// that wait is not charged to the work budget: once the slot frees, the
+    /// queued run still gets its full timeout.
     #[tokio::test]
     async fn a_timed_out_extraction_keeps_its_slot_until_it_ends() {
         let slots = Arc::new(Semaphore::new(1));
@@ -641,12 +800,36 @@ mod tests {
             0,
             "the stuck thread holds the slot"
         );
-        let queued = run_bounded(&slots, Duration::from_millis(50), || 1).await;
-        assert!(queued.is_err(), "no second extraction while the first runs");
+
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = started.clone();
+        let waiting = tokio::spawn({
+            let slots = slots.clone();
+            async move {
+                run_bounded(&slots, Duration::from_secs(5), move || {
+                    probe.store(true, std::sync::atomic::Ordering::SeqCst);
+                    2
+                })
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !started.load(std::sync::atomic::Ordering::SeqCst),
+            "no second extraction while the first runs"
+        );
+        assert!(
+            !waiting.is_finished(),
+            "the queued run is waiting, not failed"
+        );
 
         release.send(()).unwrap();
-        let ran = run_bounded(&slots, Duration::from_secs(5), || 2).await;
+        let ran = tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .expect("the queued run starts once the slot frees")
+            .unwrap();
         assert_eq!(ran, Ok(2));
+        assert!(started.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(slots.available_permits(), 1);
     }
 }

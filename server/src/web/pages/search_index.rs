@@ -17,7 +17,10 @@ use crate::web::state::AppState;
 #[template(path = "settings/search_index.html")]
 struct SearchIndexPanel {
     total: String,
-    fetched: String,
+    /// Articles with stored text, whatever the source.
+    indexed: String,
+    /// The non-zero part of "· 198 fetched · 48 captured · 16 scraped".
+    sources: Option<String>,
     pending: String,
     unfetched: String,
     has_unfetched: bool,
@@ -31,9 +34,20 @@ struct SearchIndexPanel {
 
 impl SearchIndexPanel {
     fn new(status: SearchIndexStatus, deployment: Option<String>, message: Option<String>) -> Self {
+        let indexed = status.indexed;
+        let sources: Vec<String> = [
+            (indexed.fetched, "fetched"),
+            (indexed.captured, "captured"),
+            (indexed.scraped, "scraped"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, label)| format!("{} {label}", thousands(n)))
+        .collect();
         Self {
             total: thousands(status.total),
-            fetched: thousands(status.fetched),
+            indexed: thousands(indexed.total()),
+            sources: (!sources.is_empty()).then(|| sources.join(" · ")),
             pending: thousands(status.pending),
             unfetched: thousands(status.unfetched),
             has_unfetched: status.unfetched > 0,
@@ -126,11 +140,16 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::search::ContentSourceCounts;
 
     fn status() -> SearchIndexStatus {
         SearchIndexStatus {
             total: 1290,
-            fetched: 1204,
+            indexed: ContentSourceCounts {
+                fetched: 1140,
+                captured: 48,
+                scraped: 16,
+            },
             pending: 0,
             unfetched: 86,
             embedded: Some(1290),
@@ -151,8 +170,9 @@ mod tests {
         let body = SearchIndexPanel::new(status(), None, None)
             .render()
             .unwrap();
-        assert!(body.contains("Indexed 1,204 of 1,290 articles"));
-        assert!(body.contains("· 86 couldn"));
+        assert!(body.contains(
+            "Indexed 1,204 of 1,290 articles · 1,140 fetched · 48 captured · 16 scraped · 86 couldn"
+        ));
         assert!(body.contains("data-testid=\"search-index-retry\""));
         assert!(body.contains("medium.com"));
         assert!(body.contains("Searchable by meaning: 1,290"));

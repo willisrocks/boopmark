@@ -72,6 +72,7 @@ pub struct ListParams {
     pub sort: Option<BookmarkSort>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub url: Option<String>,
 }
 
 impl From<ListParams> for BookmarkFilter {
@@ -84,6 +85,7 @@ impl From<ListParams> for BookmarkFilter {
                     .filter(|s| !s.is_empty())
                     .collect()
             }),
+            url: p.url,
             sort: p.sort,
             limit: p.limit,
             offset: p.offset,

@@ -5,6 +5,7 @@ pub mod enrichment;
 pub mod image_prompt;
 pub mod ingest;
 pub mod invite;
+pub mod page_capture;
 pub mod search;
 pub mod secrets;
 pub mod settings;

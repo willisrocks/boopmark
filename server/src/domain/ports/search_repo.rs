@@ -1,5 +1,7 @@
 use crate::domain::error::DomainError;
-use crate::domain::search::{IngestFailure, IngestJob, SearchHit, SearchIndexStatus, SearchQuery};
+use crate::domain::search::{
+    ContentSource, IngestFailure, IngestJob, SearchHit, SearchIndexStatus, SearchQuery,
+};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -23,13 +25,15 @@ pub trait SearchRepository: Send + Sync {
     ) -> Result<Vec<IngestJob>, DomainError>;
 
     /// Store the extracted text, rebuild the lexical document and mark the
-    /// row fetched. Returns false when the bookmark was deleted or its URL
-    /// changed since the claim; the result is then simply dropped.
+    /// row fetched, recording where the text came from. Returns false when
+    /// the bookmark was deleted or its URL changed since the claim; the
+    /// result is then simply dropped.
     async fn store_article(
         &self,
         job: &IngestJob,
         text: &str,
         content_hash: &str,
+        source: ContentSource,
     ) -> Result<bool, DomainError>;
 
     /// Record a failed attempt; see `IngestFailure`. Returns false like
@@ -38,6 +42,23 @@ pub trait SearchRepository: Send + Sync {
         &self,
         job: &IngestJob,
         failure: &IngestFailure,
+    ) -> Result<bool, DomainError>;
+
+    /// Store text captured from the browser that displayed the page: the row
+    /// is `fetched` with `source = 'captured'`, and any fetch already in
+    /// flight loses its claim, so its result is dropped.
+    ///
+    /// `url` is the bookmark URL the request (or the queued page) was
+    /// checked against: if the bookmark has been pointed at another page
+    /// since, nothing is stored. Returns false when the bookmark was
+    /// deleted, is not this user's, or no longer has that URL.
+    async fn store_capture(
+        &self,
+        bookmark_id: Uuid,
+        user_id: Uuid,
+        url: &str,
+        text: &str,
+        content_hash: &str,
     ) -> Result<bool, DomainError>;
 }
 

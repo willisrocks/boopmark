@@ -188,7 +188,7 @@ impl<R: SearchRepository + SearchIndexRepository> SearchService<R> {
 mod tests {
     use super::*;
     use crate::app::embedding::tests::{DisabledStub, StubEmbedder};
-    use crate::domain::search::{IngestFailure, IngestJob};
+    use crate::domain::search::{ContentSource, IngestFailure, IngestJob};
 
     #[derive(Default)]
     struct RecordingRepo {
@@ -221,6 +221,7 @@ mod tests {
             _job: &IngestJob,
             _text: &str,
             _content_hash: &str,
+            _source: ContentSource,
         ) -> Result<bool, DomainError> {
             unreachable!()
         }
@@ -228,6 +229,16 @@ mod tests {
             &self,
             _job: &IngestJob,
             _failure: &IngestFailure,
+        ) -> Result<bool, DomainError> {
+            unreachable!()
+        }
+        async fn store_capture(
+            &self,
+            _bookmark_id: Uuid,
+            _user_id: Uuid,
+            _url: &str,
+            _text: &str,
+            _content_hash: &str,
         ) -> Result<bool, DomainError> {
             unreachable!()
         }
