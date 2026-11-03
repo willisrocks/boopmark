@@ -53,6 +53,10 @@ pub struct Config {
     /// `PAGE_SCRAPER_MONTHLY_BUDGET_PAGES`: pages per calendar month,
     /// 0 meaning no cap.
     pub page_scraper_monthly_budget_pages: u64,
+    /// `PAGE_SCRAPER_CONCURRENCY`: scrapes this process may have in flight.
+    /// The vendor's plan caps concurrency, and a burst above the cap comes
+    /// back as 429 for pages nobody gets.
+    pub page_scraper_concurrency: usize,
 }
 
 /// The measured p90 page was 437 KB, the largest 1.9 MB; 5 MiB leaves room
@@ -63,6 +67,13 @@ pub const DEFAULT_PAGE_CAPTURE_MAX_BYTES: usize = 5 * 1024 * 1024;
 pub const DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS: u64 = 30;
 /// What a scrape can take and still leave the job room for its extraction.
 pub const MAX_PAGE_SCRAPER_TIMEOUT_SECONDS: u64 = 45;
+
+/// Firecrawl's free plan renders 2 pages at a time and answers 429 above
+/// that, so 2 is the default every plan can take.
+pub const DEFAULT_PAGE_SCRAPER_CONCURRENCY: usize = 2;
+/// A paid plan allows more, and scrapes also queue behind the ingest worker's
+/// own concurrency; ten is a sanity bound on a typo, not a vendor limit.
+pub const MAX_PAGE_SCRAPER_CONCURRENCY: usize = 10;
 
 /// The server-side scraper of the fallback decorator. The companion eval
 /// chose Firecrawl and dropped Obscura
@@ -178,6 +189,9 @@ impl Config {
                     .ok()
                     .as_deref(),
             ),
+            page_scraper_concurrency: parse_scraper_concurrency(
+                env::var("PAGE_SCRAPER_CONCURRENCY").ok().as_deref(),
+            ),
         }
     }
 }
@@ -248,6 +262,16 @@ fn parse_scraper_budget(value: Option<&str>) -> u64 {
         .unwrap_or(0)
 }
 
+/// Concurrent scrapes, the free plan's 2 by default and at most 10. A value
+/// below 1 would stop scraping altogether, so it is raised instead: a typo
+/// must not silently disable the feature.
+fn parse_scraper_concurrency(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PAGE_SCRAPER_CONCURRENCY)
+        .clamp(1, MAX_PAGE_SCRAPER_CONCURRENCY)
+}
+
 fn llm_settings_encryption_key() -> String {
     let raw_key =
         env::var("LLM_SETTINGS_ENCRYPTION_KEY").expect("LLM_SETTINGS_ENCRYPTION_KEY required");
@@ -269,10 +293,12 @@ fn llm_settings_encryption_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_PAGE_CAPTURE_MAX_BYTES, DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, LoginAdapter,
+        DEFAULT_PAGE_CAPTURE_MAX_BYTES, DEFAULT_PAGE_SCRAPER_CONCURRENCY,
+        DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, LoginAdapter, MAX_PAGE_SCRAPER_CONCURRENCY,
         MAX_PAGE_SCRAPER_TIMEOUT_SECONDS, MetadataFallbackBackend, PageScraperBackend,
         ScreenshotBackend, llm_settings_encryption_key, parse_capture_max_bytes, parse_flag,
-        parse_ingest_concurrency, parse_page_scraper, parse_scraper_budget, parse_scraper_timeout,
+        parse_ingest_concurrency, parse_page_scraper, parse_scraper_budget,
+        parse_scraper_concurrency, parse_scraper_timeout,
     };
 
     /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.
@@ -440,6 +466,31 @@ mod tests {
         assert_eq!(parse_scraper_budget(None), 0);
         assert_eq!(parse_scraper_budget(Some("200")), 200);
         assert_eq!(parse_scraper_budget(Some("wrong")), 0);
+    }
+
+    #[test]
+    fn scraper_concurrency_defaults_to_two_and_is_bounded() {
+        assert_eq!(parse_scraper_concurrency(None), 2);
+        assert_eq!(parse_scraper_concurrency(Some(" 4 ")), 4);
+        assert_eq!(
+            parse_scraper_concurrency(Some("10")),
+            MAX_PAGE_SCRAPER_CONCURRENCY
+        );
+        // More than the cap would make the vendor answer 429, and a value
+        // that parses to nothing keeps the free plan's 2.
+        assert_eq!(
+            parse_scraper_concurrency(Some("11")),
+            MAX_PAGE_SCRAPER_CONCURRENCY
+        );
+        for bad in ["", "nope", "-2", "1.5"] {
+            assert_eq!(
+                parse_scraper_concurrency(Some(bad)),
+                DEFAULT_PAGE_SCRAPER_CONCURRENCY,
+                "{bad}"
+            );
+        }
+        // 0 concurrent scrapes would disable the feature a typo away.
+        assert_eq!(parse_scraper_concurrency(Some("0")), 1);
     }
 
     #[test]

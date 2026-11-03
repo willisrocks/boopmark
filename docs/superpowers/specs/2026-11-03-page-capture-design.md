@@ -160,6 +160,7 @@ PAGE_SCRAPER=disabled                  # default disabled | firecrawl
 PAGE_SCRAPER_API_KEY=                  # firecrawl only; the operator's key
 PAGE_SCRAPER_TIMEOUT_SECONDS=30        # one scrape, retries excluded (at most 45)
 PAGE_SCRAPER_MONTHLY_BUDGET_PAGES=0    # 0 = no cap; otherwise pages per calendar month
+PAGE_SCRAPER_CONCURRENCY=2             # scrapes in flight, 2 by default (1..=10)
 ```
 
 `PAGE_SCRAPER=firecrawl` without `PAGE_SCRAPER_API_KEY` logs a warning naming the variable
@@ -611,10 +612,12 @@ pub struct FallbackFetcher<F, S> { direct: F, scraper: S, extractor: HtmlExtract
    wait, so `JOB_TIMEOUT` cannot fire after a billed scrape); refuse the URL with
    `net::validate_public_url(url)` (a URL the app may not fetch, the vendor must not be
    asked to fetch either — that is the SSRF boundary for a hosted scraper, whose own fetch
-   is the vendor's responsibility); reserve a
-   page of the monthly budget; then `scraper.scrape(url)` inside
-   `PAGE_SCRAPER_TIMEOUT_SECONDS`. On success run
-   `extract_fetched(vendor_html, Some("text/html"), final_url)` and return
+   is the vendor's responsibility); wait for one of `PAGE_SCRAPER_CONCURRENCY` process-wide
+   scrape slots, but no longer than the job's remaining budget minus the scrape and its
+   extraction — a job that gets no slot keeps its direct result and reserves no page;
+   reserve a page of the monthly budget; then `scraper.scrape(url)` inside
+   `PAGE_SCRAPER_TIMEOUT_SECONDS`, releasing the slot when the vendor answers. On success
+   run `extract_fetched(vendor_html, Some("text/html"), final_url)` and return
    `source = scraped` when the text is non-empty and, for a short direct result, longer
    than it, or when the direct result was a preview (length is not the measure for a
    teaser). Stored text never gets shorter.
@@ -639,12 +642,30 @@ and `SearchRepository::store_article` takes the source, so the row records which
 produced the text. `ContentSource` (`domain/search.rs`) is `Fetched | Captured | Scraped`
 with `as_str()`.
 
-**Retry and backoff.** None is added. A decorator result flows into the existing
-`failure_for`/`retry_delay` schedule (1 min → 1 h → 24 h → `failed`) and the existing
-`MAX_INGEST_ATTEMPTS = 6` sweep. A scrape that fails with `Retryable` becomes
-`ArticleFetchError::Transient`, so it retries on that schedule; `Final` returns the direct
-result, so it keeps the direct verdict. The per-host `HostThrottle` (1 s) still paces the
-direct fetch; the scraper is a vendor call and is not throttled by host.
+**Concurrency.** The vendor's plan renders only so many pages at once (Firecrawl's free
+plan: 2) and answers a burst above that with 429. Nothing paced the calls, so 4 concurrent
+ingest jobs meant 4 simultaneous scrapes, and the retries met the same queue: a v0.10.0
+backfill of 83 re-queued bookmarks sat in `waiting` for two days with 19 pages of 64 spent.
+`PAGE_SCRAPER_CONCURRENCY` (default 2, clamped to `1..=10`) is a process-wide semaphore
+around the vendor call. A job takes a slot before it reserves a page, so waiting costs no
+budget, and a job that gets no slot inside its remaining budget keeps its direct result
+instead of spending a retry on the same queue. The slot is released when the vendor
+answers, before the extraction, which is the app's own CPU work.
+
+**Retry and backoff.** One retry is added, inside the job: a 429 is unbilled and is the
+vendor's queue rather than this page's verdict, so it is waited out once — `Retry-After` in
+whole seconds when the vendor sends one, 2 s when it does not, and not at all past 5 s,
+which the job cannot afford to stall for. If the retry is refused as well, the scrape is
+`Retryable` and the existing `failure_for`/`retry_delay` schedule (1 min → 1 h → 24 h →
+`failed`) and the existing `MAX_INGEST_ATTEMPTS = 6` sweep take over; `Final` returns the
+direct result, so it keeps the direct verdict. The per-host `HostThrottle` (1 s) still
+paces the direct fetch; the scraper is a vendor call and is paced by
+`PAGE_SCRAPER_CONCURRENCY`, not by host.
+
+**Observability.** A failed fetch or scrape is logged at info, with the host and the error
+class and no URL path or key: the backfill above could not be diagnosed from the log at
+all, because every such line was at debug. One startup line says what will happen and what
+it may cost and pace: `scraper enabled: firecrawl, budget N, concurrency C`.
 
 **Spend caps.** Before each scrape the decorator reserves a page of `scraper_usage` for the
 current UTC month (one `INSERT … ON CONFLICT DO UPDATE … RETURNING pages`, whose `WHERE`
