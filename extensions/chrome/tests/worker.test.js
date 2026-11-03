@@ -129,6 +129,7 @@ function harness({
     structuredClone,
     queueMicrotask,
     AbortController,
+    AbortSignal,
     setTimeout,
     clearTimeout,
     console,
@@ -1271,7 +1272,10 @@ test('Capture text uploads into the existing bookmark without creating another',
 
   const captured = await ui.send({ type: 'CAPTURE_EXISTING', draftId: found.draft.id });
   assert.equal(captured.ok, true);
-  assert.deepEqual({ ...captured.existing.capture }, { state: 'captured', text: 'article text captured' });
+  assert.equal(captured.existing.capture.state, 'capturing', 'the upload does not block the state queue');
+  await wait(25);
+  const after = await ui.send({ type: 'OPEN', tab });
+  assert.deepEqual({ ...after.existing.capture }, { state: 'captured', text: 'article text captured' });
 
   const puts = calls.filter(call => call.init.method === 'PUT');
   assert.equal(puts.length, 1, 'the existing bookmark receives the capture');
@@ -1434,4 +1438,147 @@ test('a failed save keeps the captured page for the explicit retry', async () =>
   const puts = calls.filter(call => call.init.method === 'PUT');
   assert.equal(puts.length, 1, 'the retried save still uploads the captured page');
   assert.equal(puts[0].init.headers['X-Page-Url'], pageUrl);
+});
+
+test('the upload is skipped when the reviewed URL no longer matches the captured page', async () => {
+  const pageUrl = 'https://example.com/original-page';
+  const { calls, fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>original</body></html>' },
+  });
+  const tab = { id: 61, url: pageUrl, title: 'Original' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  const edited = 'https://example.com/another-page';
+  await ui.send({ type: 'UPDATE', draftId: ready.draft.id, field: 'url', value: edited });
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: { url: edited, title: 'Edited', description: '', tags: '' } });
+  await wait(50);
+
+  const saved = await ui.send({ type: 'OPEN', tab });
+  assert.equal(saved.operation.state, 'success');
+  assert.equal(saved.operation.capture.state, 'mismatch');
+  assert.equal(calls.filter(call => call.init.method === 'PUT').length, 0, 'a body for another page is never sent');
+  assert.equal(JSON.parse(calls.find(call => call.url.endsWith('/api/v1/bookmarks') && call.init.method === 'POST').init.body).url, edited);
+});
+
+test('the upload URL is the injected location.href, not the tab URL the form started from', async () => {
+  const tabUrl = 'https://example.com/page?utm_source=newsletter';
+  const injectedHref = 'https://example.com/page#top';
+  const { calls, fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: injectedHref, contentType: 'text/html', html: '<html><body>page</body></html>' },
+  });
+  const tab = { id: 62, url: tabUrl, title: 'Page' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: { url: tabUrl, title: 'Page', description: '', tags: '' } });
+  await wait(50);
+
+  const puts = calls.filter(call => call.init.method === 'PUT');
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].init.headers['X-Page-Url'], injectedHref, 'the header is what the page reported');
+  const saved = await ui.send({ type: 'OPEN', tab });
+  assert.equal(saved.operation.capture.state, 'captured');
+});
+
+test('only one session copy of a captured page is kept', async () => {
+  const pageUrl = 'https://example.com/first';
+  const { fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: details => ({
+      href: details.target.tabId === 71 ? pageUrl : 'https://example.com/second',
+      contentType: 'text/html',
+      html: `<html><body>tab ${details.target.tabId}</body></html>`,
+    }),
+  });
+  // A popup closed by clicking away sends no CANCEL: its session copy stays
+  // until the next capture replaces it.
+  await ui.send({ type: 'OPEN', tab: { id: 71, url: pageUrl, title: 'First' } });
+  await wait(25);
+  const firstKeys = Object.keys(ui.session.values).filter(key => key.startsWith('boopmark-capture:'));
+  assert.equal(firstKeys.length, 1);
+
+  await ui.send({ type: 'OPEN', tab: { id: 72, url: 'https://example.com/second', title: 'Second' } });
+  await wait(25);
+  const keys = Object.keys(ui.session.values).filter(key => key.startsWith('boopmark-capture:'));
+  assert.equal(keys.length, 1, 'the previous capture copy is pruned, never accumulated');
+  assert.notEqual(keys[0], firstKeys[0]);
+});
+
+async function gzipBase64(text) {
+  const bytes = new TextEncoder().encode(text);
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });
+  const compressed = await readAll(stream.pipeThrough(new CompressionStream('gzip')));
+  return btoa(Array.from(compressed, byte => String.fromCharCode(byte)).join(''));
+}
+
+test('a save restores the captured page from the session copy after a worker restart', async () => {
+  const pageUrl = 'https://example.com/restored';
+  const html = '<html><body>restored article</body></html>';
+  const draftId = 'boopmark-draft:http%3A%2F%2F127.0.0.1%3A4011:81:https%3A%2F%2Fexample.com%2Frestored';
+  const draft = Core.createDraft({
+    id: draftId, server: 'http://127.0.0.1:4011', connectionEpoch: 'epoch-one',
+    tabId: 81, url: pageUrl, title: 'Restored',
+  });
+  draft.suggestionAttempted = true;
+  const { calls, fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    sessionValues: {
+      [draftId]: draft,
+      [`boopmark-capture:${draftId}`]: { url: pageUrl, body: await gzipBase64(html), createdAt: Date.now() },
+    },
+    fetchImpl,
+    injectedPage: new Error('the tab must not be read again'),
+  });
+  const fields = { url: pageUrl, title: 'Restored', description: '', tags: '' };
+  const dispatched = await ui.send({ type: 'SAVE', draftId, fields });
+  assert.equal(dispatched.operation.state, 'pending');
+  await wait(50);
+
+  const saved = await ui.send({ type: 'OPEN', tab: { id: 81, url: pageUrl, title: 'Restored' } });
+  assert.equal(saved.operation.state, 'success');
+  assert.equal(saved.operation.capture.state, 'captured');
+  const puts = calls.filter(call => call.init.method === 'PUT');
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].init.headers['X-Page-Url'], pageUrl);
+  assert.equal((await gunzip(puts[0].init.body)).toString('utf8'), html);
+  assert.equal(ui.injections.length, 0, 'the stored copy is used instead of reading the tab');
+});
+
+test('a session copy for a different page is discarded instead of uploaded', async () => {
+  const draftId = 'boopmark-draft:http%3A%2F%2F127.0.0.1%3A4011:82:https%3A%2F%2Fexample.com%2Fcurrent';
+  const draft = Core.createDraft({
+    id: draftId, server: 'http://127.0.0.1:4011', connectionEpoch: 'epoch-one',
+    tabId: 82, url: 'https://example.com/current', title: 'Current',
+  });
+  draft.suggestionAttempted = true;
+  const { calls, fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    sessionValues: {
+      [draftId]: draft,
+      [`boopmark-capture:${draftId}`]: {
+        url: 'https://example.com/stale', body: await gzipBase64('<html><body>stale</body></html>'), createdAt: Date.now(),
+      },
+    },
+    fetchImpl,
+    injectedPage: new Error('the tab must not be read'),
+  });
+  await ui.send({ type: 'SAVE', draftId, fields: { url: 'https://example.com/current', title: 'Current', description: '', tags: '' } });
+  await wait(50);
+
+  const saved = await ui.send({ type: 'OPEN', tab: { id: 82, url: 'https://example.com/current', title: 'Current' } });
+  assert.equal(saved.operation.state, 'success');
+  assert.equal(saved.operation.capture.text, 'article text not captured');
+  assert.equal(calls.filter(call => call.init.method === 'PUT').length, 0);
+  assert.equal(`boopmark-capture:${draftId}` in ui.session.values, false, 'the stale copy is deleted');
 });

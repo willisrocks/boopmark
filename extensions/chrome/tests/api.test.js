@@ -266,3 +266,42 @@ test('capturePage rejects an invalid bookmark id or empty body before fetch', as
   });
   assert.equal(calls, 0);
 });
+
+test('capturePage rejects any 2xx that is not the documented 202 outcome', async () => {
+  const pageUrl = 'https://example.com/article';
+  const body = new Uint8Array([0x1f, 0x8b, 0x08, 0x00]);
+  const empty = new Response(null, { status: 204 });
+  for (const reply of [response(200, { status: 'indexed' }), response(202, { status: 'stored' }), empty]) {
+    const client = new ApiClient({
+      server: 'https://boopmark.com', apiKey: 'key', fetchImpl: async () => reply,
+    });
+    await assert.rejects(client.capturePage(CAPTURE_ID, { pageUrl, body }), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.kind, 'server');
+      return true;
+    });
+  }
+});
+
+test('capturePage bounds the upload with a timeout signal', async () => {
+  let request;
+  const client = new ApiClient({
+    server: 'https://boopmark.com', apiKey: 'key',
+    fetchImpl: async (url, init) => {
+      request = { url, init };
+      return response(202, { status: 'indexed' });
+    },
+  });
+  await client.capturePage(CAPTURE_ID, { pageUrl: 'https://example.com/a', body: new Uint8Array([1]) });
+  assert.ok(request.init.signal instanceof AbortSignal);
+  const supplied = new AbortController();
+  const second = new ApiClient({
+    server: 'https://boopmark.com', apiKey: 'key',
+    fetchImpl: async (url, init) => {
+      request = { url, init };
+      return response(202, { status: 'indexed' });
+    },
+  });
+  await second.capturePage(CAPTURE_ID, { pageUrl: 'https://example.com/a', body: new Uint8Array([1]), signal: supplied.signal });
+  assert.equal(request.init.signal, supplied.signal);
+});

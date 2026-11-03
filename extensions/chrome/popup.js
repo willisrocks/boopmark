@@ -87,14 +87,17 @@ function render() {
   const locked = saving || Boolean(operation && ['pending', 'unknown', 'success'].includes(operation.state));
   for (const field of fields) $(field).disabled = locked;
   const existing = state.existing;
+  const uploading = Boolean(existing && existing.capture?.state === 'capturing');
   const canCaptureExisting = Boolean(connected && existing?.status === 'found' && existing.bookmarkId);
   $('existing').hidden = setup || !canCaptureExisting;
-  $('capture-button').disabled = !canCaptureExisting || capturing || locked;
-  $('capture-button').textContent = capturing ? 'Capturing…' : 'Capture text';
+  $('capture-button').disabled = !canCaptureExisting || capturing || uploading || locked;
+  $('capture-button').textContent = capturing || uploading ? 'Capturing…' : 'Capture text';
   $('existing-status').classList.remove('error');
-  $('existing-status').textContent = existing?.capture?.text
-    ? sentence(existing.capture.text)
-    : 'Already saved in Boopmark. Capture the page text so it is searchable.';
+  $('existing-status').textContent = uploading
+    ? 'Capturing the page text…'
+    : existing?.capture?.text
+      ? sentence(existing.capture.text)
+      : 'Already saved in Boopmark. Capture the page text so it is searchable.';
   $('save-button').textContent = operation?.state === 'pending' || saving ? 'Saving…' : 'Add Bookmark';
   $('cancel-button').textContent = operation ? 'Close' : 'Cancel';
   $('close-button').setAttribute('aria-label', operation ? 'Close bookmark popup' : 'Cancel and discard bookmark');
@@ -183,7 +186,7 @@ $('autofill-button').addEventListener('click', async () => {
   catch (error) { displayError('save-status', error); }
 });
 $('capture-button').addEventListener('click', async () => {
-  if (capturing) return;
+  if (capturing || $('capture-button').disabled) return;
   const draftId = state.draft?.id;
   let failure;
   capturing = true;

@@ -16,8 +16,9 @@
   // uncompressed page are both refused above this size, never truncated.
   var PAGE_CAPTURE_MAX_BYTES = 5242880;
   // A capture is copied into chrome.storage.session only while its base64 form
-  // fits this budget; the in-memory copy is the one that always exists.
-  var PAGE_CAPTURE_STORAGE_MAX_BASE64 = 4 * 1024 * 1024;
+  // fits this budget (storage.session holds 10 MiB, shared with drafts, so at
+  // most one capture copy is kept at a time).
+  var PAGE_CAPTURE_STORAGE_MAX_BASE64 = 2 * 1024 * 1024;
   // Query parameters that never change which page is served.  `ref` and
   // `source` are deliberately kept: they change what some sites render.
   var TRACKING_PARAM_NAMES = [

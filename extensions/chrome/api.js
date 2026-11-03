@@ -9,6 +9,15 @@
 
   if (!Core) throw new Error("BoopmarkCore is required by BoopmarkApi");
   var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var CAPTURE_TIMEOUT_MS = 20000;
+
+  // A hung upload must not keep the extension waiting forever; the save it
+  // annotates is already confirmed, so a timeout only changes the note.
+  function captureSignal(supplied) {
+    if (supplied) return supplied;
+    return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+      ? AbortSignal.timeout(CAPTURE_TIMEOUT_MS) : undefined;
+  }
 
   class ApiError extends Error {
     constructor(kind, message, status) {
@@ -127,7 +136,9 @@
         var message = requestOptions.operation === "save"
           ? "Save could not be confirmed. Check Boopmark before retrying."
           : "Could not reach Boopmark.";
-        if (error && error.name === "AbortError" && requestOptions.operation !== "save") {
+        if (error && error.name === "AbortError" && requestOptions.operation === "capture") {
+          message = "Page capture timed out.";
+        } else if (error && error.name === "AbortError" && requestOptions.operation !== "save") {
           message = "Metadata request was cancelled.";
         }
         throw new ApiError(kind, message, 0);
@@ -260,11 +271,17 @@
           "X-Page-Url": String(options.pageUrl).trim()
         },
         withMeta: true,
-        signal: options.signal
+        signal: captureSignal(options.signal)
       });
       var status = result.status;
-      var payload = result.data && typeof result.data === "object" ? result.data.status : "";
-      return { status: status, outcome: payload === "queued" ? "queued" : "indexed" };
+      var payload = result.data && typeof result.data === "object" && typeof result.data.status === "string"
+        ? result.data.status : "";
+      // Only a 202 with one of the two documented outcomes proves that the
+      // server accepted the page; anything else is reported as not captured.
+      if (status !== 202 || (payload !== "indexed" && payload !== "queued")) {
+        throw new ApiError("server", "Boopmark returned an invalid capture response.", status);
+      }
+      return { status: status, outcome: payload };
     }
   }
 

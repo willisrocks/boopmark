@@ -139,7 +139,7 @@ test('page identity matches the server rules for the capture URL check', () => {
 
 test('page capture is limited to web pages and the server byte cap', () => {
   assert.equal(Core.PAGE_CAPTURE_MAX_BYTES, 5242880);
-  assert.equal(Core.PAGE_CAPTURE_STORAGE_MAX_BASE64, 4 * 1024 * 1024);
+  assert.equal(Core.PAGE_CAPTURE_STORAGE_MAX_BASE64, 2 * 1024 * 1024);
   assert.equal(Core.capturableURL('https://example.com/article'), true);
   assert.equal(Core.capturableURL('http://localhost:4000/article'), true);
   assert.equal(Core.capturableURL('chrome://extensions'), false);

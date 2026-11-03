@@ -324,25 +324,69 @@ function startCapture(settings, draft) {
   return record;
 }
 
-async function captureInto(record, draft) {
-  const key = CAPTURE_PREFIX + draft.id;
-  // A session copy survives an MV3 worker eviction between popup messages.
+// storage.session is shared with drafts (10 MiB), so at most one captured page
+// copy is kept: a popup closed without Cancel must not fill the quota.
+async function pruneCaptureCopies(keepKey) {
   try {
-    const stored = (await read(sessionArea(), key))[key];
-    if (stored && typeof stored.body === "string" && typeof stored.url === "string"
-        && Core.samePage(stored.url, record.url)) {
-      try {
-        const bytes = fromBase64(stored.body);
-        if (bytes.length && bytes.length <= Core.PAGE_CAPTURE_MAX_BYTES) {
-          record.pageUrl = stored.url;
-          record.body = bytes;
-          record.status = "ready";
-          return record;
-        }
-      } catch { /* A damaged copy is replaced by a fresh capture. */ }
-      await remove(sessionArea(), key).catch(() => {});
-    }
+    const keys = Object.keys(await read(sessionArea(), null))
+      .filter(name => name.startsWith(CAPTURE_PREFIX) && name !== keepKey);
+    if (keys.length) await remove(sessionArea(), keys);
   } catch { /* Session storage is best effort. */ }
+}
+
+async function writeCaptureCopy(key, value) {
+  await pruneCaptureCopies(key);
+  try { await write(sessionArea(), { [key]: value }); } catch { /* The in-memory copy is enough. */ }
+}
+
+// The best-effort session copy, for a worker evicted between popup messages.
+async function storedCapture(draft) {
+  const key = CAPTURE_PREFIX + draft.id;
+  let stored;
+  try { stored = (await read(sessionArea(), key))[key]; } catch { return null; }
+  if (!stored || typeof stored.body !== "string" || typeof stored.url !== "string") return null;
+  if (!Core.samePage(stored.url, draft.originalUrl || draft.url)) {
+    await remove(sessionArea(), key).catch(() => {});
+    return null;
+  }
+  try {
+    const bytes = fromBase64(stored.body);
+    if (!bytes.length || bytes.length > Core.PAGE_CAPTURE_MAX_BYTES) {
+      await remove(sessionArea(), key).catch(() => {});
+      return null;
+    }
+    return { pageUrl: stored.url, body: bytes };
+  } catch {
+    await remove(sessionArea(), key).catch(() => {});
+    return null;
+  }
+}
+
+async function restoreCapture(draft) {
+  if (!draft) return null;
+  const restored = await storedCapture(draft);
+  if (!restored) return null;
+  const record = {
+    url: draft.originalUrl || draft.url,
+    pageUrl: restored.pageUrl,
+    status: "ready",
+    reason: "",
+    message: "",
+    body: restored.body,
+    promise: null,
+  };
+  captures.set(draft.id, record);
+  return record;
+}
+
+async function captureInto(record, draft) {
+  const restored = await storedCapture(draft);
+  if (restored) {
+    record.pageUrl = restored.pageUrl;
+    record.body = restored.body;
+    record.status = "ready";
+    return record;
+  }
 
   let results;
   try {
@@ -394,14 +438,16 @@ async function captureInto(record, draft) {
   try {
     const encoded = toBase64(compressed);
     if (encoded.length <= Core.PAGE_CAPTURE_STORAGE_MAX_BASE64) {
-      await write(sessionArea(), { [key]: { url: record.pageUrl, body: encoded, createdAt: Date.now() } });
+      await writeCaptureCopy(CAPTURE_PREFIX + draft.id, { url: record.pageUrl, body: encoded, createdAt: Date.now() });
+    } else {
+      await pruneCaptureCopies(null);
     }
   } catch { /* The in-memory copy is enough; eviction loses only the capture. */ }
   return record;
 }
 
 async function uploadCapture(settings, draft, bookmarkId) {
-  const record = captureFor(draft);
+  const record = captureFor(draft) || await restoreCapture(draft);
   if (!record) return { state: "missing", text: "article text not captured" };
   if (record.status === "capturing" && record.promise) {
     try { await record.promise; } catch { /* The record carries its own failure. */ }
@@ -583,16 +629,16 @@ function executeSave(settings, marker, fields) {
     // failed capture must never make a created bookmark look unconfirmed.
     const draft = await getDraft(marker.draftId);
     const reviewedDraft = draft || { id: marker.draftId, url: fields.url, originalUrl: fields.url, tabId: -1 };
-    const record = !failure ? captureFor(reviewedDraft) : null;
+    const record = !failure ? (captureFor(reviewedDraft) || await restoreCapture(reviewedDraft)) : null;
     let capture = !record
       ? { state: "missing", text: "article text not captured" }
       : record.status === "ready" || record.status === "capturing"
         ? { state: "capturing", text: "" }
         : { state: "unavailable", text: captureText(record.reason) };
-    await serialize(async () => {
+    const recorded = await serialize(async () => {
       const currentSettings = await getSettings();
       const currentMarker = await getOperation();
-      if (!sameConnection(currentSettings, marker) || currentMarker?.id !== marker.id) return;
+      if (!sameConnection(currentSettings, marker) || currentMarker?.id !== marker.id) return false;
       if (failure?.kind === "auth") { currentSettings.authError = true; await putSettings(currentSettings); }
       const outcome = !failure ? { state: "success", bookmarkId: bookmark.id, capture }
         : { state: failure.kind === "unknown" ? "unknown" : "error", error: failure.message };
@@ -603,7 +649,14 @@ function executeSave(settings, marker, fields) {
         if (draft) { draft.status = "ready"; draft.revision += 1; await putDraft(draft); }
       }
       publish();
+      return true;
     });
+    // The operation or the connection changed while the create was in flight:
+    // the stale API key must not be used for an upload, and the body is dropped.
+    if (!recorded) {
+      await clearCapture(marker.draftId);
+      return;
+    }
     if (failure) return;
     if (capture.state !== "capturing") {
       await clearCapture(marker.draftId);
@@ -703,12 +756,29 @@ async function captureExisting(message) {
   if (!Core.validBookmarkURL(draft.url)) throw new Api.ApiError("validation", "Open a web page to add a bookmark.");
   const existing = existingFor(settings, draft);
   if (!existing || !existing.bookmarkId) throw new Api.ApiError("state", "Save this page before capturing its text.");
-  const record = captureFor(draft) || startCapture(settings, draft);
+  if (existing.capture?.state === "capturing") return state(settings, draft, await getOperation(), { existing });
+  const record = captureFor(draft) || await restoreCapture(draft) || startCapture(settings, draft);
   if (!record) throw new Api.ApiError("state", "This page cannot be captured.");
-  const outcome = await uploadCapture(settings, draft, existing.bookmarkId);
-  if (outcome.state === "auth") { settings.authError = true; await putSettings(settings); }
-  const entry = existingBookmarks.get(lookupKey(settings, draft.url));
-  if (entry) entry.capture = outcome;
+  const key = lookupKey(settings, draft.url);
+  const bookmarkId = existing.bookmarkId;
+  const token = { server: settings.server, connectionEpoch: settings.epoch };
+  const entry = existingBookmarks.get(key);
+  if (entry) entry.capture = { state: "capturing", text: "" };
+  // The upload is detached, exactly like the save path: a slow PUT must not
+  // hold the state queue that serves UPDATE/CANCEL/SAVE/ACK.
+  (async () => {
+    let outcome;
+    try { outcome = await uploadCapture(settings, draft, bookmarkId); }
+    catch { outcome = { state: "failed", text: "article text not captured" }; }
+    await serialize(async () => {
+      const currentSettings = await getSettings();
+      const live = existingBookmarks.get(key);
+      if (!sameConnection(currentSettings, token) || live !== entry) return;
+      if (outcome.state === "auth") { currentSettings.authError = true; await putSettings(currentSettings); }
+      live.capture = { state: outcome.state, text: outcome.text };
+      publish();
+    });
+  })().catch(() => {});
   publish();
   return state(settings, draft, await getOperation(), { existing: existingFor(settings, draft) });
 }

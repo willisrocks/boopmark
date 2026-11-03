@@ -364,3 +364,18 @@ test('the popup stays open while the page text is still uploading', async () => 
   assert.equal(ui.elements['save-status'].textContent, 'Saved to Boopmark · article text captured');
   assert.equal(ui.timers.filter(Boolean).length, 1);
 });
+
+test('an in-flight capture of an existing bookmark is announced and not resubmitted', async () => {
+  const ui = await setup();
+  ui.override(() => ({
+    ...structuredClone(ui.data),
+    existing: { status: 'found', bookmarkId: 'bookmark-1', capture: { state: 'capturing', text: '' } },
+  }));
+  ui.change();
+  await flush();
+  assert.equal(ui.elements['existing-status'].textContent, 'Capturing the page text…');
+  assert.equal(ui.elements['capture-button'].disabled, true);
+  await ui.fire('capture-button', 'click');
+  await flush();
+  assert.equal(ui.messages.includes('CAPTURE_EXISTING'), false);
+});
