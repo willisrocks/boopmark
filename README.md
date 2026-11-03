@@ -161,6 +161,7 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `PAGE_SCRAPER_API_KEY` | — | Firecrawl key (operator account). `PAGE_SCRAPER=firecrawl` without it logs a warning and stays disabled |
 | `PAGE_SCRAPER_TIMEOUT_SECONDS` | `30` | One scrape's timeout, retries excluded. Capped at `45` with a warning at startup: a longer scrape cannot finish inside an ingest job's budget (which must also cover the extraction), and a timed-out job still pays for the page |
 | `PAGE_SCRAPER_MONTHLY_BUDGET_PAGES` | `0` | Pages per calendar month; `0` is no cap. Past it, no scrape is attempted until the next month |
+| `PAGE_SCRAPER_CONCURRENCY` | `2` | Scrapes in flight, at most `10`. The vendor's plan renders only a few pages at once and answers a burst above its limit with `429`, so a job waits for a free slot and keeps its direct result if none comes in time |
 | `ENABLE_E2E_AUTH` | `0` | Set to `1` for E2E test auth bypass |
 
 ## Deployment Guides

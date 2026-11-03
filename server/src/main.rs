@@ -269,15 +269,6 @@ async fn main() {
         let ingest_db = Arc::new(PostgresPool::new(ingest_pool));
         let scraper_usage: Arc<dyn ScraperUsageRepository> = ingest_db.clone();
         let page_scraper = adapters::scraper::page_scraper(&config);
-        tracing::info!(
-            backend = if page_scraper.enabled() {
-                "firecrawl"
-            } else {
-                "disabled"
-            },
-            monthly_budget_pages = config.page_scraper_monthly_budget_pages,
-            "page scraper"
-        );
         let wake = Arc::new(tokio::sync::Notify::new());
         adapters::postgres::ingest_listener::spawn_ingest_listener(
             config.database_url.clone(),
@@ -285,14 +276,17 @@ async fn main() {
         );
         app::ingest::IngestWorker::new(
             ingest_db,
-            Arc::new(FallbackFetcher::new(
-                HtmlArticleFetcher::new(config.article_ingest_concurrency),
-                page_scraper,
-                config.article_ingest_concurrency,
-                scraper_usage,
-                config.page_scraper_monthly_budget_pages,
-                std::time::Duration::from_secs(config.page_scraper_timeout_seconds),
-            )),
+            Arc::new(
+                FallbackFetcher::new(
+                    HtmlArticleFetcher::new(config.article_ingest_concurrency),
+                    page_scraper,
+                    config.article_ingest_concurrency,
+                    scraper_usage,
+                    config.page_scraper_monthly_budget_pages,
+                    std::time::Duration::from_secs(config.page_scraper_timeout_seconds),
+                )
+                .with_scrape_concurrency(config.page_scraper_concurrency),
+            ),
             config.article_ingest_concurrency,
         )
         .notify_on_stored(embed_wake.clone())

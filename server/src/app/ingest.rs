@@ -1,3 +1,4 @@
+use crate::adapters::article::fallback::log_host;
 use crate::domain::error::DomainError;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher};
 use crate::domain::ports::search_repo::SearchRepository;
@@ -41,6 +42,16 @@ fn failure_for(job: &IngestJob, err: &ArticleFetchError, now: DateTime<Utc>) -> 
         status,
         error,
         retry_at,
+    }
+}
+
+/// The class `failure_for` decided by, as a log field: the queue's health is
+/// read from these lines, so they must be one grep away.
+fn error_class(err: &ArticleFetchError) -> &'static str {
+    match err {
+        ArticleFetchError::Transient(_) => "transient",
+        ArticleFetchError::Permanent(_) => "permanent",
+        ArticleFetchError::Skipped(_) => "skipped",
     }
 }
 
@@ -138,10 +149,15 @@ where
             }
             Err(err) => {
                 let failure = failure_for(&job, &err, Utc::now());
-                tracing::debug!(
+                // Info, with the host and the error class only: a failing
+                // fetch that production cannot see is a queue that stalls
+                // quietly for two days.
+                tracing::info!(
                     bookmark_id = %job.bookmark_id,
+                    host = %log_host(&job.url),
                     attempts = job.attempts,
                     status = failure.status.as_str(),
+                    error_class = error_class(&err),
                     error = %failure.error,
                     "article fetch failed"
                 );

@@ -6,6 +6,7 @@
 //! PAGE_SCRAPER_API_KEY=fc-...                      (firecrawl only; operator key)
 //! PAGE_SCRAPER_TIMEOUT_SECONDS=30                  (one scrape, retries excluded)
 //! PAGE_SCRAPER_MONTHLY_BUDGET_PAGES=0              (0 = no cap)
+//! PAGE_SCRAPER_CONCURRENCY=2                       (1..=10 in flight)
 //! ```
 //!
 //! The companion eval chose Firecrawl and dropped Obscura

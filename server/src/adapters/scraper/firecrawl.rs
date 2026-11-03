@@ -7,6 +7,11 @@
 //! answer for text nobody reads, and the raw document is what carries the
 //! page's own state. The response is read with a cap, and the page itself is
 //! checked against the same ceiling as the direct fetch before it is parsed.
+//!
+//! A 429 is the vendor's queue, not this page: it is waited out once inside
+//! the same job (`Retry-After`, else 2 s) and only then handed to the ingest
+//! schedule. The fallback decorator paces the calls themselves by
+//! `PAGE_SCRAPER_CONCURRENCY`, so the plan's own limit is rarely reached.
 
 use crate::adapters::article::readability::MAX_HTML_BYTES;
 use crate::adapters::net::{CappedReadError, read_capped};
@@ -23,6 +28,13 @@ const DEFAULT_BASE_URL: &str = "https://api.firecrawl.dev";
 /// The JSON envelope carries the HTML as an escaped string, so the body can be
 /// larger than the page. Read with headroom, then check the page itself.
 const MAX_RESPONSE_BYTES: usize = MAX_HTML_BYTES + 2 * 1024 * 1024;
+/// How long a 429 waits before the one retry, when the vendor sends no usable
+/// `Retry-After`.
+const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// The longest wait one scrape may spend stalled: past this the ingest
+/// schedule retries, rather than a job's slot sitting idle on the vendor's
+/// queue.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 pub struct FirecrawlScraper {
     client: reqwest::Client,
@@ -67,6 +79,16 @@ struct ScrapeMetadata {
     is_locked: Option<bool>,
 }
 
+/// One request's answer: the page, or the vendor asking to be asked again in
+/// a moment.
+enum Attempt {
+    Page(Result<ScrapedPage, ScrapeError>),
+    /// HTTP 429, with the wait the vendor named when it named a usable one.
+    TooManyRequests {
+        retry_after: Option<Duration>,
+    },
+}
+
 impl FirecrawlScraper {
     pub fn new(api_key: String, timeout: Duration) -> Self {
         Self::with_base_url(api_key, DEFAULT_BASE_URL.to_string(), timeout)
@@ -87,7 +109,37 @@ impl FirecrawlScraper {
     /// One scrape: the API's own status decides whether a page was billed,
     /// then the payload's `success`, the target page's status and the HTML
     /// itself decide what came back.
+    ///
+    /// A 429 is the vendor's queue talking, not this page's verdict, so it is
+    /// waited out once inside the same job: unbilled either way, where the
+    /// ingest schedule would only retry into the same queue.
     async fn scrape_page(&self, url: &str) -> Result<ScrapedPage, ScrapeError> {
+        match self.scrape_attempt(url).await {
+            Attempt::Page(result) => result,
+            // No usable wait, or one longer than a scrape may stall for.
+            Attempt::TooManyRequests { retry_after: None } => Err(rate_limited()),
+            Attempt::TooManyRequests {
+                retry_after: Some(delay),
+            } => {
+                tracing::info!(
+                    vendor = VENDOR,
+                    retry_after_seconds = delay.as_secs(),
+                    "the vendor rate-limited the scraper: retrying once inside the job"
+                );
+                tokio::time::sleep(delay).await;
+                match self.scrape_attempt(url).await {
+                    Attempt::Page(result) => result,
+                    // Still throttled: the ingest schedule is the place to
+                    // wait now, not a slot held for another backoff.
+                    Attempt::TooManyRequests { .. } => Err(rate_limited()),
+                }
+            }
+        }
+    }
+
+    /// One request. A 429 comes back as its own case, so `scrape_page` can
+    /// retry it; every other answer is this attempt's result.
+    async fn scrape_attempt(&self, url: &str) -> Attempt {
         let body = json!({
             "url": url,
             "formats": ["rawHtml"],
@@ -99,30 +151,42 @@ impl FirecrawlScraper {
             .client
             .post(format!("{}{SCRAPE_PATH}", self.base_url))
             .bearer_auth(&self.api_key);
-        let response = request.json(&body).send().await.map_err(|error| {
+        let response = match request.json(&body).send().await {
+            Ok(response) => response,
             // Nothing came back: no 2xx, so no page was billed.
-            match transport_error(VENDOR, &error) {
-                DomainError::InvalidInput(message) => ScrapeError::Final {
-                    message,
-                    billed: false,
-                },
-                DomainError::Internal(message) => ScrapeError::Retryable {
-                    message,
-                    billed: false,
-                },
-                other => ScrapeError::Final {
-                    message: other.to_string(),
-                    billed: false,
-                },
+            Err(error) => {
+                return Attempt::Page(Err(match transport_error(VENDOR, &error) {
+                    DomainError::InvalidInput(message) => ScrapeError::Final {
+                        message,
+                        billed: false,
+                    },
+                    DomainError::Internal(message) => ScrapeError::Retryable {
+                        message,
+                        billed: false,
+                    },
+                    other => ScrapeError::Final {
+                        message: other.to_string(),
+                        billed: false,
+                    },
+                }));
             }
-        })?;
+        };
 
         let status = response.status();
         if status == StatusCode::PAYMENT_REQUIRED {
-            return Err(ScrapeError::OutOfCredits);
+            return Attempt::Page(Err(ScrapeError::OutOfCredits));
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let asked = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok());
+            return Attempt::TooManyRequests {
+                retry_after: retry_after_delay(asked),
+            };
         }
         if !status.is_success() {
-            return Err(
+            return Attempt::Page(Err(
                 match http_status_error(VENDOR, status, KeyOwner::Operator) {
                     DomainError::Internal(message) => ScrapeError::Retryable {
                         message,
@@ -133,29 +197,33 @@ impl FirecrawlScraper {
                         billed: false,
                     },
                 },
-            );
+            ));
         }
 
         // From here on the request was accepted, so the page is paid for even
         // when this adapter cannot use it.
-        let bytes =
-            read_capped(response, MAX_RESPONSE_BYTES)
-                .await
-                .map_err(|error| match error {
-                    CappedReadError::TooBig => ScrapeError::Final {
-                        message: format!("{VENDOR} response exceeded {MAX_RESPONSE_BYTES} bytes"),
-                        billed: true,
-                    },
-                    CappedReadError::Read(_) => ScrapeError::Retryable {
-                        message: format!("{VENDOR} response read failed"),
-                        billed: true,
-                    },
-                })?;
-        let payload: Value = serde_json::from_slice(&bytes).map_err(|_| ScrapeError::Final {
-            message: format!("{VENDOR} returned a malformed response"),
-            billed: true,
-        })?;
-        Self::interpret(payload, url)
+        let bytes = match read_capped(response, MAX_RESPONSE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(CappedReadError::TooBig) => {
+                return Attempt::Page(Err(ScrapeError::Final {
+                    message: format!("{VENDOR} response exceeded {MAX_RESPONSE_BYTES} bytes"),
+                    billed: true,
+                }));
+            }
+            Err(CappedReadError::Read(_)) => {
+                return Attempt::Page(Err(ScrapeError::Retryable {
+                    message: format!("{VENDOR} response read failed"),
+                    billed: true,
+                }));
+            }
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(payload) => Attempt::Page(Self::interpret(payload, url)),
+            Err(_) => Attempt::Page(Err(ScrapeError::Final {
+                message: format!("{VENDOR} returned a malformed response"),
+                billed: true,
+            })),
+        }
     }
 
     /// The page from a 2xx payload. Every failure here is `billed: true`.
@@ -219,6 +287,29 @@ impl PageScraper for FirecrawlScraper {
     }
 }
 
+/// The wait a 429 asked for: `Retry-After` in whole seconds when the vendor
+/// sent a usable one, [`DEFAULT_RETRY_DELAY`] when it sent none. `None` means
+/// the vendor asked for longer than one job may wait, so the ingest schedule
+/// retries instead of a slot stalling here.
+fn retry_after_delay(asked: Option<&str>) -> Option<Duration> {
+    let requested = asked
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(DEFAULT_RETRY_DELAY, Duration::from_secs);
+    (requested <= MAX_RETRY_DELAY).then_some(requested)
+}
+
+/// A 429 this job could not wait out. Nothing came back, so no page was
+/// billed and the reservation is refunded like any other unbilled failure.
+fn rate_limited() -> ScrapeError {
+    ScrapeError::Retryable {
+        message: format!(
+            "{VENDOR} API returned HTTP {}",
+            StatusCode::TOO_MANY_REQUESTS
+        ),
+        billed: false,
+    }
+}
+
 /// The request body, so a test asserts it without restating it.
 #[cfg(test)]
 pub(crate) fn expected_request_body(url: &str) -> Value {
@@ -231,6 +322,7 @@ mod tests {
     use crate::adapters::vendor_http::test_support::{SECRET_BODY, closed_port, serve};
     use axum::extract::Json as AxumJson;
     use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
     use axum::routing::post;
     use axum::{Router, http::StatusCode};
     use std::sync::{Arc, Mutex};
@@ -267,6 +359,58 @@ mod tests {
                             request,
                         ));
                         (status, AxumJson(answer))
+                    }
+                },
+            ),
+        );
+        (router, seen)
+    }
+
+    /// One scripted answer of the fake vendor: its status, the `Retry-After`
+    /// it carries, and its body.
+    #[derive(Clone)]
+    struct Scripted {
+        status: StatusCode,
+        retry_after: Option<&'static str>,
+        body: Value,
+    }
+
+    /// A fake vendor that answers each request in turn; the last answer
+    /// repeats, so a test can count the requests it took.
+    fn scripted(answers: Vec<Scripted>) -> (Router, Recorder) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        let queue = Arc::new(Mutex::new(std::collections::VecDeque::from(answers)));
+        let router = Router::new().route(
+            SCRAPE_PATH,
+            post(
+                move |headers: HeaderMap, AxumJson(request): AxumJson<Value>| {
+                    let recorder = recorder.clone();
+                    let queue = queue.clone();
+                    async move {
+                        recorder.lock().unwrap().push((
+                            headers
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string),
+                            request,
+                        ));
+                        let answer = {
+                            let mut queue = queue.lock().unwrap();
+                            if queue.len() > 1 {
+                                queue.pop_front().unwrap()
+                            } else {
+                                queue.front().cloned().expect("a scripted answer")
+                            }
+                        };
+                        let mut response = (answer.status, AxumJson(answer.body)).into_response();
+                        if let Some(value) = answer.retry_after {
+                            response.headers_mut().insert(
+                                axum::http::header::RETRY_AFTER,
+                                axum::http::HeaderValue::from_str(value).unwrap(),
+                            );
+                        }
+                        response
                     }
                 },
             ),
@@ -373,9 +517,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rate_limits_and_vendor_failures_are_retryable() {
+    async fn vendor_failures_are_retryable() {
         for code in [
-            StatusCode::TOO_MANY_REQUESTS,
             StatusCode::INTERNAL_SERVER_ERROR,
             StatusCode::BAD_GATEWAY,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -390,6 +533,94 @@ mod tests {
                 false,
             );
         }
+    }
+
+    /// A 429 is the vendor's queue, not this page's verdict: it is waited out
+    /// once inside the same job, and the page is still scraped.
+    #[tokio::test]
+    async fn a_rate_limit_is_retried_once_after_its_retry_after() {
+        let article = "<html><body><article><p>The full text</p></article></body></html>";
+        let (router, seen) = scripted(vec![
+            Scripted {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                retry_after: Some("0"),
+                body: json!({"success": false, "error": SECRET_BODY}),
+            },
+            Scripted {
+                status: StatusCode::OK,
+                retry_after: None,
+                body: page(article),
+            },
+        ]);
+        let base = serve(router).await;
+        let page = scraper(base, Duration::from_secs(5))
+            .scrape("https://medium.com/@writer/a-post")
+            .await
+            .unwrap();
+        assert_eq!(page.html, article);
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "the 429 was retried exactly once"
+        );
+    }
+
+    /// Still throttled after the retry: the ingest schedule takes over, and
+    /// nothing was billed.
+    #[tokio::test]
+    async fn a_repeated_rate_limit_is_retryable_and_unbilled() {
+        let limited = Scripted {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            retry_after: Some("0"),
+            body: json!({"success": false, "error": SECRET_BODY}),
+        };
+        let (router, seen) = scripted(vec![limited.clone(), limited]);
+        let base = serve(router).await;
+        assert_retryable(
+            scraper(base, Duration::from_secs(5))
+                .scrape("https://example.com/a")
+                .await,
+            "429",
+            false,
+        );
+        assert_eq!(seen.lock().unwrap().len(), 2, "one retry, not a loop");
+    }
+
+    /// A wait this job cannot afford is not spent here: no request goes out,
+    /// and the retry schedule takes over instead of a slot stalling.
+    #[tokio::test]
+    async fn a_long_retry_after_is_not_waited_out() {
+        let (router, seen) = scripted(vec![Scripted {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            retry_after: Some("60"),
+            body: json!({"success": false, "error": SECRET_BODY}),
+        }]);
+        let base = serve(router).await;
+        assert_retryable(
+            scraper(base, Duration::from_secs(5))
+                .scrape("https://example.com/a")
+                .await,
+            "429",
+            false,
+        );
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "a 429 the job cannot wait out is not retried here"
+        );
+    }
+
+    #[test]
+    fn retry_after_seconds_are_honoured_but_not_beyond_one_job() {
+        assert_eq!(retry_after_delay(Some("3")), Some(Duration::from_secs(3)));
+        assert_eq!(retry_after_delay(Some(" 0 ")), Some(Duration::ZERO));
+        assert_eq!(retry_after_delay(None), Some(DEFAULT_RETRY_DELAY));
+        // HTTP dates are not parsed: the default wait is used instead.
+        assert_eq!(
+            retry_after_delay(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+            Some(DEFAULT_RETRY_DELAY)
+        );
+        assert_eq!(retry_after_delay(Some("60")), None);
     }
 
     /// Out of credits is not a per-page failure: no scrape can work until the
