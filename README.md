@@ -163,6 +163,7 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `PAGE_SCRAPER_MONTHLY_BUDGET_PAGES` | `0` | Pages per calendar month; `0` is no cap. Past it, no scrape is attempted until the next month |
 | `PAGE_SCRAPER_CONCURRENCY` | `2` | Scrapes in flight, at most `10`. The vendor's plan renders only a few pages at once and answers a burst above its limit with `429`, so a job waits for a free slot and keeps its direct result if none comes in time |
 | `ENABLE_E2E_AUTH` | `0` | Set to `1` for E2E test auth bypass |
+| `RUST_LOG` | `info` | Log filter ([`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) syntax). Unset, the server logs at `info`, which includes the ingest and page-scraper failure lines |
 
 ## Deployment Guides
 
