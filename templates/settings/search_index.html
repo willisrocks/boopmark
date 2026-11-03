@@ -3,7 +3,7 @@
     <div class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-emerald-200" role="status" data-testid="search-index-message">{{ message }}</div>
     {% endif %}
     <p class="text-gray-200" data-testid="search-index-counts">
-        Indexed {{ fetched }} of {{ total }} articles{% if has_unfetched %} · {{ unfetched }} couldn't be fetched{% endif %}
+        Indexed {{ indexed }} of {{ total }} articles{% if let Some(sources) = sources %} · {{ sources }}{% endif %}{% if has_unfetched %} · {{ unfetched }} couldn't be fetched{% endif %}
     </p>
     {% if pending != "0" %}
     <p class="text-gray-400">{{ pending }} waiting to be fetched.</p>

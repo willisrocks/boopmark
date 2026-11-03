@@ -15,4 +15,5 @@ pub mod tag_library;
 #[allow(dead_code)]
 pub mod tag_normalize;
 pub mod transfer;
+pub mod url_match;
 pub mod user;

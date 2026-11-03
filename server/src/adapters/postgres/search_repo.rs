@@ -4,8 +4,8 @@ use crate::domain::chunking::MIN_CHUNKED_TEXT_CHARS;
 use crate::domain::error::DomainError;
 use crate::domain::ports::search_repo::SearchRepository;
 use crate::domain::search::{
-    IngestFailure, IngestJob, MAX_INGEST_ATTEMPTS, MAX_SEARCH_RESULTS, SearchHit, SearchQuery,
-    Snippet, websearch_constraints,
+    ContentSource, IngestFailure, IngestJob, MAX_INGEST_ATTEMPTS, MAX_SEARCH_RESULTS, SearchHit,
+    SearchQuery, Snippet, websearch_constraints,
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -409,11 +409,12 @@ impl SearchRepository for PostgresPool {
         job: &IngestJob,
         text: &str,
         content_hash: &str,
+        source: ContentSource,
     ) -> Result<bool, DomainError> {
         let result = sqlx::query(&format!(
             "{CLAIMED_BOOKMARK}
              UPDATE bookmark_contents c
-             SET status = 'fetched', error = NULL, claim_token = NULL,
+             SET status = 'fetched', source = $6, error = NULL, claim_token = NULL,
                  text = $4, text_chars = char_length($4), content_hash = $5,
                  -- New text needs new chunks; a refetch of the same text keeps them.
                  embedded_model = CASE WHEN c.content_hash IS DISTINCT FROM $5
@@ -429,6 +430,7 @@ impl SearchRepository for PostgresPool {
         .bind(job.claim_token)
         .bind(text)
         .bind(content_hash)
+        .bind(source.as_str())
         .execute(&self.pool)
         .await
         .map_err(|e| DomainError::Internal(e.to_string()))?;
@@ -578,7 +580,11 @@ pub(super) mod search_tests {
     }
 
     pub(crate) async fn store(repo: &PostgresPool, job: &IngestJob, text: &str) {
-        assert!(repo.store_article(job, text, "hash").await.unwrap());
+        assert!(
+            repo.store_article(job, text, "hash", ContentSource::Fetched)
+                .await
+                .unwrap()
+        );
     }
 
     async fn search(repo: &PostgresPool, user_id: Uuid, text: &str) -> Vec<SearchHit> {
@@ -859,7 +865,7 @@ pub(super) mod search_tests {
         );
         assert!(
             !repo
-                .store_article(&jobs[&garden.id], "stale", "h")
+                .store_article(&jobs[&garden.id], "stale", "h", ContentSource::Fetched)
                 .await
                 .unwrap()
         );
@@ -1125,8 +1131,17 @@ pub(super) mod search_tests {
         let fresh = &fresh[&single.id];
         assert_ne!(fresh.claim_token, stale.claim_token);
         assert_eq!(fresh.attempts, stale.attempts + 1);
-        assert!(!repo.store_article(stale, "late", "h").await.unwrap());
-        assert!(repo.store_article(fresh, "on time", "h").await.unwrap());
+        assert!(
+            !repo
+                .store_article(stale, "late", "h", ContentSource::Fetched)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.store_article(fresh, "on time", "h", ContentSource::Fetched)
+                .await
+                .unwrap()
+        );
 
         // A row claimed MAX_INGEST_ATTEMPTS times is given up.
         let worn = big_import[1];

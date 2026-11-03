@@ -1,7 +1,9 @@
 use crate::domain::error::DomainError;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher};
 use crate::domain::ports::search_repo::SearchRepository;
-use crate::domain::search::{IngestFailure, IngestJob, IngestStatus, retry_delay};
+use crate::domain::search::{
+    ContentSource, IngestFailure, IngestJob, IngestStatus, retry_delay,
+};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -132,7 +134,9 @@ where
         let stored = match fetched {
             Ok(article) => {
                 let hash = format!("{:x}", Sha256::digest(article.text.as_bytes()));
-                self.repo.store_article(&job, &article.text, &hash).await
+                self.repo
+                    .store_article(&job, &article.text, &hash, ContentSource::Fetched)
+                    .await
             }
             Err(err) => {
                 let failure = failure_for(&job, &err, Utc::now());
@@ -204,6 +208,7 @@ mod tests {
             job: &IngestJob,
             text: &str,
             content_hash: &str,
+            _source: ContentSource,
         ) -> Result<bool, DomainError> {
             self.stored.lock().unwrap().push((
                 job.clone(),
