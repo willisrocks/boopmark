@@ -9,6 +9,24 @@
 
   if (!Core) throw new Error("BoopmarkCore is required by BoopmarkApi");
   var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  var CAPTURE_TIMEOUT_BASE_MS = 15000;
+  var CAPTURE_TIMEOUT_PER_MIB_MS = 10000;
+  var CAPTURE_TIMEOUT_MAX_MS = 90000;
+
+  // A hung upload must not keep the extension waiting forever, but a 5 MiB
+  // body on a slow uplink needs longer than a fixed budget: 15 s plus 10 s per
+  // MiB of the gzip body, capped at 90 s. A timeout only changes the note: the
+  // save it annotates is already confirmed.
+  function captureSignal(supplied, bodyBytes) {
+    if (supplied) return supplied;
+    if (typeof AbortSignal === "undefined" || typeof AbortSignal.timeout !== "function") return undefined;
+    var megabytes = (Number(bodyBytes) || 0) / (1024 * 1024);
+    var timeout = Math.min(
+      CAPTURE_TIMEOUT_MAX_MS,
+      Math.ceil(CAPTURE_TIMEOUT_BASE_MS + megabytes * CAPTURE_TIMEOUT_PER_MIB_MS)
+    );
+    return AbortSignal.timeout(timeout);
+  }
 
   class ApiError extends Error {
     constructor(kind, message, status) {
@@ -106,6 +124,15 @@
         headers["Content-Type"] = "application/json";
         init.body = JSON.stringify(body);
       }
+      // A raw body (the captured page) keeps caller-chosen headers: the page
+      // contract is text/html + gzip, not JSON, and is never stringified.
+      if (requestOptions.rawBody !== undefined && requestOptions.rawBody !== null) {
+        init.body = requestOptions.rawBody;
+        var rawHeaders = requestOptions.rawHeaders || {};
+        for (var name in rawHeaders) {
+          if (Object.prototype.hasOwnProperty.call(rawHeaders, name)) headers[name] = String(rawHeaders[name]);
+        }
+      }
       if (requestOptions.signal) init.signal = requestOptions.signal;
 
       var response;
@@ -118,7 +145,9 @@
         var message = requestOptions.operation === "save"
           ? "Save could not be confirmed. Check Boopmark before retrying."
           : "Could not reach Boopmark.";
-        if (error && error.name === "AbortError" && requestOptions.operation !== "save") {
+        if (error && error.name === "AbortError" && requestOptions.operation === "capture") {
+          message = "Page capture timed out.";
+        } else if (error && error.name === "AbortError" && requestOptions.operation !== "save") {
           message = "Metadata request was cancelled.";
         }
         throw new ApiError(kind, message, 0);
@@ -205,6 +234,64 @@
     }
 
     async createBookmark(fields, options) { return this.create(fields, options); }
+
+    /**
+     * Find a bookmark the user already saved for this URL.  The server
+     * normalizes both sides, so a trailing slash or tracking parameters do
+     * not hide an existing bookmark.  Returns null when nothing matches.
+     */
+    async lookupByURL(value) {
+      var url = canonicalURL(value);
+      var body = await this.request("GET", "/api/v1/bookmarks?url=" + encodeURIComponent(url) + "&limit=1",
+        null, { operation: "lookup" });
+      if (!Array.isArray(body)) throw new ApiError("server", "Boopmark returned an invalid response.");
+      var match = body.find(function (item) { return item && typeof item === "object" && item.id != null; });
+      if (!match) return null;
+      return {
+        id: String(match.id),
+        url: typeof match.url === "string" ? match.url : url,
+        title: typeof match.title === "string" ? match.title : ""
+      };
+    }
+
+    /**
+     * Upload the gzipped HTML of the page that was captured from the tab.
+     * Resolves with `{ status, outcome }` where outcome is `indexed` or
+     * `queued`; every rejection carries the HTTP status so the caller can
+     * annotate an already-successful save without failing it.
+     */
+    async capturePage(bookmarkId, options) {
+      options = options || {};
+      var id = bookmarkId == null ? "" : String(bookmarkId).trim();
+      if (!UUID_PATTERN.test(id)) throw new ApiError("validation", "The bookmark ID to capture into is invalid.");
+      if (typeof options.pageUrl !== "string" || !Core.validBookmarkURL(options.pageUrl)) {
+        throw new ApiError("validation", "Open a web page to capture its text.");
+      }
+      var body = options.body;
+      if (!body || typeof body.byteLength !== "number" || body.byteLength === 0) {
+        throw new ApiError("validation", "There is no captured page to send.");
+      }
+      var result = await this.request("PUT", "/api/v1/bookmarks/" + encodeURIComponent(id) + "/page", null, {
+        operation: "capture",
+        rawBody: body,
+        rawHeaders: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Encoding": "gzip",
+          "X-Page-Url": String(options.pageUrl).trim()
+        },
+        withMeta: true,
+        signal: captureSignal(options.signal, body.byteLength)
+      });
+      var status = result.status;
+      var payload = result.data && typeof result.data === "object" && typeof result.data.status === "string"
+        ? result.data.status : "";
+      // Only a 202 with one of the two documented outcomes proves that the
+      // server accepted the page; anything else is reported as not captured.
+      if (status !== 202 || (payload !== "indexed" && payload !== "queued")) {
+        throw new ApiError("server", "Boopmark returned an invalid capture response.", status);
+      }
+      return { status: status, outcome: payload };
+    }
   }
 
   return {

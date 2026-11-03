@@ -170,3 +170,162 @@ test('create rejects a supplied invalid idempotency key before fetch', async () 
   });
   assert.equal(calls, 0);
 });
+
+const CAPTURE_ID = '8a1f0f4e-51c5-4a3b-9d4e-6f7a8b9c0d1e';
+
+test('lookupByURL asks for one candidate and reports no match as null', async () => {
+  let request;
+  const pageUrl = 'https://example.com/article/?a=1&b=2#fragment';
+  const client = new ApiClient({
+    server: 'https://boopmark.com', apiKey: 'key',
+    fetchImpl: async (url, init) => {
+      request = { url, init };
+      return response(200, [{ id: 'bookmark-1', url: 'https://example.com/article?a=1&b=2', title: 'Saved' }]);
+    },
+  });
+  const found = await client.lookupByURL(pageUrl);
+  assert.equal(found.id, 'bookmark-1');
+  assert.equal(found.title, 'Saved');
+  const parsed = new URL(request.url);
+  assert.equal(parsed.pathname, '/api/v1/bookmarks');
+  assert.equal(parsed.searchParams.get('url'), pageUrl);
+  assert.equal(parsed.searchParams.get('limit'), '1');
+  assert.equal(request.init.method, 'GET');
+  assert.equal(request.init.headers.Authorization, 'Bearer key');
+
+  const empty = new ApiClient({
+    server: 'https://boopmark.com', apiKey: 'key', fetchImpl: async () => response(200, []),
+  });
+  assert.equal(await empty.lookupByURL(pageUrl), null);
+});
+
+test('capturePage PUTs the gzip body with the page contract headers', async () => {
+  let request;
+  const client = new ApiClient({
+    server: 'https://boopmark.com', apiKey: 'key',
+    fetchImpl: async (url, init) => {
+      request = { url, init };
+      return response(202, { status: 'indexed' });
+    },
+  });
+  const body = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x01]);
+  const pageUrl = 'https://example.com/article?a=1#fragment';
+  const result = await client.capturePage(CAPTURE_ID, { pageUrl, body });
+  assert.equal(result.status, 202);
+  assert.equal(result.outcome, 'indexed');
+  assert.equal(request.url, `https://boopmark.com/api/v1/bookmarks/${CAPTURE_ID}/page`);
+  assert.equal(request.init.method, 'PUT');
+  assert.equal(request.init.body, body);
+  assert.equal(request.init.credentials, 'omit');
+  assert.equal(request.init.headers['Content-Type'], 'text/html; charset=utf-8');
+  assert.equal(request.init.headers['Content-Encoding'], 'gzip');
+  assert.equal(request.init.headers['X-Page-Url'], pageUrl);
+  assert.equal(request.init.headers.Authorization, 'Bearer key');
+  assert.equal(request.init.headers['Idempotency-Key'], undefined);
+  assert.equal(request.url.includes('key'), false);
+});
+
+test('capturePage distinguishes queued and every refusal by status', async () => {
+  const pageUrl = 'https://example.com/article';
+  const body = new Uint8Array([0x1f, 0x8b, 0x08, 0x00]);
+  const queued = new ApiClient({
+    server: 'https://boopmark.com', apiKey: 'key', fetchImpl: async () => response(202, { status: 'queued' }),
+  });
+  assert.equal((await queued.capturePage(CAPTURE_ID, { pageUrl, body })).outcome, 'queued');
+
+  for (const status of [404, 409, 413, 422, 503]) {
+    const client = new ApiClient({
+      server: 'https://boopmark.com', apiKey: 'key',
+      fetchImpl: async () => response(status, { error: 'refused' }),
+    });
+    await assert.rejects(client.capturePage(CAPTURE_ID, { pageUrl, body }), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.status, status);
+      return true;
+    });
+  }
+});
+
+test('capturePage rejects an invalid bookmark id or empty body before fetch', async () => {
+  let calls = 0;
+  const client = new ApiClient({
+    server: 'https://boopmark.com', apiKey: 'key',
+    fetchImpl: async () => { calls += 1; return response(202, { status: 'indexed' }); },
+  });
+  await assert.rejects(client.capturePage('not-a-uuid', { pageUrl: 'https://example.com/a', body: new Uint8Array([1]) }), error => {
+    assert.equal(error.kind, 'validation');
+    return true;
+  });
+  await assert.rejects(client.capturePage(CAPTURE_ID, { pageUrl: 'https://example.com/a', body: null }), error => {
+    assert.equal(error.kind, 'validation');
+    return true;
+  });
+  await assert.rejects(client.capturePage(CAPTURE_ID, { pageUrl: 'chrome://extensions', body: new Uint8Array([1]) }), error => {
+    assert.equal(error.kind, 'validation');
+    return true;
+  });
+  assert.equal(calls, 0);
+});
+
+test('capturePage rejects any 2xx that is not the documented 202 outcome', async () => {
+  const pageUrl = 'https://example.com/article';
+  const body = new Uint8Array([0x1f, 0x8b, 0x08, 0x00]);
+  const empty = new Response(null, { status: 204 });
+  for (const reply of [response(200, { status: 'indexed' }), response(202, { status: 'stored' }), empty]) {
+    const client = new ApiClient({
+      server: 'https://boopmark.com', apiKey: 'key', fetchImpl: async () => reply,
+    });
+    await assert.rejects(client.capturePage(CAPTURE_ID, { pageUrl, body }), error => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.kind, 'server');
+      return true;
+    });
+  }
+});
+
+test('capturePage bounds the upload with a timeout signal', async () => {
+  let request;
+  const client = new ApiClient({
+    server: 'https://boopmark.com', apiKey: 'key',
+    fetchImpl: async (url, init) => {
+      request = { url, init };
+      return response(202, { status: 'indexed' });
+    },
+  });
+  await client.capturePage(CAPTURE_ID, { pageUrl: 'https://example.com/a', body: new Uint8Array([1]) });
+  assert.ok(request.init.signal instanceof AbortSignal);
+  const supplied = new AbortController();
+  const second = new ApiClient({
+    server: 'https://boopmark.com', apiKey: 'key',
+    fetchImpl: async (url, init) => {
+      request = { url, init };
+      return response(202, { status: 'indexed' });
+    },
+  });
+  await second.capturePage(CAPTURE_ID, { pageUrl: 'https://example.com/a', body: new Uint8Array([1]), signal: supplied.signal });
+  assert.equal(request.init.signal, supplied.signal);
+});
+
+test('capturePage scales the upload timeout with the gzip body size', async () => {
+  const original = AbortSignal.timeout;
+  const delays = [];
+  AbortSignal.timeout = milliseconds => {
+    delays.push(milliseconds);
+    return original.call(AbortSignal, milliseconds);
+  };
+  try {
+    const client = new ApiClient({
+      server: 'https://boopmark.com', apiKey: 'key',
+      fetchImpl: async () => response(202, { status: 'indexed' }),
+    });
+    const pageUrl = 'https://example.com/article';
+    // 15 s base + 10 s per MiB of the compressed body, capped at 90 s.
+    await client.capturePage(CAPTURE_ID, { pageUrl, body: new Uint8Array(1024) });
+    await client.capturePage(CAPTURE_ID, { pageUrl, body: new Uint8Array(3 * 1024 * 1024) });
+    await client.capturePage(CAPTURE_ID, { pageUrl, body: new Uint8Array(5 * 1024 * 1024) });
+    await client.capturePage(CAPTURE_ID, { pageUrl, body: new Uint8Array(8 * 1024 * 1024) });
+  } finally {
+    AbortSignal.timeout = original;
+  }
+  assert.deepEqual(delays, [15010, 45000, 65000, 90000]);
+});

@@ -12,6 +12,19 @@
   // values when a user intentionally clears a field.
   var FIELD_NAMES = ["title", "description", "tags"];
   var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  // Must match the server's PAGE_CAPTURE_MAX_BYTES: the compressed and the
+  // uncompressed page are both refused above this size, never truncated.
+  var PAGE_CAPTURE_MAX_BYTES = 5242880;
+  // A capture is copied into chrome.storage.session only while its base64 form
+  // fits this budget (storage.session holds 10 MiB, shared with drafts, so at
+  // most one capture copy is kept at a time).
+  var PAGE_CAPTURE_STORAGE_MAX_BASE64 = 2 * 1024 * 1024;
+  // Query parameters that never change which page is served.  `ref` and
+  // `source` are deliberately kept: they change what some sites render.
+  var TRACKING_PARAM_NAMES = [
+    "fbclid", "gclid", "gbraid", "wbraid", "msclkid", "yclid", "dclid",
+    "mc_cid", "mc_eid", "igshid", "_hsenc", "_hsmi", "ref_src"
+  ];
 
   function isLoopbackHostname(hostname) {
     var host = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
@@ -72,6 +85,62 @@
     } catch (_error) {
       return null;
     }
+  }
+
+  /** Only page URLs can be captured from the active tab. */
+  function capturableURL(value) {
+    return validBookmarkURL(value);
+  }
+
+  function isTrackingParam(name) {
+    var lower = String(name == null ? "" : name).toLowerCase();
+    return lower.indexOf("utm_") === 0 || TRACKING_PARAM_NAMES.indexOf(lower) >= 0;
+  }
+
+  /**
+   * The parts of two URLs that decide whether they are the same page.  This
+   * mirrors the server's `same_page` so the extension never sends a capture
+   * the server will reject with `409 url_mismatch`: http and https match,
+   * one trailing slash is ignored, fragments are ignored, tracking
+   * parameters are dropped and the remaining query pairs are unordered.
+   */
+  function pageIdentity(value) {
+    if (typeof value !== "string" || !value.trim()) return null;
+    var parsed;
+    try {
+      parsed = new URL(value.trim());
+    } catch (_error) {
+      return null;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    if (!parsed.hostname || parsed.username || parsed.password) return null;
+    var path = parsed.pathname || "/";
+    if (path.length > 1 && path.charAt(path.length - 1) === "/") path = path.slice(0, -1);
+    var pairs = [];
+    parsed.searchParams.forEach(function (parameterValue, parameterName) {
+      if (!isTrackingParam(parameterName)) pairs.push([parameterName, parameterValue]);
+    });
+    pairs.sort(function (left, right) {
+      if (left[0] !== right[0]) return left[0] < right[0] ? -1 : 1;
+      if (left[1] !== right[1]) return left[1] < right[1] ? -1 : 1;
+      return 0;
+    });
+    return {
+      host: String(parsed.host || "").toLowerCase(),
+      path: path,
+      query: pairs.map(function (pair) {
+        return encodeURIComponent(pair[0]) + "=" + encodeURIComponent(pair[1]);
+      }).join("&")
+    };
+  }
+
+  function samePage(left, right) {
+    var first = pageIdentity(left);
+    var second = pageIdentity(right);
+    return Boolean(first && second
+      && first.host === second.host
+      && first.path === second.path
+      && first.query === second.query);
   }
 
   // Omitted ports in Chrome match patterns mean every port, not the default.
@@ -395,6 +464,12 @@
       marker.state = "success";
       if (outcome.bookmarkId != null) marker.bookmarkId = String(outcome.bookmarkId);
       marker.error = "";
+      if (outcome.capture && typeof outcome.capture === "object") {
+        marker.capture = {
+          state: String(outcome.capture.state || "failed"),
+          text: String(outcome.capture.text || "")
+        };
+      }
     } else if (outcome.state === "unknown" || outcome.unknown === true) {
       marker.state = "unknown";
       marker.error = String(outcome.error || "Save could not be confirmed.");
@@ -432,6 +507,8 @@
 
   return {
     FIELD_NAMES: FIELD_NAMES.slice(),
+    PAGE_CAPTURE_MAX_BYTES: PAGE_CAPTURE_MAX_BYTES,
+    PAGE_CAPTURE_STORAGE_MAX_BASE64: PAGE_CAPTURE_STORAGE_MAX_BASE64,
     isLoopbackHostname: isLoopbackHostname,
     normalizeServer: normalizeServer,
     permissionPattern: permissionPattern,
@@ -440,7 +517,12 @@
     validBookmarkURL: validBookmarkURL,
     validateBookmarkUrl: validBookmarkURL,
     validURL: validBookmarkURL,
+    capturableURL: capturableURL,
+    isCapturableURL: capturableURL,
     canonicalBookmarkURL: canonicalBookmarkURL,
+    isTrackingParam: isTrackingParam,
+    pageIdentity: pageIdentity,
+    samePage: samePage,
     parseTags: parseTags,
     formatTags: formatTags,
     createDraft: createDraft,

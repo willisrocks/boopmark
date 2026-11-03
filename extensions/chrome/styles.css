@@ -42,5 +42,10 @@ a { color: #93c5fd; text-underline-offset: 3px; }
 .success { color: #86efac; }
 .recovery { border: 1px solid #4b5563; padding: 10px; border-radius: 8px; margin-top: 8px; font-size: 12px; }
 .recovery button { display: block; white-space: normal; text-align: left; }
+.existing { display: flex; align-items: center; gap: 10px; justify-content: space-between; border: 1px solid #4b5563; padding: 8px 10px; border-radius: 8px; margin-bottom: 12px; }
+.existing[hidden] { display: none; }
+#existing-status { font-size: 12px; line-height: 1.4; margin: 0; color: #9ca3af; }
+#existing-status.error { color: #fca5a5; }
+.existing button { flex: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { #metadata-status.loading::before { animation: none; } }

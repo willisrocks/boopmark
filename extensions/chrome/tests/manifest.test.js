@@ -5,9 +5,9 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json')));
 
-test('MV3 package has only user-invoked tab access and optional API origins', () => {
+test('MV3 package has only user-invoked tab access, scripting, and optional API origins', () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.deepEqual(manifest.permissions, ['activeTab', 'storage']);
+  assert.deepEqual(manifest.permissions, ['activeTab', 'scripting', 'storage']);
   assert.equal(manifest.host_permissions, undefined);
   assert.equal(manifest.content_scripts, undefined);
   assert.equal(manifest.externally_connectable, undefined);

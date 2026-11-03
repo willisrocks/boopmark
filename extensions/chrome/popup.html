@@ -22,7 +22,7 @@
         <label for="api-key">Boopmark API key</label>
         <input id="api-key" name="apiKey" type="password" required autocomplete="off" spellcheck="false" placeholder="Paste your Boopmark API key">
         <p class="hint">Find your key in <a id="settings-link" href="https://boopmark.com/settings" target="_blank" rel="noreferrer">Settings → API keys</a>. This is not your AI provider key.</p>
-        <p class="privacy">Opening the popup sends the page URL to your server for metadata lookup, including AI processing when enabled in your account settings.</p>
+        <p class="privacy">Opening the popup sends the page URL to your server for metadata lookup, including AI processing when enabled in your account settings. When you save, or choose Capture text, the page's HTML is sent so its article text can be indexed for search.</p>
         <p id="connection-status" role="status" aria-live="polite"></p>
         <div class="actions"><button id="disconnect-button" class="secondary" type="button" hidden>Disconnect</button><button id="connect-button" class="primary" type="submit">Connect</button></div>
       </form>
@@ -31,6 +31,10 @@
     <section id="capture" hidden aria-labelledby="capture-heading">
       <div class="heading-row"><h1 id="capture-heading">Add Bookmark</h1><button id="close-button" class="icon-button" type="button" aria-label="Cancel and discard bookmark">×</button></div>
       <form id="bookmark-form">
+        <div id="existing" class="existing" hidden>
+          <p id="existing-status" role="status" aria-live="polite">Already saved in Boopmark.</p>
+          <button id="capture-button" class="secondary" type="button">Capture text</button>
+        </div>
         <label for="url">URL</label>
         <input id="url" name="url" type="url" required placeholder="https://example.com" spellcheck="false" aria-describedby="url-error">
         <p id="url-error" class="error" role="status" hidden></p>

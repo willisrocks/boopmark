@@ -122,3 +122,44 @@ test('draft normalization keeps the URL dirty bit and safe error text', () => {
   assert.equal(draft.dirty.title, true);
   assert.deepEqual(draft.error, { kind: 'server', message: 'Metadata failed' });
 });
+
+test('page identity matches the server rules for the capture URL check', () => {
+  assert.equal(Core.samePage('https://example.com/a', 'http://example.com/a'), true, 'http and https are the same page');
+  assert.equal(Core.samePage('https://example.com/a/', 'https://example.com/a'), true, 'one trailing slash is ignored');
+  assert.equal(Core.samePage('https://example.com/a#fragment', 'https://example.com/a'), true, 'fragments are ignored');
+  assert.equal(Core.samePage('https://example.com/a?utm_source=news&b=2&a=1', 'https://example.com/a?a=1&b=2'), true, 'tracking params dropped, order ignored');
+  assert.equal(Core.samePage('https://example.com/a?source=medium', 'https://example.com/a'), false, '?source= is kept');
+  assert.equal(Core.samePage('https://example.com/A', 'https://example.com/a'), false, 'paths are case sensitive');
+  assert.equal(Core.samePage('https://example.com:8443/a', 'https://example.com/a'), false, 'a non-default port differs');
+  assert.equal(Core.samePage('https://user:secret@example.com/a', 'https://example.com/a'), false, 'userinfo never matches');
+  assert.equal(Core.samePage('https://other.example/a', 'https://example.com/a'), false);
+  assert.equal(Core.samePage('https://example.com/a', 'chrome://extensions'), false);
+  assert.equal(Core.samePage('', 'https://example.com/a'), false);
+});
+
+test('page capture is limited to web pages and the server byte cap', () => {
+  assert.equal(Core.PAGE_CAPTURE_MAX_BYTES, 5242880);
+  assert.equal(Core.PAGE_CAPTURE_STORAGE_MAX_BASE64, 2 * 1024 * 1024);
+  assert.equal(Core.capturableURL('https://example.com/article'), true);
+  assert.equal(Core.capturableURL('http://localhost:4000/article'), true);
+  assert.equal(Core.capturableURL('chrome://extensions'), false);
+  assert.equal(Core.capturableURL('file:///tmp/page.html'), false);
+  assert.equal(Core.capturableURL('about:blank'), false);
+  assert.equal(Core.capturableURL('data:text/html,<p>x</p>'), false);
+  assert.equal(Core.capturableURL('https://user:secret@example.com/'), false);
+});
+
+test('a capture outcome is recorded on a successful operation only', () => {
+  const marker = Core.operationMarker(
+    { url: 'https://example.com/a', title: '', description: '', tags: [] },
+    { server: 'https://boopmark.com', connectionEpoch: 'one', draftId: 'draft' }
+  );
+  const success = Core.transitionOperation(marker, {
+    state: 'success', bookmarkId: 'bookmark', capture: { state: 'captured', text: 'article text captured' }
+  });
+  assert.deepEqual(success.capture, { state: 'captured', text: 'article text captured' });
+  const failed = Core.transitionOperation(marker, {
+    state: 'error', error: 'nope', capture: { state: 'captured', text: 'article text captured' }
+  });
+  assert.equal(failed.capture, undefined);
+});

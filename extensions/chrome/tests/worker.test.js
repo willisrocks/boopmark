@@ -59,6 +59,7 @@ function area(initial = {}, accessLevels = [], storageAccess = 'ok') {
 function harness({
   localValues = {}, sessionValues = {}, fetchImpl, permissionGranted = true,
   permissionGrants = {}, permissionRemove = 'remove', storageAccess = 'ok',
+  injectedPage = undefined,
 }) {
   const accessLevels = [];
   const local = area(localValues, accessLevels, storageAccess);
@@ -66,6 +67,9 @@ function harness({
   let listener;
   const notifications = [];
   const removedPermissions = [];
+  // Every chrome.scripting.executeScript invocation, so tests can prove the
+  // injected function and target, and that no other tab was read.
+  const injections = [];
   const grants = new Map(Object.entries(permissionGrants));
   let removeAttempt = 0;
   const permissionPattern = details => String(details?.origins?.[0] || '');
@@ -76,6 +80,21 @@ function harness({
   };
   const chrome = {
     storage: { local, session },
+    scripting: {
+      executeScript(details, callback) {
+        // structuredClone cannot copy the injected function, so the details
+        // are copied shallowly with a fresh target object.
+        injections.push({ ...details, target: { ...details.target } });
+        if (injectedPage instanceof Error) {
+          chrome.runtime.lastError = { message: injectedPage.message };
+          callback?.();
+          chrome.runtime.lastError = null;
+          return;
+        }
+        const page = typeof injectedPage === 'function' ? injectedPage(details) : injectedPage;
+        callback?.(page === undefined ? [] : [{ frameId: 0, result: clone(page) }]);
+      },
+    },
     permissions: {
       contains(details, callback) { callback(isGranted(details)); },
       remove(details, callback) {
@@ -110,9 +129,17 @@ function harness({
     structuredClone,
     queueMicrotask,
     AbortController,
+    AbortSignal,
     setTimeout,
     clearTimeout,
     console,
+    TextEncoder,
+    TextDecoder,
+    CompressionStream,
+    DecompressionStream,
+    ReadableStream,
+    btoa,
+    atob,
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(`${coreSource}\n${apiSource}\n${workerSource}`, sandbox, { filename: 'worker.js' });
@@ -123,6 +150,7 @@ function harness({
     accessLevels,
     notifications,
     removedPermissions,
+    injections,
     hasPermission(pattern) { return isGranted({ origins: [pattern] }); },
     send(message) {
       return new Promise(resolve => listener(message, {
@@ -1029,4 +1057,528 @@ test('browser restart with a pending save marker reconstructs unknown state and 
   assert.equal(blocked.ok, true);
   assert.equal(blocked.operation.state, 'unknown');
   assert.equal(calls.length, 0, 'reopening/reviewing an unknown operation never replays create');
+});
+
+const CAPTURE_BOOKMARK_ID = '8a1f0f4e-51c5-4a3b-9d4e-6f7a8b9c0d1e';
+
+async function readAll(stream) {
+  const reader = stream.getReader();
+  const parts = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(Buffer.from(value));
+  }
+  return Buffer.concat(parts);
+}
+
+function gunzip(bytes) {
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });
+  return readAll(stream.pipeThrough(new DecompressionStream('gzip')));
+}
+
+function captureFetch({ bookmarkId = CAPTURE_BOOKMARK_ID, pageStatus = 202, pageBody = { status: 'indexed' }, existing = [] } = {}) {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init: init || {} });
+    if (String(url).includes('/api/v1/bookmarks?limit=1') || String(url).includes('/api/v1/bookmarks?url=')) return response(200, existing);
+    if (String(url).endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: 'Suggested title', description: '', tags: [] });
+    if (String(url).endsWith('/api/v1/bookmarks') && init?.method === 'POST') return response(201, { id: bookmarkId });
+    if (String(url).endsWith(`/api/v1/bookmarks/${bookmarkId}/page`) && init?.method === 'PUT') return response(pageStatus, pageBody);
+    throw new Error(`unexpected URL ${url}`);
+  };
+  return { calls, fetchImpl };
+}
+
+test('the invoked tab is captured once, gzipped, and uploaded only for the created bookmark', async () => {
+  const pageUrl = 'https://example.com/article?run=one#fragment';
+  const html = '<!doctype html><html><body><article><p>Only in the page body</p></article></body></html>';
+  const { calls, fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: pageUrl, contentType: 'text/html', html },
+  });
+  const tab = { id: 17, url: pageUrl, title: 'Browser title' };
+  assert.equal(ui.injections.length, 0, 'no tab is read before the popup is invoked');
+
+  const opened = await ui.send({ type: 'OPEN', tab });
+  assert.equal(opened.capture.status, 'capturing');
+  assert.equal(ui.injections.length, 1);
+  assert.deepEqual(ui.injections[0].target, { tabId: 17 });
+  const injected = vm.runInNewContext(`(${ui.injections[0].func})( )`, {
+    location: { href: pageUrl },
+    document: { contentType: 'text/html', documentElement: { outerHTML: html } },
+  });
+  assert.deepEqual({ ...injected }, { href: pageUrl, contentType: 'text/html', html });
+  assert.match(String(ui.injections[0].func), /location\.href/);
+  assert.match(String(ui.injections[0].func), /document\.documentElement\.outerHTML/);
+  assert.deepEqual(calls.filter(call => call.init.method === 'PUT'), [], 'nothing is uploaded before a create is confirmed');
+
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  assert.equal(ready.capture.status, 'ready');
+  assert.equal(ui.injections.length, 1, 'a state refresh does not read the tab again');
+
+  const dispatched = await ui.send({
+    type: 'SAVE', draftId: ready.draft.id,
+    fields: { url: pageUrl, title: 'Reviewed title', description: '', tags: '' },
+  });
+  assert.equal(dispatched.operation.state, 'pending');
+  await wait(50);
+
+  const saved = await ui.send({ type: 'OPEN', tab });
+  assert.equal(saved.operation.state, 'success');
+  assert.equal(saved.operation.bookmarkId, CAPTURE_BOOKMARK_ID);
+  assert.deepEqual(saved.operation.capture, { state: 'captured', text: 'article text captured' });
+
+  const creates = calls.filter(call => call.url.endsWith('/api/v1/bookmarks') && call.init.method === 'POST');
+  const puts = calls.filter(call => call.init.method === 'PUT');
+  assert.equal(creates.length, 1);
+  assert.equal(puts.length, 1);
+  assert.ok(calls.indexOf(creates[0]) < calls.indexOf(puts[0]), 'the page is uploaded after the create');
+  assert.equal(puts[0].url, `http://127.0.0.1:4011/api/v1/bookmarks/${CAPTURE_BOOKMARK_ID}/page`);
+  assert.equal(puts[0].init.headers.Authorization, 'Bearer extension-test-key');
+  assert.equal(puts[0].init.headers['Content-Encoding'], 'gzip');
+  assert.equal(puts[0].init.headers['Content-Type'], 'text/html; charset=utf-8');
+  assert.equal(puts[0].init.headers['X-Page-Url'], pageUrl);
+  assert.equal(puts[0].init.credentials, 'omit');
+  const gzipped = Buffer.from(puts[0].init.body);
+  assert.equal(gzipped[0], 0x1f);
+  assert.equal(gzipped[1], 0x8b);
+  assert.equal((await gunzip(puts[0].init.body)).toString('utf8'), html);
+
+  assert.equal(Object.keys(ui.session.values).some(key => key.startsWith('boopmark-capture:')), false, 'the capture is dropped after the save');
+  const reopened = await ui.send({ type: 'OPEN', tab });
+  assert.equal(reopened.operation.state, 'success');
+  assert.equal(ui.injections.length, 1, 'a saved page is not captured again');
+});
+
+test('pages over the cap or not HTML are never uploaded and the save still succeeds', async () => {
+  const oversized = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl: captureFetch().fetchImpl,
+    injectedPage: { href: 'https://example.com/huge', contentType: 'text/html', html: 'x'.repeat(5242881) },
+  });
+  const hugeTab = { id: 4, url: 'https://example.com/huge', title: 'Huge' };
+  await oversized.send({ type: 'OPEN', tab: hugeTab });
+  await wait(25);
+  const huge = await oversized.send({ type: 'OPEN', tab: hugeTab });
+  assert.equal(huge.capture.status, 'unavailable');
+  assert.equal(huge.capture.reason, 'too_large');
+  await oversized.send({ type: 'SAVE', draftId: huge.draft.id, fields: { url: hugeTab.url, title: 'Huge', description: '', tags: '' } });
+  await wait(50);
+  const hugeSaved = await oversized.send({ type: 'OPEN', tab: hugeTab });
+  assert.equal(hugeSaved.operation.state, 'success');
+  assert.equal(hugeSaved.operation.capture.text, 'page too large to capture');
+
+  const calls = [];
+  const pdf = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init: init || {} });
+      if (String(url).includes('?url=')) return response(200, []);
+      if (String(url).endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: '', description: '', tags: [] });
+      if (String(url).endsWith('/api/v1/bookmarks') && init?.method === 'POST') return response(201, { id: CAPTURE_BOOKMARK_ID });
+      throw new Error(`unexpected URL ${url}`);
+    },
+    injectedPage: { href: 'https://example.com/paper.pdf', contentType: 'application/pdf', html: '<html></html>' },
+  });
+  const pdfTab = { id: 5, url: 'https://example.com/paper.pdf', title: 'Paper' };
+  await pdf.send({ type: 'OPEN', tab: pdfTab });
+  await wait(25);
+  const paper = await pdf.send({ type: 'OPEN', tab: pdfTab });
+  assert.equal(paper.capture.status, 'unavailable');
+  assert.equal(paper.capture.reason, 'not_html');
+  await pdf.send({ type: 'SAVE', draftId: paper.draft.id, fields: { url: pdfTab.url, title: 'Paper', description: '', tags: '' } });
+  await wait(50);
+  const paperSaved = await pdf.send({ type: 'OPEN', tab: pdfTab });
+  assert.equal(paperSaved.operation.state, 'success');
+  assert.equal(paperSaved.operation.capture.text, 'this page is not HTML');
+  assert.deepEqual(calls.filter(call => call.init.method === 'PUT'), [], 'a non-HTML page is never uploaded');
+});
+
+test('a refused capture annotates the confirmed save without failing it', async () => {
+  const scenarios = [
+    { pageStatus: 409, pageBody: { error: 'url_mismatch' }, expected: { state: 'mismatch', text: "the page does not match this bookmark's URL" } },
+    { pageStatus: 413, pageBody: { error: 'too large' }, expected: { state: 'too_large', text: 'page too large to capture' } },
+    { pageStatus: 422, pageBody: { error: 'no readable article' }, expected: { state: 'no_article', text: 'no article text on this page' } },
+    { pageStatus: 503, pageBody: { error: 'busy' }, expected: { state: 'pending', text: 'article text pending' } },
+    { pageStatus: 404, pageBody: { error: 'not found' }, expected: { state: 'off', text: 'capture is off on this server' } },
+  ];
+  for (const scenario of scenarios) {
+    const pageUrl = 'https://example.com/refused';
+    const { calls, fetchImpl } = captureFetch({ pageStatus: scenario.pageStatus, pageBody: scenario.pageBody });
+    const ui = harness({
+      localValues: { 'boopmark.settings': settings() },
+      fetchImpl,
+      injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>article</body></html>' },
+    });
+    const tab = { id: 9, url: pageUrl, title: 'Refused' };
+    await ui.send({ type: 'OPEN', tab });
+    await wait(25);
+    const ready = await ui.send({ type: 'OPEN', tab });
+    await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: { url: pageUrl, title: 'Refused', description: '', tags: '' } });
+    await wait(50);
+    const saved = await ui.send({ type: 'OPEN', tab });
+    assert.equal(saved.operation.state, 'success', `HTTP ${scenario.pageStatus} still saves`);
+    assert.deepEqual(saved.operation.capture, scenario.expected);
+    assert.equal(calls.filter(call => call.init.method === 'PUT').length, 1);
+    assert.equal(calls.filter(call => call.url.endsWith('/api/v1/bookmarks') && call.init.method === 'POST').length, 1);
+  }
+});
+
+test('a 401 during capture keeps the save and flags the connection for reconnect', async () => {
+  const pageUrl = 'https://example.com/expired';
+  const { fetchImpl } = captureFetch({ pageStatus: 401, pageBody: { error: 'unauthorized' } });
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>article</body></html>' },
+  });
+  const tab = { id: 11, url: pageUrl, title: 'Expired' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: { url: pageUrl, title: 'Expired', description: '', tags: '' } });
+  await wait(50);
+  const saved = await ui.send({ type: 'OPEN', tab });
+  assert.equal(saved.operation.state, 'success');
+  assert.equal(saved.operation.capture.state, 'auth');
+  assert.equal(saved.connection.connected, false);
+});
+
+test('Capture text uploads into the existing bookmark without creating another', async () => {
+  const pageUrl = 'https://example.com/saved-page/?utm_source=newsletter';
+  const bookmarkUrl = 'https://example.com/saved-page';
+  const { calls, fetchImpl } = captureFetch({ existing: [{ id: CAPTURE_BOOKMARK_ID, url: bookmarkUrl, title: 'Saved page' }] });
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>saved article</body></html>' },
+  });
+  const tab = { id: 21, url: pageUrl, title: 'Saved page' };
+
+  const opened = await ui.send({ type: 'OPEN', tab });
+  assert.equal(opened.existing.status, 'loading');
+  await wait(25);
+  const found = await ui.send({ type: 'OPEN', tab });
+  assert.equal(found.existing.status, 'found');
+  assert.equal(found.existing.bookmarkId, CAPTURE_BOOKMARK_ID);
+  const lookups = calls.filter(call => call.url.includes('?url='));
+  assert.equal(lookups.length, 1, 'one lookup per popup open, not per refresh');
+  assert.equal(new URL(lookups[0].url).searchParams.get('url'), pageUrl);
+  assert.equal(new URL(lookups[0].url).searchParams.get('limit'), '1');
+
+  const captured = await ui.send({ type: 'CAPTURE_EXISTING', draftId: found.draft.id });
+  assert.equal(captured.ok, true);
+  assert.equal(captured.existing.capture.state, 'capturing', 'the upload does not block the state queue');
+  await wait(25);
+  const after = await ui.send({ type: 'OPEN', tab });
+  assert.deepEqual({ ...after.existing.capture }, { state: 'captured', text: 'article text captured' });
+
+  const puts = calls.filter(call => call.init.method === 'PUT');
+  assert.equal(puts.length, 1, 'the existing bookmark receives the capture');
+  assert.equal(puts[0].url, `http://127.0.0.1:4011/api/v1/bookmarks/${CAPTURE_BOOKMARK_ID}/page`);
+  assert.equal(puts[0].init.headers['X-Page-Url'], pageUrl);
+  assert.equal(calls.filter(call => call.url.endsWith('/api/v1/bookmarks') && call.init.method === 'POST').length, 0, 'no bookmark is created');
+});
+
+test('unsupported pages are never read, and disconnect drops a pending capture', async () => {
+  const restricted = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl: async () => response(200, []),
+    injectedPage: { href: 'chrome://extensions', contentType: 'text/html', html: '<html></html>' },
+  });
+  const opened = await restricted.send({ type: 'OPEN', tab: { id: 2, url: 'chrome://extensions', title: 'Extensions' } });
+  assert.equal(opened.capture, null);
+  assert.equal(restricted.injections.length, 0, 'restricted schemes are never injected into');
+
+  const pageUrl = 'https://example.com/session';
+  const active = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl: async (url) => {
+      if (String(url).includes('?url=')) return response(200, []);
+      if (String(url).endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: '', description: '', tags: [] });
+      throw new Error(`unexpected URL ${url}`);
+    },
+    injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>session page</body></html>' },
+  });
+  await active.send({ type: 'OPEN', tab: { id: 3, url: pageUrl, title: 'Session' } });
+  await wait(25);
+  const keys = () => Object.keys(active.session.values).filter(key => key.startsWith('boopmark-capture:'));
+  assert.equal(keys().length, 1, 'the capture has a best-effort session copy');
+
+  const disconnected = await active.send({ type: 'DISCONNECT' });
+  assert.equal(disconnected.ok, true, 'disconnect succeeds while a capture is held');
+  assert.deepEqual(keys(), [], 'disconnect drops the captured page');
+  assert.deepEqual(active.session.values, {});
+});
+
+test('a lookup result for a different page never offers a capture', async () => {
+  const { fetchImpl } = captureFetch({ existing: [{ id: CAPTURE_BOOKMARK_ID, url: 'https://example.com/somewhere-else', title: 'Other' }] });
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: 'https://example.com/this-page', contentType: 'text/html', html: '<html><body>page</body></html>' },
+  });
+  const tab = { id: 31, url: 'https://example.com/this-page', title: 'This page' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const opened = await ui.send({ type: 'OPEN', tab });
+  assert.equal(opened.existing.status, 'none');
+  assert.equal(opened.existing.bookmarkId, null);
+  const refused = await ui.send({ type: 'CAPTURE_EXISTING', draftId: opened.draft.id });
+  assert.equal(refused.ok, false);
+  assert.match(refused.error.message, /Save this page before capturing its text/);
+});
+
+test('the confirmed save is reported before a slow capture upload finishes', async () => {
+  const pageUrl = 'https://example.com/slow-upload';
+  const gate = deferred();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init: init || {} });
+    if (String(url).includes('?url=') || String(url).includes('?limit=1')) return response(200, []);
+    if (String(url).endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: '', description: '', tags: [] });
+    if (String(url).endsWith('/api/v1/bookmarks') && init?.method === 'POST') return response(201, { id: CAPTURE_BOOKMARK_ID });
+    if (String(url).endsWith(`/api/v1/bookmarks/${CAPTURE_BOOKMARK_ID}/page`)) {
+      await gate.promise;
+      return response(202, { status: 'indexed' });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>slow</body></html>' },
+  });
+  const tab = { id: 41, url: pageUrl, title: 'Slow' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: { url: pageUrl, title: 'Slow', description: '', tags: '' } });
+  await wait(50);
+
+  const during = await ui.send({ type: 'OPEN', tab });
+  assert.equal(during.operation.state, 'success', 'the create is confirmed without waiting for the upload');
+  assert.equal(during.operation.capture.state, 'capturing');
+  assert.equal(during.draft.url, pageUrl, 'the recorded operation still describes the saved page');
+
+  gate.resolve();
+  await wait(50);
+  const after = await ui.send({ type: 'OPEN', tab });
+  assert.equal(after.operation.capture.state, 'captured');
+  assert.equal(calls.filter(call => call.init.method === 'PUT').length, 1);
+});
+
+test('an upload interrupted by a worker restart is reported as not captured', async () => {
+  const operation = {
+    version: 1,
+    id: '5b2e4d1a-7c3f-4a8b-9d10-2e3f4a5b6c7d',
+    state: 'success',
+    server: 'http://127.0.0.1:4011',
+    connectionEpoch: 'epoch-one',
+    draftId: 'boopmark-draft:restart-capture',
+    url: 'https://example.com/restarted',
+    bookmarkId: CAPTURE_BOOKMARK_ID,
+    submittedAt: Date.now(),
+    error: '',
+    capture: { state: 'capturing', text: '' },
+  };
+  let calls = 0;
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings(), 'boopmark.operation': operation },
+    fetchImpl: async () => { calls += 1; return response(200, []); },
+  });
+  const opened = await ui.send({ type: 'OPEN', tab: { id: 1, url: operation.url, title: 'Restarted' } });
+  assert.equal(opened.operation.state, 'success');
+  assert.deepEqual({ ...opened.operation.capture }, { state: 'failed', text: 'article text not captured' });
+  assert.equal(calls, 0, 'a lost upload is never retried');
+});
+
+test('a failed save keeps the captured page for the explicit retry', async () => {
+  const pageUrl = 'https://example.com/retry-capture';
+  let createCount = 0;
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    const text = String(url);
+    calls.push({ url: text, init: init || {} });
+    if (text.includes('?url=') || text.includes('?limit=1')) return response(200, []);
+    if (text.endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: 'Suggested', description: '', tags: [] });
+    if (text.endsWith('/api/v1/bookmarks') && init?.method === 'POST') {
+      createCount += 1;
+      return createCount === 1
+        ? response(422, { error: 'invalid reviewed fields' })
+        : response(201, { id: CAPTURE_BOOKMARK_ID });
+    }
+    if (text.endsWith(`/api/v1/bookmarks/${CAPTURE_BOOKMARK_ID}/page`)) return response(202, { status: 'indexed' });
+    throw new Error(`unexpected URL ${text}`);
+  };
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>retry article</body></html>' },
+  });
+  const tab = { id: 51, url: pageUrl, title: 'Retry' };
+  const fields = { url: pageUrl, title: 'Retry', description: '', tags: '' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields });
+  await wait(40);
+  const failed = await ui.send({ type: 'OPEN', tab });
+  assert.equal(failed.operation.state, 'error');
+  assert.equal(calls.filter(call => call.init.method === 'PUT').length, 0);
+
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields });
+  await wait(50);
+  const saved = await ui.send({ type: 'OPEN', tab });
+  assert.equal(saved.operation.state, 'success');
+  const puts = calls.filter(call => call.init.method === 'PUT');
+  assert.equal(puts.length, 1, 'the retried save still uploads the captured page');
+  assert.equal(puts[0].init.headers['X-Page-Url'], pageUrl);
+});
+
+test('the upload is skipped when the reviewed URL no longer matches the captured page', async () => {
+  const pageUrl = 'https://example.com/original-page';
+  const { calls, fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: pageUrl, contentType: 'text/html', html: '<html><body>original</body></html>' },
+  });
+  const tab = { id: 61, url: pageUrl, title: 'Original' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  const edited = 'https://example.com/another-page';
+  await ui.send({ type: 'UPDATE', draftId: ready.draft.id, field: 'url', value: edited });
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: { url: edited, title: 'Edited', description: '', tags: '' } });
+  await wait(50);
+
+  const saved = await ui.send({ type: 'OPEN', tab });
+  assert.equal(saved.operation.state, 'success');
+  assert.equal(saved.operation.capture.state, 'mismatch');
+  assert.equal(calls.filter(call => call.init.method === 'PUT').length, 0, 'a body for another page is never sent');
+  assert.equal(JSON.parse(calls.find(call => call.url.endsWith('/api/v1/bookmarks') && call.init.method === 'POST').init.body).url, edited);
+});
+
+test('the upload URL is the injected location.href, not the tab URL the form started from', async () => {
+  const tabUrl = 'https://example.com/page?utm_source=newsletter';
+  const injectedHref = 'https://example.com/page#top';
+  const { calls, fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: { href: injectedHref, contentType: 'text/html', html: '<html><body>page</body></html>' },
+  });
+  const tab = { id: 62, url: tabUrl, title: 'Page' };
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: { url: tabUrl, title: 'Page', description: '', tags: '' } });
+  await wait(50);
+
+  const puts = calls.filter(call => call.init.method === 'PUT');
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].init.headers['X-Page-Url'], injectedHref, 'the header is what the page reported');
+  const saved = await ui.send({ type: 'OPEN', tab });
+  assert.equal(saved.operation.capture.state, 'captured');
+});
+
+test('only one session copy of a captured page is kept', async () => {
+  const pageUrl = 'https://example.com/first';
+  const { fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    fetchImpl,
+    injectedPage: details => ({
+      href: details.target.tabId === 71 ? pageUrl : 'https://example.com/second',
+      contentType: 'text/html',
+      html: `<html><body>tab ${details.target.tabId}</body></html>`,
+    }),
+  });
+  // A popup closed by clicking away sends no CANCEL: its session copy stays
+  // until the next capture replaces it.
+  await ui.send({ type: 'OPEN', tab: { id: 71, url: pageUrl, title: 'First' } });
+  await wait(25);
+  const firstKeys = Object.keys(ui.session.values).filter(key => key.startsWith('boopmark-capture:'));
+  assert.equal(firstKeys.length, 1);
+
+  await ui.send({ type: 'OPEN', tab: { id: 72, url: 'https://example.com/second', title: 'Second' } });
+  await wait(25);
+  const keys = Object.keys(ui.session.values).filter(key => key.startsWith('boopmark-capture:'));
+  assert.equal(keys.length, 1, 'the previous capture copy is pruned, never accumulated');
+  assert.notEqual(keys[0], firstKeys[0]);
+});
+
+async function gzipBase64(text) {
+  const bytes = new TextEncoder().encode(text);
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });
+  const compressed = await readAll(stream.pipeThrough(new CompressionStream('gzip')));
+  return btoa(Array.from(compressed, byte => String.fromCharCode(byte)).join(''));
+}
+
+test('a save restores the captured page from the session copy after a worker restart', async () => {
+  const pageUrl = 'https://example.com/restored';
+  const html = '<html><body>restored article</body></html>';
+  const draftId = 'boopmark-draft:http%3A%2F%2F127.0.0.1%3A4011:81:https%3A%2F%2Fexample.com%2Frestored';
+  const draft = Core.createDraft({
+    id: draftId, server: 'http://127.0.0.1:4011', connectionEpoch: 'epoch-one',
+    tabId: 81, url: pageUrl, title: 'Restored',
+  });
+  draft.suggestionAttempted = true;
+  const { calls, fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    sessionValues: {
+      [draftId]: draft,
+      [`boopmark-capture:${draftId}`]: { url: pageUrl, body: await gzipBase64(html), createdAt: Date.now() },
+    },
+    fetchImpl,
+    injectedPage: new Error('the tab must not be read again'),
+  });
+  const fields = { url: pageUrl, title: 'Restored', description: '', tags: '' };
+  const dispatched = await ui.send({ type: 'SAVE', draftId, fields });
+  assert.equal(dispatched.operation.state, 'pending');
+  await wait(50);
+
+  const saved = await ui.send({ type: 'OPEN', tab: { id: 81, url: pageUrl, title: 'Restored' } });
+  assert.equal(saved.operation.state, 'success');
+  assert.equal(saved.operation.capture.state, 'captured');
+  const puts = calls.filter(call => call.init.method === 'PUT');
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].init.headers['X-Page-Url'], pageUrl);
+  assert.equal((await gunzip(puts[0].init.body)).toString('utf8'), html);
+  assert.equal(ui.injections.length, 0, 'the stored copy is used instead of reading the tab');
+});
+
+test('a session copy for a different page is discarded instead of uploaded', async () => {
+  const draftId = 'boopmark-draft:http%3A%2F%2F127.0.0.1%3A4011:82:https%3A%2F%2Fexample.com%2Fcurrent';
+  const draft = Core.createDraft({
+    id: draftId, server: 'http://127.0.0.1:4011', connectionEpoch: 'epoch-one',
+    tabId: 82, url: 'https://example.com/current', title: 'Current',
+  });
+  draft.suggestionAttempted = true;
+  const { calls, fetchImpl } = captureFetch();
+  const ui = harness({
+    localValues: { 'boopmark.settings': settings() },
+    sessionValues: {
+      [draftId]: draft,
+      [`boopmark-capture:${draftId}`]: {
+        url: 'https://example.com/stale', body: await gzipBase64('<html><body>stale</body></html>'), createdAt: Date.now(),
+      },
+    },
+    fetchImpl,
+    injectedPage: new Error('the tab must not be read'),
+  });
+  await ui.send({ type: 'SAVE', draftId, fields: { url: 'https://example.com/current', title: 'Current', description: '', tags: '' } });
+  await wait(50);
+
+  const saved = await ui.send({ type: 'OPEN', tab: { id: 82, url: 'https://example.com/current', title: 'Current' } });
+  assert.equal(saved.operation.state, 'success');
+  assert.equal(saved.operation.capture.text, 'article text not captured');
+  assert.equal(calls.filter(call => call.init.method === 'PUT').length, 0);
+  assert.equal(`boopmark-capture:${draftId}` in ui.session.values, false, 'the stale copy is deleted');
 });

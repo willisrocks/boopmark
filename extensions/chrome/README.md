@@ -13,11 +13,13 @@ Your AI-provider key/model stays in Boopmark Settings. With an eligible account,
 
 Review the URL, title, description, and comma-separated tags, then choose **Add Bookmark**. Saving sends your reviewed values without another AI request. Success is shown only after confirmed creation.
 
+Saving also hands the page's HTML to your server, gzip-compressed, so Boopmark can extract the article text and make the full text searchable even when the server cannot fetch the page itself. The result is a small note on the saved state ("article text captured", "article text pending", "no article text on this page"); a capture that fails never fails the save and is never retried automatically. Opening the popup on a page you already saved shows **Already saved** with a **Capture text** button that uploads the same page text without creating a second bookmark.
+
 Cancel/× discards an unsaved draft; clicking outside retains it for the browser session. A save already sent cannot be canceled by closing the popup. If its outcome is unknown, check the web library before an explicit retry—there is no automatic replay or offline queue.
 
 ## Privacy
 
-The extension reads the active tab URL/title only when you invoke it. It sends the selected URL and form values to your configured server, which may fetch metadata and call its AI provider. It does not read page contents, cookies, history, or screenshots. The Boopmark bearer key stays in trusted extension-local storage (not sync and not an OS keychain). Drafts are session-only; minimal save-status markers survive restart. Disconnect clears connection data, drafts, operation markers, and the former server's host access.
+The extension reads the active tab URL/title only when you invoke it. It sends the selected URL and form values to your configured server, which may fetch metadata and call its AI provider. When you save the bookmark or choose **Capture text**, it also reads the invoked page's HTML (`document.documentElement.outerHTML`) and sends it, gzip-compressed, to that same server for article-text extraction; nothing is read or captured in the background, and pages over the 5 MiB cap, non-HTML pages, and `chrome://` or `file:` pages are skipped. It does not read cookies, history, or screenshots. The Boopmark bearer key stays in trusted extension-local storage (not sync and not an OS keychain). Drafts and captured pages are session-only (a capture is also held compressed in the service worker and dropped on save, cancel, or disconnect); minimal save-status markers survive restart. Disconnect clears connection data, drafts, captured pages, operation markers, and the former server's host access.
 
 ## Development and verification
 
