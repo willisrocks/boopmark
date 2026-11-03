@@ -1,0 +1,24 @@
+# Standalone (not a workspace member): compiles the server's own article
+# fetcher and Readability extraction from server/src by #[path], so the eval
+# measures the exact production code without changing it.
+[package]
+name = "scraper-eval-extract"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"] }
+scraper = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+url = "2"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
+dom_smoothie = "0.19.0"
+encoding_rs = "0.8"
