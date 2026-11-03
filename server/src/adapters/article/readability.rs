@@ -56,6 +56,9 @@ pub struct HtmlArticleFetcher {
 pub struct HtmlExtractor {
     /// Extractions running at once, timed-out ones included.
     slots: Arc<Semaphore>,
+    /// How long a caller waits for a free slot before giving up; see
+    /// `SLOT_WAIT_TIMEOUT`.
+    slot_wait: Duration,
 }
 
 /// Why a captured body produced no text.
@@ -74,6 +77,17 @@ impl HtmlExtractor {
     pub fn new(slots: usize) -> Self {
         Self {
             slots: Arc::new(Semaphore::new(slots.max(1))),
+            slot_wait: SLOT_WAIT_TIMEOUT,
+        }
+    }
+
+    /// The same, with a shorter wait for a free slot. The scraper fallback
+    /// uses it: it runs inside an ingest job, where waiting a minute for a
+    /// slot would leave no room for the parse.
+    pub fn with_slot_wait(slots: usize, slot_wait: Duration) -> Self {
+        Self {
+            slots: Arc::new(Semaphore::new(slots.max(1))),
+            slot_wait,
         }
     }
 
@@ -98,7 +112,7 @@ impl HtmlExtractor {
     ) -> Result<String, CaptureExtractError> {
         let content_type = content_type.map(str::to_string);
         let url = url.to_string();
-        let parsed = run_bounded(&self.slots, EXTRACT_TIMEOUT, move || {
+        let parsed = run_bounded(&self.slots, self.slot_wait, EXTRACT_TIMEOUT, move || {
             let html = decode_html(body, content_type.as_deref());
             extract_text(&html, &url)
         })
@@ -121,7 +135,7 @@ impl HtmlExtractor {
     ) -> Result<FetchedText, ArticleFetchError> {
         let content_type = content_type.map(str::to_string);
         let url = url.to_string();
-        run_bounded(&self.slots, EXTRACT_TIMEOUT, move || {
+        run_bounded(&self.slots, self.slot_wait, EXTRACT_TIMEOUT, move || {
             let html = decode_html(body, content_type.as_deref());
             if is_cloudflare_challenge(&html) {
                 return Err(ArticleFetchError::Permanent(CF_CHALLENGE_MSG.to_string()));
@@ -250,10 +264,11 @@ const SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// pages can never have more extractions running than there are slots.
 async fn run_bounded<T: Send + 'static>(
     slots: &Arc<Semaphore>,
+    slot_wait: Duration,
     timeout: Duration,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ArticleFetchError> {
-    let permit = tokio::time::timeout(SLOT_WAIT_TIMEOUT, slots.clone().acquire_owned())
+    let permit = tokio::time::timeout(slot_wait, slots.clone().acquire_owned())
         .await
         .map_err(|_| ArticleFetchError::Transient("no free extraction slot".to_string()))?
         .expect("the extraction semaphore is never closed");
@@ -775,7 +790,13 @@ mod tests {
         let slots_for_task = slots.clone();
         let task = tokio::spawn(async move {
             let started = std::time::Instant::now();
-            let ran = run_bounded(&slots_for_task, Duration::from_secs(5), || 7).await;
+            let ran = run_bounded(
+                &slots_for_task,
+                SLOT_WAIT_TIMEOUT,
+                Duration::from_secs(5),
+                || 7,
+            )
+            .await;
             (ran, started.elapsed())
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -805,9 +826,14 @@ mod tests {
     async fn a_timed_out_extraction_keeps_its_slot_until_it_ends() {
         let slots = Arc::new(Semaphore::new(1));
         let (release, wait) = std::sync::mpsc::channel::<()>();
-        let stuck = run_bounded(&slots, Duration::from_millis(50), move || {
-            wait.recv().ok();
-        })
+        let stuck = run_bounded(
+            &slots,
+            SLOT_WAIT_TIMEOUT,
+            Duration::from_millis(50),
+            move || {
+                wait.recv().ok();
+            },
+        )
         .await;
         assert_eq!(
             stuck,
@@ -824,10 +850,15 @@ mod tests {
         let waiting = tokio::spawn({
             let slots = slots.clone();
             async move {
-                run_bounded(&slots, Duration::from_secs(5), move || {
-                    probe.store(true, std::sync::atomic::Ordering::SeqCst);
-                    2
-                })
+                run_bounded(
+                    &slots,
+                    SLOT_WAIT_TIMEOUT,
+                    Duration::from_secs(5),
+                    move || {
+                        probe.store(true, std::sync::atomic::Ordering::SeqCst);
+                        2
+                    },
+                )
                 .await
             }
         });

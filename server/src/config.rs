@@ -61,6 +61,8 @@ pub const DEFAULT_PAGE_CAPTURE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
 /// One scrape's budget, as the spec fixes it.
 pub const DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS: u64 = 30;
+/// What a scrape can take and still leave the job room for its extraction.
+pub const MAX_PAGE_SCRAPER_TIMEOUT_SECONDS: u64 = 45;
 
 /// The server-side scraper of the fallback decorator. The companion eval
 /// chose Firecrawl and dropped Obscura
@@ -216,15 +218,27 @@ fn parse_page_scraper(value: Option<&str>) -> PageScraperBackend {
     }
 }
 
-/// One scrape's timeout, 30 s by default and at most 60 s. A scrape runs
-/// inside an ingest job's 2-minute budget, after the direct fetch (up to 15 s),
-/// a possible slot wait and the extraction: a longer timeout could not finish
-/// there, and a job that times out still pays for the page.
+/// One scrape's timeout, 30 s by default and at most 45 s. A scrape runs
+/// inside an ingest job's 2-minute budget, after the direct fetch, a possible
+/// slot wait and with an extraction still to come: a longer timeout could not
+/// finish there, and a job that times out still pays for the page.
 fn parse_scraper_timeout(value: Option<&str>) -> u64 {
-    value
+    let parsed = value
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .map_or(DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, |n| n.min(60))
+        .filter(|n| *n > 0);
+    match parsed {
+        Some(seconds) if seconds > MAX_PAGE_SCRAPER_TIMEOUT_SECONDS => {
+            tracing::warn!(
+                value = seconds,
+                max = MAX_PAGE_SCRAPER_TIMEOUT_SECONDS,
+                "PAGE_SCRAPER_TIMEOUT_SECONDS is longer than a scrape can take inside an \
+                 ingest job: clamped"
+            );
+            MAX_PAGE_SCRAPER_TIMEOUT_SECONDS
+        }
+        Some(seconds) => seconds,
+        None => DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS,
+    }
 }
 
 /// The monthly page cap, 0 (no cap) by default.
@@ -256,9 +270,9 @@ fn llm_settings_encryption_key() -> String {
 mod tests {
     use super::{
         DEFAULT_PAGE_CAPTURE_MAX_BYTES, DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, LoginAdapter,
-        MetadataFallbackBackend, PageScraperBackend, ScreenshotBackend,
-        llm_settings_encryption_key, parse_capture_max_bytes, parse_flag, parse_ingest_concurrency,
-        parse_page_scraper, parse_scraper_budget, parse_scraper_timeout,
+        MAX_PAGE_SCRAPER_TIMEOUT_SECONDS, MetadataFallbackBackend, PageScraperBackend,
+        ScreenshotBackend, llm_settings_encryption_key, parse_capture_max_bytes, parse_flag,
+        parse_ingest_concurrency, parse_page_scraper, parse_scraper_budget, parse_scraper_timeout,
     };
 
     /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.
@@ -401,15 +415,17 @@ mod tests {
     }
 
     #[test]
-    fn scraper_timeout_defaults_to_thirty_seconds_and_stays_under_the_job_budget() {
+    fn scraper_timeout_defaults_to_thirty_seconds_and_is_capped_at_forty_five() {
         assert_eq!(parse_scraper_timeout(None), 30);
         assert_eq!(parse_scraper_timeout(Some(" 45 ")), 45);
-        assert_eq!(parse_scraper_timeout(Some("60")), 60);
-        assert_eq!(
-            parse_scraper_timeout(Some("600")),
-            60,
-            "a scrape that cannot finish inside the job's budget was billed for nothing"
-        );
+        // Above the cap, the default scrape still has to fit the job budget.
+        for clamped in ["46", "60", "600"] {
+            assert_eq!(
+                parse_scraper_timeout(Some(clamped)),
+                MAX_PAGE_SCRAPER_TIMEOUT_SECONDS,
+                "{clamped}"
+            );
+        }
         for bad in ["0", "-5", "", "nope"] {
             assert_eq!(
                 parse_scraper_timeout(Some(bad)),

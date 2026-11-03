@@ -158,7 +158,7 @@ PAGE_CAPTURE_ENABLED=1                 # default 1; 0 rejects the PUT with 404
 PAGE_CAPTURE_MAX_BYTES=5242880         # gzip body cap, and the decompressed cap
 PAGE_SCRAPER=disabled                  # default disabled | firecrawl
 PAGE_SCRAPER_API_KEY=                  # firecrawl only; the operator's key
-PAGE_SCRAPER_TIMEOUT_SECONDS=30        # one scrape, retries excluded (at most 60)
+PAGE_SCRAPER_TIMEOUT_SECONDS=30        # one scrape, retries excluded (at most 45)
 PAGE_SCRAPER_MONTHLY_BUDGET_PAGES=0    # 0 = no cap; otherwise pages per calendar month
 ```
 
@@ -607,10 +607,11 @@ pub struct FallbackFetcher<F, S> { direct: F, scraper: S, extractor: HtmlExtract
    preview verdict, return it with `source = fetched`.
 2. On a direct preview, `Ok(short)` or `Err(Permanent(_))`, and only if
    `scraper.enabled()`: skip when a 402 pause is running or when the job's remaining budget
-   is shorter than a scrape *plus its extraction* (about 80 s more, so `JOB_TIMEOUT` cannot
-   fire after a billed scrape); refuse the URL with `net::validate_public_url(url)` (a URL
-   the app may not fetch, the vendor must not be asked to fetch either — that is the SSRF
-   boundary for a hosted scraper, whose own fetch is the vendor's responsibility); reserve a
+   is shorter than a scrape *plus its extraction* (30 s more: the parse and a short slot
+   wait, so `JOB_TIMEOUT` cannot fire after a billed scrape); refuse the URL with
+   `net::validate_public_url(url)` (a URL the app may not fetch, the vendor must not be
+   asked to fetch either — that is the SSRF boundary for a hosted scraper, whose own fetch
+   is the vendor's responsibility); reserve a
    page of the monthly budget; then `scraper.scrape(url)` inside
    `PAGE_SCRAPER_TIMEOUT_SECONDS`. On success run
    `extract_fetched(vendor_html, Some("text/html"), final_url)` and return
@@ -620,16 +621,17 @@ pub struct FallbackFetcher<F, S> { direct: F, scraper: S, extractor: HtmlExtract
 3. On `Err(Transient(_))` or `Err(Skipped(_))`: no scrape (the retry schedule or the
    non-HTML verdict already decides).
 4. A scrape that produced no stored text is accounted by its billing and then decided:
-   `Retryable` becomes `ArticleFetchError::Transient`, so 429, 5xx, timeouts and an operator
-   401/403 retry on the ingest schedule; `OutOfCredits` pauses the fallback for an hour,
-   with one warning, and then re-probes; `Final`, an extraction with no article, or text no
-   better than the direct result returns the *original* direct result, so the bookmark
-   lands in `failed`/`skipped` exactly as today.
-5. A preview the *scraper* found is recorded as `error = 'preview only (locked)'` and is
-   final. A preview from the *direct* fetch is not: with the scraper disabled the direct
-   result is returned unchanged, teaser and all, which is the behaviour before this design.
-   The preview flag only sends the fetch to the scraper and keeps a teaser from counting as
-   better text; it never turns a stored teaser into an error.
+   text the direct fetch already has is kept, whatever the scrape did — skipped, failed,
+   paused by a 402, or locked — because a teaser or a short article is better than an
+   error. Only when nothing was stored does the scrape verdict decide: `Retryable` becomes
+   `ArticleFetchError::Transient`, so 429, 5xx, timeouts and an operator 401/403 retry on
+   the ingest schedule; `OutOfCredits` pauses the fallback for an hour, with one warning,
+   and then re-probes; `Final` keeps the direct verdict.
+5. A preview the *scraper* found is recorded as `error = 'preview only (locked)'`, final,
+   and only when there is no direct text to keep. A preview from the *direct* fetch is
+   stored as article text (`source = fetched`); the flag only sends the fetch to the
+   scraper and keeps a teaser from counting as better text. Only a scraped full article
+   replaces a teaser, with `source = scraped`.
 
 `FetchedArticle` gains `pub source: ContentSource` and `pub preview: bool` (the direct
 fetch's own preview verdict, so a 1,900-character teaser is never stored as a full fetch),
@@ -656,8 +658,9 @@ because the vendor may have billed the scrape it was working on. HTTP 402 (out o
 pauses the scraping for an hour with one warning, since every later bookmark would burn a
 request for the same answer, and then makes one re-probe an hour, so a top-up is noticed
 without a restart. A scrape is also not started when the job's remaining budget is shorter
-than `PAGE_SCRAPER_TIMEOUT_SECONDS` plus the extraction it needs (about 80 s for a parse
-slot and the parse): it would be billed and then abandoned, and the retry would pay again.
+than `PAGE_SCRAPER_TIMEOUT_SECONDS` plus the extraction it needs (30 s: the 20 s parse and a
+10 s wait for a parse slot, after which the decorator's extractor gives up instead of
+queueing a minute): it would be billed and then abandoned, and the retry would pay again.
 An unreadable `scraper_usage` skips the scrape: spending without accounting is worse than
 not spending. This is a page cap, not a dollar cap, because only the hosted candidate has a
 price and the eval establishes it; a dollar figure is a round number on top of the same
@@ -787,9 +790,11 @@ production.
   402 → a paused fallback that re-probes after its cooldown; a billed failure (preview, no
   article, no better text) keeps its page; a timeout keeps its page and becomes `Transient`;
   budget exhausted → no scrape; a job budget too short for a scrape plus its extraction → no
-  scrape and no reservation; scraper disabled → the direct result byte for byte, a teaser
-  included; a private URL → no vendor call; a direct teaser of 300+ characters → the scrape
-  replaces it with the full article when there is one. Fake `PageScraper` and
+  scrape and no reservation; the default configuration still scrapes after a 12 s direct
+  fetch; scraper disabled → the direct result byte for byte, a teaser included; a private
+  URL → no vendor call; a teaser is kept when the scrape is skipped, fails, is paused by a
+  402 or returns a locked page, and only a full article replaces it; `preview only
+  (locked)` only when there is no direct text. Fake `PageScraper` and
   `ScraperUsageRepository` counting calls, like `StubEmbedder`.
 - `preview::is_locked_html`: the post's own locked entry; whitespace around the marker; a
   related member post embedded in a free story's state; a query or trailing slash on

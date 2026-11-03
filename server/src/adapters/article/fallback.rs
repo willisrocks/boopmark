@@ -14,13 +14,13 @@
 //! A scrape changes the outcome only when it produced text that is at least as
 //! good: an exhausted budget or a rejected request leaves the original result
 //! in place, so the bookmark lands in `failed`/`skipped` exactly as it would
-//! without the scraper. A teaser from the direct fetch is stored as article
-//! text when no scrape improves on it; its preview flag only says the scrape is
-//! worth trying, and with the scraper disabled the direct result is returned
-//! unchanged. Two answers replace the direct result instead, and neither is
-//! retried: a member-only preview the scraper found (`preview only (locked)`),
-//! and a retryable scrape failure, which becomes `Transient` so the ingest
-//! schedule retries it.
+//! without the scraper. Text the direct fetch already has is never traded for
+//! an error: a teaser stays as article text (`source = fetched`) whatever the
+//! scrape did — skipped, failed, paused by a 402, or locked — and only a full
+//! article replaces it. `preview only (locked)` is recorded when the scraper
+//! found a preview and there was no text to keep. A retryable scrape failure
+//! becomes `Transient`, so the ingest schedule retries it; with text in hand,
+//! that text is stored instead.
 //!
 //! Spend is counted the way the vendor bills: a page is reserved before the
 //! call and refunded only when the vendor answered no 2xx. A 2xx that produced
@@ -46,10 +46,16 @@ use tokio::time::Instant;
 /// only when this much of it is still left.
 const JOB_BUDGET: Duration = Duration::from_secs(120);
 
-/// What the extraction after a scrape can take: waiting for one of the parse
-/// slots (up to 60 s) plus the 20 s parse, so a scrape that starts with less
-/// than this left could be billed and then abandoned by `JOB_TIMEOUT`.
-const EXTRACT_RESERVE: Duration = Duration::from_secs(80);
+/// What the extraction after a scrape can take: the 20 s parse plus a 10 s
+/// wait for a free parse slot (the decorator's extractor does not queue
+/// longer; see `EXTRACT_SLOT_WAIT`). A scrape that starts with less than this
+/// left could be billed and then abandoned by `JOB_TIMEOUT`.
+const EXTRACT_RESERVE: Duration = Duration::from_secs(30);
+
+/// How long this decorator's extraction waits for a parse slot. It runs
+/// inside an ingest job, so it gives up after 10 s instead of the 60 s the
+/// request paths allow: waiting longer leaves no room for the parse.
+const EXTRACT_SLOT_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a 402 pauses the fallback before one cheap re-probe: a top-up is
 /// noticed within the hour, without a restart.
@@ -90,7 +96,7 @@ impl<F, S> FallbackFetcher<F, S> {
         Self {
             direct,
             scraper,
-            extractor: HtmlExtractor::new(extraction_slots),
+            extractor: HtmlExtractor::with_slot_wait(extraction_slots, EXTRACT_SLOT_WAIT),
             usage,
             monthly_budget_pages,
             scrape_timeout,
@@ -159,26 +165,50 @@ where
         );
     }
 
-    /// One scrape, or the original result when it cannot help.
+    /// A preview is a definite answer: only a browser capture does better.
+    /// With no direct text to keep, the job records why.
+    async fn note_preview(&self) -> Result<FetchedArticle, ArticleFetchError> {
+        self.note_failure(true).await;
+        Err(ArticleFetchError::Permanent(PREVIEW_LOCKED_MSG.to_string()))
+    }
+
+    /// One scrape, or the original result when it cannot help. Text that is
+    /// already stored is never traded for an error: only a scrape that finds
+    /// better text replaces it.
     async fn with_scrape(
         &self,
         url: &str,
         original: Result<FetchedArticle, ArticleFetchError>,
         started: Instant,
     ) -> Result<FetchedArticle, ArticleFetchError> {
+        let outcome = self.scrape_once(url, &original, started).await;
+        match (original, outcome) {
+            (Ok(article), Err(_)) => Ok(article),
+            (_, outcome) => outcome,
+        }
+    }
+
+    /// The scrape's own verdict. `with_scrape` decides what a failure means
+    /// when the direct fetch already has text to store.
+    async fn scrape_once(
+        &self,
+        url: &str,
+        original: &Result<FetchedArticle, ArticleFetchError>,
+        started: Instant,
+    ) -> Result<FetchedArticle, ArticleFetchError> {
         if !self.scraper.enabled() {
-            return original;
+            return original.clone();
         }
         // Past 402, every later call would hit the same wall: stop asking.
         if self.out_of_credits() {
             tracing::debug!(%url, "page scraper skipped: the account is out of credits");
-            return original;
+            return original.clone();
         }
         // A URL the app may not fetch, the vendor must not be asked to fetch
         // either: the vendor would otherwise be an SSRF proxy.
         if let Err(refused) = validate_public_url(url) {
             tracing::debug!(%url, reason = %refused, "page scraper skipped: URL is not public");
-            return original;
+            return original.clone();
         }
         // A scrape that cannot finish, with its extraction, inside the job's
         // budget would be billed and then abandoned, and the retry would pay
@@ -187,7 +217,7 @@ where
             < self.scrape_timeout.saturating_add(EXTRACT_RESERVE)
         {
             tracing::debug!(%url, "page scraper skipped: no job budget left for a scrape");
-            return original;
+            return original.clone();
         }
         match self.usage.reserve_page(self.monthly_budget_pages).await {
             Ok(true) => {}
@@ -198,7 +228,7 @@ where
                         "page scraper skipped: this month's page budget is used up"
                     );
                 }
-                return original;
+                return original.clone();
             }
             Err(error) => {
                 // Spending without accounting is worse than not spending.
@@ -206,7 +236,7 @@ where
                     error = %error,
                     "page scraper skipped: the monthly budget could not be checked"
                 );
-                return original;
+                return original.clone();
             }
         }
 
@@ -234,7 +264,7 @@ where
                 return match error {
                     ScrapeError::OutOfCredits => {
                         self.note_out_of_credits();
-                        original
+                        original.clone()
                     }
                     // The vendor said "not now": the ingest retry schedule is
                     // the right place to wait.
@@ -243,16 +273,15 @@ where
                     }
                     // The same request will fail the same way; the direct
                     // result is the honest outcome.
-                    ScrapeError::Final { .. } => original,
+                    ScrapeError::Final { .. } => original.clone(),
                 };
             }
         };
 
         // From here the page was paid for, whatever comes of it.
         if page.locked {
-            self.note_failure(true).await;
             tracing::debug!(%url, "page scraper got a preview only");
-            return Err(ArticleFetchError::Permanent(PREVIEW_LOCKED_MSG.to_string()));
+            return self.note_preview().await;
         }
         // The app's own Readability pass on the vendor's HTML, so a scrape
         // and a capture produce the same text for the same page. It also
@@ -266,18 +295,17 @@ where
             Err(error) => {
                 self.note_failure(true).await;
                 tracing::debug!(%url, error = %error, "the scraped page has no article");
-                return original;
+                return original.clone();
             }
         };
         if extracted.preview {
-            self.note_failure(true).await;
             tracing::debug!(%url, "page scraper got a member-only preview");
-            return Err(ArticleFetchError::Permanent(PREVIEW_LOCKED_MSG.to_string()));
+            return self.note_preview().await;
         }
-        if !scrape_improves(&original, &extracted.text) {
+        if !scrape_improves(original, &extracted.text) {
             self.note_failure(true).await;
             tracing::debug!(%url, "the scraped text does not beat the direct result");
-            return original;
+            return original.clone();
         }
         tracing::debug!(
             %url,
@@ -820,6 +848,85 @@ mod tests {
         assert_eq!(usage.failures(), vec![false]);
     }
 
+    /// Text in hand is never traded for an error: a retryable scrape failure
+    /// on a page that already has a short article stores the article.
+    #[tokio::test]
+    async fn a_retryable_scrape_error_keeps_a_short_direct_result() {
+        let scraper = FakeScraper::failing(ScrapeError::Retryable {
+            message: "Firecrawl API returned HTTP 503 Service Unavailable".into(),
+            billed: false,
+        });
+        let usage = FakeUsage::allowing();
+        let short = article("A page with a little text");
+        let direct = FakeDirect {
+            result: Ok(short.clone()),
+        };
+        let result = fetcher(direct, scraper.clone(), usage.clone(), 0)
+            .fetch(PUBLIC_URL)
+            .await
+            .unwrap();
+        assert_eq!(result, short);
+        assert_eq!(usage.failures(), vec![false], "the request was refunded");
+    }
+
+    /// ... and neither is a teaser, whatever a paused 402 or a failed scrape
+    /// has to say.
+    #[tokio::test]
+    async fn a_paused_402_keeps_the_direct_teaser() {
+        let scraper = FakeScraper::failing(ScrapeError::OutOfCredits);
+        let usage = FakeUsage::allowing();
+        let teaser = preview_article(&"x".repeat(1_900));
+        let direct = FakeDirect {
+            result: Ok(preview_article(&"x".repeat(1_900))),
+        };
+        let fetcher = fetcher(direct, scraper.clone(), usage.clone(), 200);
+        for _ in 0..2 {
+            let result = fetcher.fetch(PUBLIC_URL).await.unwrap();
+            assert_eq!(result, teaser);
+            assert_eq!(result.source, ContentSource::Fetched);
+        }
+        assert_eq!(scraper.calls(), 1, "the second call is paused");
+        assert_eq!(usage.failures(), vec![false], "the 402 was not billed");
+    }
+
+    /// The default configuration still scrapes after a slow direct fetch: the
+    /// extraction reserve leaves room for a 30 s scrape once 12 s are gone.
+    #[tokio::test]
+    async fn the_default_config_scrapes_after_a_twelve_second_direct_fetch() {
+        struct SlowDirect(Duration);
+        impl ArticleFetcher for SlowDirect {
+            fn fetch(
+                &self,
+                _url: &str,
+            ) -> Pin<Box<dyn Future<Output = Result<FetchedArticle, ArticleFetchError>> + Send + '_>>
+            {
+                let delay = self.0;
+                Box::pin(async move {
+                    tokio::time::sleep(delay).await;
+                    Err(ArticleFetchError::Permanent("HTTP 403".into()))
+                })
+            }
+        }
+
+        let scraper = FakeScraper::page(ARTICLE_HTML);
+        let usage = FakeUsage::allowing();
+        let scraper_timeout =
+            Duration::from_secs(crate::config::DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS);
+        let result = FallbackFetcher::new(
+            SlowDirect(Duration::from_secs(12)),
+            scraper.clone(),
+            1,
+            usage.clone(),
+            200,
+            scraper_timeout,
+        )
+        .fetch(PUBLIC_URL)
+        .await
+        .unwrap();
+        assert_eq!(scraper.calls(), 1, "12 s in, there is still time to scrape");
+        assert_eq!(result.source, ContentSource::Scraped);
+    }
+
     /// Out of credits is not per-page: the next bookmark would burn another
     /// request for the same answer. The pause is a cooldown, not the rest of
     /// the month, so one re-probe an hour notices a top-up without a restart.
@@ -888,6 +995,27 @@ mod tests {
             vec![true],
             "a billed page is not refunded"
         );
+    }
+
+    /// A teaser the direct fetch already has is better than nothing when the
+    /// scraper confirms the page is member-only: it is stored, and the billed
+    /// page is counted.
+    #[tokio::test]
+    async fn a_scraped_preview_keeps_the_direct_teaser() {
+        let scraper = FakeScraper::locked_page();
+        let usage = FakeUsage::allowing();
+        let teaser = preview_article(&"x".repeat(1_900));
+        let direct = FakeDirect {
+            result: Ok(teaser.clone()),
+        };
+        let result = fetcher(direct, scraper.clone(), usage.clone(), 0)
+            .fetch(PUBLIC_URL)
+            .await
+            .unwrap();
+        assert_eq!(result, teaser);
+        assert_eq!(result.source, ContentSource::Fetched);
+        assert_eq!(scraper.calls(), 1);
+        assert_eq!(usage.failures(), vec![true], "the scrape was billed");
     }
 
     /// The vendor did not flag the page, but its HTML says it is member-only:
