@@ -45,9 +45,9 @@ pub enum ScrapeError {
     /// The same request will not succeed later: a rejected payload, a page
     /// that answered an error status, an answer without HTML.
     Final { message: String, billed: bool },
-    /// The account is out of credits (HTTP 402). No scrape can work until the
-    /// credits reset, so the fallback switches itself off for the rest of the
-    /// month instead of burning a request per bookmark.
+    /// The account is out of credits (HTTP 402). No scrape can work until it
+    /// is topped up, so the fallback pauses and re-probes once an hour
+    /// instead of burning a request per bookmark.
     OutOfCredits,
 }
 

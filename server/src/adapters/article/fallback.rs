@@ -14,14 +14,18 @@
 //! A scrape changes the outcome only when it produced text that is at least as
 //! good: an exhausted budget or a rejected request leaves the original result
 //! in place, so the bookmark lands in `failed`/`skipped` exactly as it would
-//! without the scraper. Two answers are recorded instead, and neither is
-//! retried: a member-only preview (`preview only (locked)`, from either path)
+//! without the scraper. A teaser from the direct fetch is stored as article
+//! text when no scrape improves on it; its preview flag only says the scrape is
+//! worth trying, and with the scraper disabled the direct result is returned
+//! unchanged. Two answers replace the direct result instead, and neither is
+//! retried: a member-only preview the scraper found (`preview only (locked)`),
 //! and a retryable scrape failure, which becomes `Transient` so the ingest
 //! schedule retries it.
 //!
 //! Spend is counted the way the vendor bills: a page is reserved before the
-//! call and is refunded only when no 2xx came back. A 2xx that produced
-//! nothing usable still cost a page and is counted as a failure.
+//! call and refunded only when the vendor answered no 2xx. A 2xx that produced
+//! nothing usable keeps its page, and so does a timeout, which the vendor may
+//! have billed anyway.
 
 use crate::adapters::article::readability::HtmlExtractor;
 use crate::adapters::net::validate_public_url;
@@ -30,11 +34,10 @@ use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher, F
 use crate::domain::ports::page_scraper::{PREVIEW_LOCKED_MSG, PageScraper, ScrapeError};
 use crate::domain::ports::scraper_usage_repo::ScraperUsageRepository;
 use crate::domain::search::ContentSource;
-use chrono::Datelike;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -42,6 +45,15 @@ use tokio::time::Instant;
 /// extraction all have to finish inside one job's budget, so a scrape starts
 /// only when this much of it is still left.
 const JOB_BUDGET: Duration = Duration::from_secs(120);
+
+/// What the extraction after a scrape can take: waiting for one of the parse
+/// slots (up to 60 s) plus the 20 s parse, so a scrape that starts with less
+/// than this left could be billed and then abandoned by `JOB_TIMEOUT`.
+const EXTRACT_RESERVE: Duration = Duration::from_secs(80);
+
+/// How long a 402 pauses the fallback before one cheap re-probe: a top-up is
+/// noticed within the hour, without a restart.
+const OUT_OF_CREDITS_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
 pub struct FallbackFetcher<F, S> {
     direct: F,
@@ -57,9 +69,11 @@ pub struct FallbackFetcher<F, S> {
     /// One warning per process when the month's budget is gone, not one per
     /// bookmark.
     budget_notice: AtomicBool,
-    /// The month (`YYYYMM`) whose credits ran out, 0 while they have not: the
-    /// fallback then calls no vendor at all until the month rolls.
-    out_of_credits_month: AtomicU32,
+    /// When the fallback may ask the vendor again after a 402, in epoch
+    /// milliseconds; 0 while it never happened.
+    out_of_credits_resume_ms: AtomicU64,
+    /// `OUT_OF_CREDITS_COOLDOWN`, overridable so a test need not wait an hour.
+    out_of_credits_cooldown: Duration,
 }
 
 impl<F, S> FallbackFetcher<F, S> {
@@ -82,7 +96,8 @@ impl<F, S> FallbackFetcher<F, S> {
             scrape_timeout,
             job_budget: JOB_BUDGET,
             budget_notice: AtomicBool::new(false),
-            out_of_credits_month: AtomicU32::new(0),
+            out_of_credits_resume_ms: AtomicU64::new(0),
+            out_of_credits_cooldown: OUT_OF_CREDITS_COOLDOWN,
         }
     }
 
@@ -92,6 +107,13 @@ impl<F, S> FallbackFetcher<F, S> {
     #[cfg(test)]
     pub fn with_job_budget(mut self, job_budget: Duration) -> Self {
         self.job_budget = job_budget;
+        self
+    }
+
+    /// The 402 cooldown; a test shortens it instead of waiting an hour.
+    #[cfg(test)]
+    pub fn with_out_of_credits_cooldown(mut self, cooldown: Duration) -> Self {
+        self.out_of_credits_cooldown = cooldown;
         self
     }
 }
@@ -109,26 +131,32 @@ where
         }
     }
 
-    /// The current month, as `YYYYMM`.
-    fn month_key() -> u32 {
-        let now = chrono::Utc::now();
-        now.year() as u32 * 100 + now.month()
+    /// Epoch milliseconds, for the breaker's deadline.
+    fn now_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0)
     }
 
-    /// True while this month's credits are known to be gone.
+    /// True while a 402's cooldown runs: one re-probe an hour notices a
+    /// top-up without a restart, and without a request per bookmark.
     fn out_of_credits(&self) -> bool {
-        let month = self.out_of_credits_month.load(Ordering::Relaxed);
-        month != 0 && month == Self::month_key()
+        let resume = self.out_of_credits_resume_ms.load(Ordering::Relaxed);
+        resume != 0 && Self::now_millis() < resume
     }
 
-    /// Switch the fallback off for the rest of the month, warning once.
+    /// Pause the fallback for the cooldown, warning once per pause.
     fn note_out_of_credits(&self) {
-        let month = Self::month_key();
-        if self.out_of_credits_month.swap(month, Ordering::Relaxed) != month {
-            tracing::warn!(
-                "page scraper switched off: the account is out of credits until next month"
-            );
-        }
+        let cooldown = u64::try_from(self.out_of_credits_cooldown.as_millis()).unwrap_or(u64::MAX);
+        self.out_of_credits_resume_ms.store(
+            Self::now_millis().saturating_add(cooldown),
+            Ordering::Relaxed,
+        );
+        tracing::warn!(
+            retry_in_seconds = self.out_of_credits_cooldown.as_secs(),
+            "page scraper paused: the account is out of credits"
+        );
     }
 
     /// One scrape, or the original result when it cannot help.
@@ -152,9 +180,12 @@ where
             tracing::debug!(%url, reason = %refused, "page scraper skipped: URL is not public");
             return original;
         }
-        // A scrape that cannot finish inside the job's budget would be billed
-        // and then abandoned, and the retry would pay again.
-        if self.job_budget.saturating_sub(started.elapsed()) < self.scrape_timeout {
+        // A scrape that cannot finish, with its extraction, inside the job's
+        // budget would be billed and then abandoned, and the retry would pay
+        // again.
+        if self.job_budget.saturating_sub(started.elapsed())
+            < self.scrape_timeout.saturating_add(EXTRACT_RESERVE)
+        {
             tracing::debug!(%url, "page scraper skipped: no job budget left for a scrape");
             return original;
         }
@@ -182,8 +213,10 @@ where
         // The adapter bounds itself too; this is the job's hard stop.
         let page = match tokio::time::timeout(self.scrape_timeout, self.scraper.scrape(url)).await {
             Err(_elapsed) => {
-                // No answer came back, so nothing was billed.
-                self.note_failure(false).await;
+                // No answer was seen, but a timeout usually means the vendor
+                // kept working: assume the page was billed rather than give
+                // the month's budget away.
+                self.note_failure(true).await;
                 tracing::debug!(%url, "page scrape timed out");
                 return Err(ArticleFetchError::Transient(
                     "page scraper timed out".to_string(),
@@ -294,7 +327,7 @@ where
         let url = url.to_string();
         Box::pin(async move {
             let started = Instant::now();
-            let outcome = match self.direct.fetch(&url).await {
+            match self.direct.fetch(&url).await {
                 // The retry schedule (Transient) or the non-HTML verdict
                 // (Skipped) already decides these; a scrape would not.
                 Err(ArticleFetchError::Transient(message)) => {
@@ -304,22 +337,15 @@ where
                     Err(ArticleFetchError::Skipped(message))
                 }
                 Err(permanent) => self.with_scrape(&url, Err(permanent), started).await,
-                // Checked before the length rule: a 1,900-character teaser is
-                // not an article, and only the scrape (or a capture) can say
-                // whether the full one is reachable.
+                // A preview is checked before the length rule: a
+                // 1,900-character teaser is not an article, so the scraper
+                // gets a chance at the full one. Without a scraper this is the
+                // direct result, teaser and all, exactly as before.
                 Ok(article) if article.preview => {
                     self.with_scrape(&url, Ok(article), started).await
                 }
                 Ok(article) if is_article(&article.text) => Ok(article),
                 Ok(short) => self.with_scrape(&url, Ok(short), started).await,
-            };
-            // Whatever produced it, a preview is never stored as a full fetch:
-            // it stays metadata-only until a capture replaces it.
-            match outcome {
-                Ok(article) if article.preview => {
-                    Err(ArticleFetchError::Permanent(PREVIEW_LOCKED_MSG.to_string()))
-                }
-                other => other,
             }
         })
     }
@@ -330,6 +356,7 @@ mod tests {
     use super::*;
     use crate::domain::error::DomainError;
     use crate::domain::ports::page_scraper::ScrapedPage;
+    use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
@@ -396,7 +423,8 @@ mod tests {
         }
     }
 
-    /// One prepared scrape answer, handed out once.
+    /// One prepared scrape answer, handed out in order.
+    #[derive(Clone)]
     enum Answer {
         Page(ScrapedPage),
         Fail(ScrapeError),
@@ -406,7 +434,7 @@ mod tests {
     struct FakeScraper {
         enabled: bool,
         calls: AtomicUsize,
-        answer: Mutex<Option<Answer>>,
+        answers: Mutex<VecDeque<Answer>>,
     }
 
     impl FakeScraper {
@@ -432,23 +460,29 @@ mod tests {
             Self::answering(Answer::Fail(error))
         }
 
+        /// Answers each call in turn; the last one repeats, so a breaker test
+        /// can trip once and probe again.
+        fn answering_all(answers: Vec<Answer>) -> Arc<Self> {
+            Arc::new(Self {
+                enabled: true,
+                calls: AtomicUsize::new(0),
+                answers: Mutex::new(answers.into()),
+            })
+        }
+
         fn slow(page: ScrapedPage) -> Arc<Self> {
             Self::answering(Answer::Slow(Duration::from_secs(5), page))
         }
 
         fn answering(answer: Answer) -> Arc<Self> {
-            Arc::new(Self {
-                enabled: true,
-                calls: AtomicUsize::new(0),
-                answer: Mutex::new(Some(answer)),
-            })
+            Self::answering_all(vec![answer])
         }
 
         fn disabled() -> Arc<Self> {
             Arc::new(Self {
                 enabled: false,
                 calls: AtomicUsize::new(0),
-                answer: Mutex::new(None),
+                answers: Mutex::new(VecDeque::new()),
             })
         }
 
@@ -468,12 +502,16 @@ mod tests {
         ) -> crate::domain::ports::page_scraper::BoxFuture<'_, Result<ScrapedPage, ScrapeError>>
         {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            let answer = self
-                .answer
-                .lock()
-                .unwrap()
-                .take()
-                .expect("the fake scraper answers once");
+            let answer = {
+                let mut answers = self.answers.lock().unwrap();
+                if answers.len() > 1 {
+                    answers.pop_front()
+                } else {
+                    // The last answer repeats, so a test can drive two calls.
+                    answers.front().cloned()
+                }
+                .expect("the fake scraper was given an answer")
+            };
             Box::pin(async move {
                 match answer {
                     Answer::Page(page) => Ok(page),
@@ -783,23 +821,47 @@ mod tests {
     }
 
     /// Out of credits is not per-page: the next bookmark would burn another
-    /// request for the same answer, so the fallback stops asking until the
-    /// month rolls.
+    /// request for the same answer. The pause is a cooldown, not the rest of
+    /// the month, so one re-probe an hour notices a top-up without a restart.
     #[tokio::test]
-    async fn out_of_credits_switches_the_fallback_off_for_the_month() {
-        let scraper = FakeScraper::failing(ScrapeError::OutOfCredits);
+    async fn out_of_credits_pauses_the_fallback_then_reprobes_after_the_cooldown() {
+        let scraper = FakeScraper::answering_all(vec![
+            Answer::Fail(ScrapeError::OutOfCredits),
+            Answer::Fail(ScrapeError::OutOfCredits),
+            Answer::Page(ScrapedPage {
+                html: ARTICLE_HTML.to_string(),
+                final_url: PUBLIC_URL.to_string(),
+                html_bytes: ARTICLE_HTML.len(),
+                locked: false,
+            }),
+        ]);
         let usage = FakeUsage::allowing();
         let direct = FakeDirect {
             result: Err(ArticleFetchError::Permanent("HTTP 403".into())),
         };
-        let fetcher = fetcher(direct, scraper.clone(), usage.clone(), 200);
-        for _ in 0..3 {
+        let fetcher = fetcher(direct, scraper.clone(), usage.clone(), 200)
+            .with_out_of_credits_cooldown(Duration::from_millis(50));
+
+        // First 402 trips the pause; the next calls do not reach the vendor.
+        for _ in 0..2 {
             let result = fetcher.fetch(PUBLIC_URL).await.unwrap_err();
             assert_eq!(result, ArticleFetchError::Permanent("HTTP 403".into()));
         }
-        assert_eq!(scraper.calls(), 1, "the breaker stops later calls");
+        assert_eq!(scraper.calls(), 1, "the pause stops later calls");
         assert_eq!(usage.reserves(), 1, "and reserves no more pages");
-        assert_eq!(usage.failures(), vec![false]);
+        assert_eq!(usage.failures(), vec![false], "no page was billed");
+
+        // Past the cooldown one probe goes out; still 402, so it re-arms.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let result = fetcher.fetch(PUBLIC_URL).await.unwrap_err();
+        assert_eq!(result, ArticleFetchError::Permanent("HTTP 403".into()));
+        assert_eq!(scraper.calls(), 2, "the probe after the cooldown went out");
+
+        // A top-up is noticed on the next probe, and the scrape is stored.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let result = fetcher.fetch(PUBLIC_URL).await.unwrap();
+        assert_eq!(result.source, ContentSource::Scraped);
+        assert_eq!(scraper.calls(), 3);
     }
 
     /// A member-only preview is a definite answer: the error says so and the
@@ -906,20 +968,22 @@ mod tests {
     /// not the article: with no scraper it is metadata-only, never a fetched
     /// full text.
     #[tokio::test]
-    async fn a_direct_preview_is_never_stored_as_full_text() {
+    async fn a_direct_preview_is_stored_unchanged_when_the_scraper_is_disabled() {
         let scraper = FakeScraper::disabled();
         let usage = FakeUsage::allowing();
+        let teaser = preview_article(&"x".repeat(1_900));
         let direct = FakeDirect {
-            result: Ok(preview_article(&"x".repeat(1_900))),
+            result: Ok(teaser.clone()),
         };
-        let result = fetcher(direct, scraper, usage.clone(), 0)
+        let result = fetcher(direct, scraper.clone(), usage.clone(), 0)
             .fetch(PUBLIC_URL)
             .await
-            .unwrap_err();
-        assert_eq!(
-            result,
-            ArticleFetchError::Permanent(PREVIEW_LOCKED_MSG.to_string())
-        );
+            .unwrap();
+        assert_eq!(result, teaser, "a disabled scraper changes nothing");
+        assert_eq!(result.source, ContentSource::Fetched);
+        assert!(result.preview);
+        assert_eq!(scraper.calls(), 0);
+        assert_eq!(usage.reserves(), 0);
         assert!(usage.failures().is_empty());
     }
 
@@ -966,9 +1030,10 @@ mod tests {
     }
 
     /// The decorator's own ceiling stops a vendor that ignores its client
-    /// timeout. Nothing came back, so nothing is billed.
+    /// timeout. The job retries, and the page stays counted: a timed-out
+    /// scrape is usually being worked on vendor-side.
     #[tokio::test]
-    async fn a_slow_scrape_becomes_a_retryable_timeout_and_is_refunded() {
+    async fn a_slow_scrape_becomes_a_retryable_timeout_and_keeps_its_page() {
         let slow = ScrapedPage {
             html: ARTICLE_HTML.to_string(),
             final_url: PUBLIC_URL.to_string(),
@@ -997,6 +1062,10 @@ mod tests {
             }
             other => panic!("expected a transient error, got {other:?}"),
         }
-        assert_eq!(usage.failures(), vec![false]);
+        assert_eq!(
+            usage.failures(),
+            vec![true],
+            "the vendor may have billed the page a timed-out scrape was working on"
+        );
     }
 }

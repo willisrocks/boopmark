@@ -606,12 +606,13 @@ pub struct FallbackFetcher<F, S> { direct: F, scraper: S, extractor: HtmlExtract
 1. `direct.fetch(url)`; on `Ok(article)` with `article.text.chars().count() >= 300` and no
    preview verdict, return it with `source = fetched`.
 2. On a direct preview, `Ok(short)` or `Err(Permanent(_))`, and only if
-   `scraper.enabled()`: skip when this month's credits are gone (402 earlier) or when the
-   job's remaining budget is shorter than a scrape; refuse the URL with
-   `net::validate_public_url(url)` (a URL the app may not fetch, the vendor must not be
-   asked to fetch either — that is the SSRF boundary for a hosted scraper, whose own fetch
-   is the vendor's responsibility); reserve a page of the monthly budget; then
-   `scraper.scrape(url)` inside `PAGE_SCRAPER_TIMEOUT_SECONDS`. On success run
+   `scraper.enabled()`: skip when a 402 pause is running or when the job's remaining budget
+   is shorter than a scrape *plus its extraction* (about 80 s more, so `JOB_TIMEOUT` cannot
+   fire after a billed scrape); refuse the URL with `net::validate_public_url(url)` (a URL
+   the app may not fetch, the vendor must not be asked to fetch either — that is the SSRF
+   boundary for a hosted scraper, whose own fetch is the vendor's responsibility); reserve a
+   page of the monthly budget; then `scraper.scrape(url)` inside
+   `PAGE_SCRAPER_TIMEOUT_SECONDS`. On success run
    `extract_fetched(vendor_html, Some("text/html"), final_url)` and return
    `source = scraped` when the text is non-empty and, for a short direct result, longer
    than it, or when the direct result was a preview (length is not the measure for a
@@ -620,12 +621,15 @@ pub struct FallbackFetcher<F, S> { direct: F, scraper: S, extractor: HtmlExtract
    non-HTML verdict already decides).
 4. A scrape that produced no stored text is accounted by its billing and then decided:
    `Retryable` becomes `ArticleFetchError::Transient`, so 429, 5xx, timeouts and an operator
-   401/403 retry on the ingest schedule; `OutOfCredits` switches the fallback off for the
-   rest of the month, with one warning; `Final`, an extraction with no article, or text no
+   401/403 retry on the ingest schedule; `OutOfCredits` pauses the fallback for an hour,
+   with one warning, and then re-probes; `Final`, an extraction with no article, or text no
    better than the direct result returns the *original* direct result, so the bookmark
    lands in `failed`/`skipped` exactly as today.
-5. A preview, from either path, is recorded as `error = 'preview only (locked)'` and is
-   final: nothing is stored as a full fetch, and no retry can change the answer.
+5. A preview the *scraper* found is recorded as `error = 'preview only (locked)'` and is
+   final. A preview from the *direct* fetch is not: with the scraper disabled the direct
+   result is returned unchanged, teaser and all, which is the behaviour before this design.
+   The preview flag only sends the fetch to the scraper and keeps a teaser from counting as
+   better text; it never turns a stored teaser into an error.
 
 `FetchedArticle` gains `pub source: ContentSource` and `pub preview: bool` (the direct
 fetch's own preview verdict, so a 1,900-character teaser is never stored as a full fetch),
@@ -646,15 +650,18 @@ makes "the month is full" return no row), and when `PAGE_SCRAPER_MONTHLY_BUDGET_
 and the month's count has reached it, no scrape is attempted: the decorator behaves exactly
 as if the scraper were disabled and logs one warning for the process. The count follows the
 vendor's billing, because 51 of the eval's 84 pages were previews: a page is refunded only
-when no 2xx came back (network, timeout, 4xx, 5xx), while a 2xx that produced a preview, no
-article or no better text keeps its page and increments `failures`. HTTP 402 (out of
-credits) stops the scraping for the rest of the month with one warning, since every later
-bookmark would burn a request for the same answer. A scrape is also not started when the
-job's remaining budget is shorter than `PAGE_SCRAPER_TIMEOUT_SECONDS`: it would be billed
-and then abandoned, and the retry would pay again. An unreadable `scraper_usage` skips the
-scrape: spending without accounting is worse than not spending. This is a page cap, not a
-dollar cap, because only the hosted candidate has a price and the eval establishes it; a
-dollar figure is a round number on top of the same counter and needs no design.
+when no 2xx came back (network, 4xx, 5xx), while a 2xx that produced a preview, no article
+or no better text keeps its page and increments `failures`; a timeout also keeps its page,
+because the vendor may have billed the scrape it was working on. HTTP 402 (out of credits)
+pauses the scraping for an hour with one warning, since every later bookmark would burn a
+request for the same answer, and then makes one re-probe an hour, so a top-up is noticed
+without a restart. A scrape is also not started when the job's remaining budget is shorter
+than `PAGE_SCRAPER_TIMEOUT_SECONDS` plus the extraction it needs (about 80 s for a parse
+slot and the parse): it would be billed and then abandoned, and the retry would pay again.
+An unreadable `scraper_usage` skips the scrape: spending without accounting is worse than
+not spending. This is a page cap, not a dollar cap, because only the hosted candidate has a
+price and the eval establishes it; a dollar figure is a round number on top of the same
+counter and needs no design.
 
 **SSRF.** The direct fetch keeps every guard (`net.rs`: `PublicOnlyResolver`, checked
 redirects, `guarded_get`). For a hosted scraper the vendor performs the fetch, so the SSRF
@@ -777,12 +784,13 @@ production.
 - `FallbackFetcher`: direct ok/long → no scrape; direct `Permanent` → scrape; direct
   short → scrape; direct `Transient`/`Skipped` → no scrape; a `Retryable` scrape failure →
   `Transient` with the reservation refunded; a `Final` scrape failure → the original result;
-  402 → the fallback stops calling the vendor for the month; a billed failure (preview, no
-  article, no better text) keeps its page; budget exhausted → no scrape; a job budget too
-  short for a scrape → no scrape and no reservation; a slow scrape → `Transient`, refunded;
-  scraper disabled → direct result; a private URL → no vendor call; a direct preview of
-  300+ characters → `preview only (locked)`, replaced by a full scrape. Fake `PageScraper`
-  and `ScraperUsageRepository` counting calls, like `StubEmbedder`.
+  402 → a paused fallback that re-probes after its cooldown; a billed failure (preview, no
+  article, no better text) keeps its page; a timeout keeps its page and becomes `Transient`;
+  budget exhausted → no scrape; a job budget too short for a scrape plus its extraction → no
+  scrape and no reservation; scraper disabled → the direct result byte for byte, a teaser
+  included; a private URL → no vendor call; a direct teaser of 300+ characters → the scrape
+  replaces it with the full article when there is one. Fake `PageScraper` and
+  `ScraperUsageRepository` counting calls, like `StubEmbedder`.
 - `preview::is_locked_html`: the post's own locked entry; whitespace around the marker; a
   related member post embedded in a free story's state; a query or trailing slash on
   either URL; another host; no page state; braces inside a value.
