@@ -8,10 +8,12 @@
 //! page's own state. The response is read with a cap, and the page itself is
 //! checked against the same ceiling as the direct fetch before it is parsed.
 //!
-//! A 429 is the vendor's queue, not this page: it is waited out once inside
-//! the same job (`Retry-After`, else 2 s) and only then handed to the ingest
-//! schedule. The fallback decorator paces the calls themselves by
-//! `PAGE_SCRAPER_CONCURRENCY`, so the plan's own limit is rarely reached.
+//! A 429 is the vendor's account talking, not this page: it is reported as
+//! `ScrapeError::RateLimited` with the wait the vendor named, and the fallback
+//! decorator pauses every scrape for it and decides whether one more request
+//! fits the job. The decorator also paces the calls themselves by
+//! `PAGE_SCRAPER_CONCURRENCY` and `PAGE_SCRAPER_RATE_PER_MINUTE`, because the
+//! plan limits both the renders in flight and the requests a minute.
 
 use crate::adapters::article::readability::MAX_HTML_BYTES;
 use crate::adapters::net::{CappedReadError, read_capped};
@@ -28,13 +30,6 @@ const DEFAULT_BASE_URL: &str = "https://api.firecrawl.dev";
 /// The JSON envelope carries the HTML as an escaped string, so the body can be
 /// larger than the page. Read with headroom, then check the page itself.
 const MAX_RESPONSE_BYTES: usize = MAX_HTML_BYTES + 2 * 1024 * 1024;
-/// How long a 429 waits before the one retry, when the vendor sends no usable
-/// `Retry-After`.
-const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(2);
-/// The longest wait one scrape may spend stalled: past this the ingest
-/// schedule retries, rather than a job's slot sitting idle on the vendor's
-/// queue.
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 pub struct FirecrawlScraper {
     client: reqwest::Client,
@@ -79,16 +74,6 @@ struct ScrapeMetadata {
     is_locked: Option<bool>,
 }
 
-/// One request's answer: the page, or the vendor asking to be asked again in
-/// a moment.
-enum Attempt {
-    Page(Result<ScrapedPage, ScrapeError>),
-    /// HTTP 429, with the wait the vendor named when it named a usable one.
-    TooManyRequests {
-        retry_after: Option<Duration>,
-    },
-}
-
 impl FirecrawlScraper {
     pub fn new(api_key: String, timeout: Duration) -> Self {
         Self::with_base_url(api_key, DEFAULT_BASE_URL.to_string(), timeout)
@@ -110,36 +95,10 @@ impl FirecrawlScraper {
     /// then the payload's `success`, the target page's status and the HTML
     /// itself decide what came back.
     ///
-    /// A 429 is the vendor's queue talking, not this page's verdict, so it is
-    /// waited out once inside the same job: unbilled either way, where the
-    /// ingest schedule would only retry into the same queue.
-    async fn scrape_page(&self, url: &str) -> Result<ScrapedPage, ScrapeError> {
-        match self.scrape_attempt(url).await {
-            Attempt::Page(result) => result,
-            // No usable wait, or one longer than a scrape may stall for.
-            Attempt::TooManyRequests { retry_after: None } => Err(rate_limited()),
-            Attempt::TooManyRequests {
-                retry_after: Some(delay),
-            } => {
-                tracing::info!(
-                    vendor = VENDOR,
-                    retry_after_seconds = delay.as_secs(),
-                    "the vendor rate-limited the scraper: retrying once inside the job"
-                );
-                tokio::time::sleep(delay).await;
-                match self.scrape_attempt(url).await {
-                    Attempt::Page(result) => result,
-                    // Still throttled: the ingest schedule is the place to
-                    // wait now, not a slot held for another backoff.
-                    Attempt::TooManyRequests { .. } => Err(rate_limited()),
-                }
-            }
-        }
-    }
-
-    /// One request. A 429 comes back as its own case, so `scrape_page` can
-    /// retry it; every other answer is this attempt's result.
-    async fn scrape_attempt(&self, url: &str) -> Attempt {
+    /// A 429 is the account's rate limit, not this page's verdict: it comes
+    /// back with the wait the vendor named, so the caller can pause every
+    /// scrape for it and decide whether one more request fits its job.
+    async fn scrape_once(&self, url: &str) -> Result<ScrapedPage, ScrapeError> {
         let body = json!({
             "url": url,
             "formats": ["rawHtml"],
@@ -155,7 +114,7 @@ impl FirecrawlScraper {
             Ok(response) => response,
             // Nothing came back: no 2xx, so no page was billed.
             Err(error) => {
-                return Attempt::Page(Err(match transport_error(VENDOR, &error) {
+                return Err(match transport_error(VENDOR, &error) {
                     DomainError::InvalidInput(message) => ScrapeError::Final {
                         message,
                         billed: false,
@@ -168,25 +127,25 @@ impl FirecrawlScraper {
                         message: other.to_string(),
                         billed: false,
                     },
-                }));
+                });
             }
         };
 
         let status = response.status();
         if status == StatusCode::PAYMENT_REQUIRED {
-            return Attempt::Page(Err(ScrapeError::OutOfCredits));
+            return Err(ScrapeError::OutOfCredits);
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
             let asked = response
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok());
-            return Attempt::TooManyRequests {
+            return Err(ScrapeError::RateLimited {
                 retry_after: retry_after_delay(asked),
-            };
+            });
         }
         if !status.is_success() {
-            return Attempt::Page(Err(
+            return Err(
                 match http_status_error(VENDOR, status, KeyOwner::Operator) {
                     DomainError::Internal(message) => ScrapeError::Retryable {
                         message,
@@ -197,7 +156,7 @@ impl FirecrawlScraper {
                         billed: false,
                     },
                 },
-            ));
+            );
         }
 
         // From here on the request was accepted, so the page is paid for even
@@ -205,24 +164,24 @@ impl FirecrawlScraper {
         let bytes = match read_capped(response, MAX_RESPONSE_BYTES).await {
             Ok(bytes) => bytes,
             Err(CappedReadError::TooBig) => {
-                return Attempt::Page(Err(ScrapeError::Final {
+                return Err(ScrapeError::Final {
                     message: format!("{VENDOR} response exceeded {MAX_RESPONSE_BYTES} bytes"),
                     billed: true,
-                }));
+                });
             }
             Err(CappedReadError::Read(_)) => {
-                return Attempt::Page(Err(ScrapeError::Retryable {
+                return Err(ScrapeError::Retryable {
                     message: format!("{VENDOR} response read failed"),
                     billed: true,
-                }));
+                });
             }
         };
         match serde_json::from_slice(&bytes) {
-            Ok(payload) => Attempt::Page(Self::interpret(payload, url)),
-            Err(_) => Attempt::Page(Err(ScrapeError::Final {
+            Ok(payload) => Self::interpret(payload, url),
+            Err(_) => Err(ScrapeError::Final {
                 message: format!("{VENDOR} returned a malformed response"),
                 billed: true,
-            })),
+            }),
         }
     }
 
@@ -283,31 +242,18 @@ impl FirecrawlScraper {
 impl PageScraper for FirecrawlScraper {
     fn scrape(&self, url: &str) -> BoxFuture<'_, Result<ScrapedPage, ScrapeError>> {
         let url = url.to_string();
-        Box::pin(async move { self.scrape_page(&url).await })
+        Box::pin(async move { self.scrape_once(&url).await })
     }
 }
 
-/// The wait a 429 asked for: `Retry-After` in whole seconds when the vendor
-/// sent a usable one, [`DEFAULT_RETRY_DELAY`] when it sent none. `None` means
-/// the vendor asked for longer than one job may wait, so the ingest schedule
-/// retries instead of a slot stalling here.
+/// The wait a 429 asked for, when the vendor named one in seconds. An
+/// `Retry-After` the app cannot read (an HTTP date, a malformed value) and a
+/// missing one both come back as `None`, and the caller applies its own
+/// default: the ask is the account's, so it must not be guessed here.
 fn retry_after_delay(asked: Option<&str>) -> Option<Duration> {
-    let requested = asked
+    asked
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .map_or(DEFAULT_RETRY_DELAY, Duration::from_secs);
-    (requested <= MAX_RETRY_DELAY).then_some(requested)
-}
-
-/// A 429 this job could not wait out. Nothing came back, so no page was
-/// billed and the reservation is refunded like any other unbilled failure.
-fn rate_limited() -> ScrapeError {
-    ScrapeError::Retryable {
-        message: format!(
-            "{VENDOR} API returned HTTP {}",
-            StatusCode::TOO_MANY_REQUESTS
-        ),
-        billed: false,
-    }
+        .map(Duration::from_secs)
 }
 
 /// The request body, so a test asserts it without restating it.
@@ -535,92 +481,65 @@ mod tests {
         }
     }
 
-    /// A 429 is the vendor's queue, not this page's verdict: it is waited out
-    /// once inside the same job, and the page is still scraped.
+    /// A 429 is the account's limit, not this page's verdict: the error
+    /// carries the wait the vendor named, and nothing was billed.
     #[tokio::test]
-    async fn a_rate_limit_is_retried_once_after_its_retry_after() {
-        let article = "<html><body><article><p>The full text</p></article></body></html>";
-        let (router, seen) = scripted(vec![
-            Scripted {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                retry_after: Some("0"),
-                body: json!({"success": false, "error": SECRET_BODY}),
-            },
-            Scripted {
-                status: StatusCode::OK,
-                retry_after: None,
-                body: page(article),
-            },
-        ]);
-        let base = serve(router).await;
-        let page = scraper(base, Duration::from_secs(5))
-            .scrape("https://medium.com/@writer/a-post")
-            .await
-            .unwrap();
-        assert_eq!(page.html, article);
-        assert_eq!(
-            seen.lock().unwrap().len(),
-            2,
-            "the 429 was retried exactly once"
-        );
-    }
-
-    /// Still throttled after the retry: the ingest schedule takes over, and
-    /// nothing was billed.
-    #[tokio::test]
-    async fn a_repeated_rate_limit_is_retryable_and_unbilled() {
-        let limited = Scripted {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            retry_after: Some("0"),
-            body: json!({"success": false, "error": SECRET_BODY}),
-        };
-        let (router, seen) = scripted(vec![limited.clone(), limited]);
-        let base = serve(router).await;
-        assert_retryable(
-            scraper(base, Duration::from_secs(5))
-                .scrape("https://example.com/a")
-                .await,
-            "429",
-            false,
-        );
-        assert_eq!(seen.lock().unwrap().len(), 2, "one retry, not a loop");
-    }
-
-    /// A wait this job cannot afford is not spent here: no request goes out,
-    /// and the retry schedule takes over instead of a slot stalling.
-    #[tokio::test]
-    async fn a_long_retry_after_is_not_waited_out() {
+    async fn a_rate_limit_reports_the_vendors_ask() {
         let (router, seen) = scripted(vec![Scripted {
             status: StatusCode::TOO_MANY_REQUESTS,
-            retry_after: Some("60"),
+            retry_after: Some("30"),
             body: json!({"success": false, "error": SECRET_BODY}),
         }]);
         let base = serve(router).await;
-        assert_retryable(
-            scraper(base, Duration::from_secs(5))
-                .scrape("https://example.com/a")
-                .await,
-            "429",
-            false,
+        let result = scraper(base, Duration::from_secs(5))
+            .scrape("https://medium.com/@writer/a-post")
+            .await;
+        assert_eq!(
+            result,
+            Err(ScrapeError::RateLimited {
+                retry_after: Some(Duration::from_secs(30)),
+            })
         );
         assert_eq!(
             seen.lock().unwrap().len(),
             1,
-            "a 429 the job cannot wait out is not retried here"
+            "the adapter sends one request; the job decides whether to retry"
         );
     }
 
+    /// A 429 without a wait the app can read is still the account's limit.
+    #[tokio::test]
+    async fn a_rate_limit_without_a_retry_after_names_no_wait() {
+        for retry_after in [None, Some("Wed, 21 Oct 2015 07:28:00 GMT")] {
+            let (router, _seen) = scripted(vec![Scripted {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                retry_after,
+                body: json!({"success": false, "error": SECRET_BODY}),
+            }]);
+            let base = serve(router).await;
+            let result = scraper(base, Duration::from_secs(5))
+                .scrape("https://example.com/a")
+                .await;
+            match result {
+                Err(ScrapeError::RateLimited { retry_after }) => {
+                    assert_eq!(retry_after, None, "{retry_after:?}");
+                }
+                other => panic!("expected a rate-limited error, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
-    fn retry_after_seconds_are_honoured_but_not_beyond_one_job() {
+    fn retry_after_seconds_are_read_and_nothing_else_is_guessed() {
         assert_eq!(retry_after_delay(Some("3")), Some(Duration::from_secs(3)));
         assert_eq!(retry_after_delay(Some(" 0 ")), Some(Duration::ZERO));
-        assert_eq!(retry_after_delay(None), Some(DEFAULT_RETRY_DELAY));
-        // HTTP dates are not parsed: the default wait is used instead.
+        assert_eq!(retry_after_delay(None), None);
+        // HTTP dates are not parsed: the caller applies its own default.
         assert_eq!(
             retry_after_delay(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
-            Some(DEFAULT_RETRY_DELAY)
+            None
         );
-        assert_eq!(retry_after_delay(Some("60")), None);
+        assert_eq!(retry_after_delay(Some("soon")), None);
     }
 
     /// Out of credits is not a per-page failure: no scrape can work until the

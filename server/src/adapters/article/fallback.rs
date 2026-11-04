@@ -27,26 +27,35 @@
 //! nothing usable keeps its page, and so does a timeout, which the vendor may
 //! have billed anyway.
 //!
-//! Scrapes are paced by `PAGE_SCRAPER_CONCURRENCY`: a job waits for one of
-//! that many slots before it reserves a page or calls the vendor, because the
-//! vendor's plan answers 429 above its own concurrency and a retry would meet
-//! the same wall. A job that cannot get a slot inside its remaining budget
-//! keeps its direct result instead.
+//! Scrapes are paced by `PAGE_SCRAPER_CONCURRENCY` and
+//! `PAGE_SCRAPER_RATE_PER_MINUTE`: a job waits for one of that many slots and
+//! for its turn in the minute's requests before it reserves a page or calls
+//! the vendor, because the plan limits both the renders in flight and the
+//! requests a minute. A job that cannot get its turn inside its remaining
+//! budget keeps its direct result instead.
+//!
+//! A 429 is the account's limit, not a page's: it pauses every scrape in the
+//! process for the wait the vendor named (capped), and the one job that hit
+//! it retries once when that wait fits the budget. A job that arrives during
+//! the pause waits it out if it fits, and otherwise goes back to the ingest
+//! schedule without a request.
 
 use crate::adapters::article::readability::HtmlExtractor;
 use crate::adapters::net::validate_public_url;
-use crate::config::DEFAULT_PAGE_SCRAPER_CONCURRENCY;
+use crate::config::{DEFAULT_PAGE_SCRAPER_CONCURRENCY, DEFAULT_PAGE_SCRAPER_RATE_PER_MINUTE};
 use crate::domain::chunking::MIN_CHUNKED_TEXT_CHARS;
 use crate::domain::ports::article_fetcher::{ArticleFetchError, ArticleFetcher, FetchedArticle};
-use crate::domain::ports::page_scraper::{PREVIEW_LOCKED_MSG, PageScraper, ScrapeError};
+use crate::domain::ports::page_scraper::{
+    PREVIEW_LOCKED_MSG, PageScraper, ScrapeError, ScrapedPage,
+};
 use crate::domain::ports::scraper_usage_repo::ScraperUsageRepository;
 use crate::domain::search::ContentSource;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
 /// Mirrors `IngestWorker::JOB_TIMEOUT`: the direct fetch, any scrape and the
@@ -69,6 +78,60 @@ const EXTRACT_SLOT_WAIT: Duration = Duration::from_secs(10);
 /// noticed within the hour, without a restart.
 const OUT_OF_CREDITS_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
+/// How long a 429 pauses every scrape when the vendor named no wait the app
+/// could read.
+const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// The longest pause one 429 may set. The vendor's ask is usually about a
+/// minute; past this the ingest schedule is the better place to wait, since a
+/// job's budget cannot hold it anyway.
+const MAX_COOLDOWN: Duration = Duration::from_secs(120);
+
+/// `PAGE_SCRAPER_RATE_PER_MINUTE`, as an interval: one vendor request per
+/// `interval`, handed out in order, so the account never sees a minute with
+/// more requests than the plan allows however many jobs are queued.
+struct RequestPacer {
+    interval: Duration,
+    /// When the next request may go out. Read and written under the lock, so
+    /// callers are served in the order they asked.
+    next: tokio::sync::Mutex<Instant>,
+}
+
+impl RequestPacer {
+    fn new(rate_per_minute: usize) -> Self {
+        Self {
+            // One a minute is the floor: zero would stop scraping.
+            interval: Duration::from_secs_f64(60.0 / rate_per_minute.max(1) as f64),
+            next: tokio::sync::Mutex::new(Instant::now()),
+        }
+    }
+
+    /// The moment this request may go out, or `None` when that is past
+    /// `deadline`. Nothing is reserved then, so a job that gives up does not
+    /// hold a slot the next one could have used.
+    async fn reserve(&self, deadline: Instant) -> Option<Instant> {
+        let mut next = self.next.lock().await;
+        let slot = (*next).max(Instant::now());
+        if slot > deadline {
+            return None;
+        }
+        *next = slot + self.interval;
+        Some(slot)
+    }
+}
+
+/// What one job's turn at the vendor produced.
+enum VendorTurn {
+    /// The vendor's answer, or the failure that ends this scrape's attempts.
+    Answered(Result<ScrapedPage, ScrapeError>),
+    /// No turn was taken and nothing was spent: pacing, a missing slot, or
+    /// the month's budget left no room. The direct result stands.
+    Skipped,
+    /// No turn was taken: the vendor's own cooldown outlasts the job's
+    /// budget, so the ingest schedule is the right place to wait.
+    Throttled,
+}
+
 pub struct FallbackFetcher<F, S> {
     direct: F,
     scraper: S,
@@ -80,6 +143,12 @@ pub struct FallbackFetcher<F, S> {
     /// flight. The vendor's plan renders only so many pages at once and
     /// answers 429 above that, which a retry meets again.
     scrape_slots: Arc<Semaphore>,
+    /// `PAGE_SCRAPER_RATE_PER_MINUTE`: the other limit on the same plan.
+    /// Concurrency alone does not keep the account inside it.
+    pacer: RequestPacer,
+    /// When the next scrape may call the vendor after a 429. Shared by every
+    /// job, because the limit is the account's, not a page's.
+    rate_limited_until: Mutex<Option<Instant>>,
     /// `PAGE_SCRAPER_TIMEOUT_SECONDS`: one scrape's ceiling.
     scrape_timeout: Duration,
     /// `JOB_BUDGET`, overridable so a test can shorten it.
@@ -112,6 +181,8 @@ impl<F, S> FallbackFetcher<F, S> {
             usage,
             monthly_budget_pages,
             scrape_slots: Arc::new(Semaphore::new(DEFAULT_PAGE_SCRAPER_CONCURRENCY)),
+            pacer: RequestPacer::new(DEFAULT_PAGE_SCRAPER_RATE_PER_MINUTE),
+            rate_limited_until: Mutex::new(None),
             scrape_timeout,
             job_budget: JOB_BUDGET,
             budget_notice: AtomicBool::new(false),
@@ -133,6 +204,14 @@ impl<F, S> FallbackFetcher<F, S> {
     /// flight. Zero would stop scraping, so it is raised to one.
     pub fn with_scrape_concurrency(mut self, concurrency: usize) -> Self {
         self.scrape_slots = Arc::new(Semaphore::new(concurrency.max(1)));
+        self
+    }
+
+    /// `PAGE_SCRAPER_RATE_PER_MINUTE`: how many vendor requests one minute
+    /// may carry. One a minute is the floor, because zero would stop
+    /// scraping altogether.
+    pub fn with_scrape_rate_per_minute(mut self, rate_per_minute: usize) -> Self {
+        self.pacer = RequestPacer::new(rate_per_minute);
         self
     }
 
@@ -199,6 +278,212 @@ where
         Err(ArticleFetchError::Permanent(PREVIEW_LOCKED_MSG.to_string()))
     }
 
+    /// The last moment a scrape may start and still finish, with its
+    /// extraction, inside the job's budget.
+    fn scrape_deadline(&self, started: Instant) -> Instant {
+        started
+            + self
+                .job_budget
+                .saturating_sub(self.scrape_timeout.saturating_add(EXTRACT_RESERVE))
+    }
+
+    /// When no scrape may call the vendor before, after a 429.
+    fn rate_limited_until(&self) -> Option<Instant> {
+        *self
+            .rate_limited_until
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A 429 pauses every scrape in the process for the wait the vendor
+    /// named, capped so one account-wide ask does not freeze the month's
+    /// queue. Returns the wait, for the caller's log line.
+    fn note_rate_limit(&self, retry_after: Option<Duration>) -> Duration {
+        let wait = retry_after.unwrap_or(DEFAULT_RETRY_DELAY).min(MAX_COOLDOWN);
+        let until = Instant::now() + wait;
+        let mut cooldown = self
+            .rate_limited_until
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(*cooldown, Some(current) if current >= until) {
+            *cooldown = Some(until);
+        }
+        wait
+    }
+
+    /// Wait out a cooldown a 429 set, or say it outlasts the job.
+    async fn wait_out_cooldown(&self, url: &str, deadline: Instant) -> Result<(), VendorTurn> {
+        let Some(until) = self.rate_limited_until() else {
+            return Ok(());
+        };
+        if until > deadline {
+            tracing::info!(
+                host = %log_host(url),
+                wait_seconds = until.saturating_duration_since(Instant::now()).as_secs(),
+                "page scraper skipped: the vendor's cooldown outlasts the job budget"
+            );
+            return Err(VendorTurn::Throttled);
+        }
+        tokio::time::sleep_until(until).await;
+        Ok(())
+    }
+
+    /// One of `PAGE_SCRAPER_CONCURRENCY` slots, if one comes free before the
+    /// job's budget runs out. `None` keeps the direct result.
+    async fn take_slot(&self, url: &str, deadline: Instant) -> Option<OwnedSemaphorePermit> {
+        match tokio::time::timeout_at(deadline, self.scrape_slots.clone().acquire_owned()).await {
+            Ok(Ok(permit)) => Some(permit),
+            // No slot came free in time; the semaphore is never closed.
+            _ => {
+                tracing::info!(
+                    host = %log_host(url),
+                    "page scraper skipped: no scrape slot before the job budget ran out"
+                );
+                None
+            }
+        }
+    }
+
+    /// One job's turn at the vendor: the cooldown, the pace, a slot and a
+    /// reservation, then one request. Every wait comes before the reservation
+    /// and is bounded by the job's budget, because a wait is not spend.
+    async fn take_turn(&self, url: &str, started: Instant) -> VendorTurn {
+        let deadline = self.scrape_deadline(started);
+        if let Err(turn) = self.wait_out_cooldown(url, deadline).await {
+            return turn;
+        }
+        let Some(slot) = self.pacer.reserve(deadline).await else {
+            tracing::info!(
+                host = %log_host(url),
+                "page scraper skipped: the scrape rate leaves no room in the job budget"
+            );
+            return VendorTurn::Skipped;
+        };
+        tokio::time::sleep_until(slot).await;
+        // A 429 from another job may have landed while this one waited.
+        if let Err(turn) = self.wait_out_cooldown(url, deadline).await {
+            return turn;
+        }
+        let Some(permit) = self.take_slot(url, deadline).await else {
+            return VendorTurn::Skipped;
+        };
+        // The waits may have used the room the scrape itself needs.
+        if !self.room_for_a_scrape(started) {
+            tracing::info!(
+                host = %log_host(url),
+                "page scraper skipped: the waits used the job budget"
+            );
+            return VendorTurn::Skipped;
+        }
+        match self.usage.reserve_page(self.monthly_budget_pages).await {
+            Ok(true) => {}
+            Ok(false) => {
+                if !self.budget_notice.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        budget = self.monthly_budget_pages,
+                        "page scraper skipped: this month's page budget is used up"
+                    );
+                }
+                return VendorTurn::Skipped;
+            }
+            Err(error) => {
+                // Spending without accounting is worse than not spending.
+                tracing::warn!(
+                    error = %error,
+                    "page scraper skipped: the monthly budget could not be checked"
+                );
+                return VendorTurn::Skipped;
+            }
+        }
+        self.request_with_one_retry(url, permit, deadline).await
+    }
+
+    /// One request under a slot, and one more when a 429's ask fits what the
+    /// job has left. The slot is released before any wait, and the page stays
+    /// reserved across both requests: it is the same page either way.
+    async fn request_with_one_retry(
+        &self,
+        url: &str,
+        permit: OwnedSemaphorePermit,
+        deadline: Instant,
+    ) -> VendorTurn {
+        let error = match self.request(url).await {
+            Ok(page) => return VendorTurn::Answered(Ok(page)),
+            Err(error) => error,
+        };
+        // Only a 429 earns the single in-job retry; every other answer is
+        // this scrape's.
+        let retry_after = match error {
+            ScrapeError::RateLimited { retry_after } => retry_after,
+            other => return VendorTurn::Answered(Err(other)),
+        };
+        let wait = self.note_rate_limit(retry_after);
+        let refused = ScrapeError::RateLimited { retry_after };
+        let ask = retry_after.map_or_else(|| "none".to_string(), |ask| ask.as_secs().to_string());
+        // The request is over; the slot goes back while this job waits.
+        drop(permit);
+        // The vendor's ask must fit the job's budget beside the scrape and
+        // its extraction; past that the ingest schedule waits instead.
+        if Instant::now() + wait > deadline {
+            tracing::info!(
+                host = %log_host(url),
+                retry_after_seconds = %ask,
+                "the vendor rate-limited the scraper: the ask outlasts the job budget"
+            );
+            return VendorTurn::Answered(Err(refused));
+        }
+        tracing::info!(
+            host = %log_host(url),
+            retry_after_seconds = %ask,
+            "the vendor rate-limited the scraper: retrying once inside the job"
+        );
+        if self.wait_out_cooldown(url, deadline).await.is_err() {
+            return VendorTurn::Answered(Err(refused));
+        }
+        let Some(slot) = self.pacer.reserve(deadline).await else {
+            tracing::info!(
+                host = %log_host(url),
+                "page scraper skipped: the scrape rate leaves no room in the job budget"
+            );
+            return VendorTurn::Answered(Err(refused));
+        };
+        tokio::time::sleep_until(slot).await;
+        let Some(_permit) = self.take_slot(url, deadline).await else {
+            return VendorTurn::Answered(Err(refused));
+        };
+        match self.request(url).await {
+            Ok(page) => VendorTurn::Answered(Ok(page)),
+            Err(ScrapeError::RateLimited { retry_after }) => {
+                // Still throttled: the newer ask replaces the cooldown, and
+                // the ingest schedule is the place to wait now.
+                self.note_rate_limit(retry_after);
+                tracing::info!(
+                    host = %log_host(url),
+                    retry_after_seconds = %retry_after
+                        .map_or_else(|| "none".to_string(), |ask| ask.as_secs().to_string()),
+                    "the vendor rate-limited the scraper again: the ingest schedule waits"
+                );
+                VendorTurn::Answered(Err(ScrapeError::RateLimited { retry_after }))
+            }
+            Err(error) => VendorTurn::Answered(Err(error)),
+        }
+    }
+
+    /// One request to the vendor, bounded by the scrape timeout. The adapter
+    /// bounds itself too; this is the job's hard stop.
+    async fn request(&self, url: &str) -> Result<ScrapedPage, ScrapeError> {
+        match tokio::time::timeout(self.scrape_timeout, self.scraper.scrape(url)).await {
+            Ok(result) => result,
+            // No answer was seen, but a timeout usually means the vendor kept
+            // working: assume the page was billed rather than give the
+            // month's budget away.
+            Err(_elapsed) => Err(ScrapeError::Retryable {
+                message: "page scraper timed out".to_string(),
+                billed: true,
+            }),
+        }
+    }
+
     /// One scrape, or the original result when it cannot help. Text that is
     /// already stored is never traded for an error: only a scrape that finds
     /// better text replaces it.
@@ -247,74 +532,11 @@ where
             );
             return original.clone();
         }
-        // The vendor's plan renders only so many pages at once and answers
-        // 429 above that, which the ingest schedule would retry into the same
-        // wall. Wait for one of this process's slots instead, but only as long
-        // as a scrape still fits in the job, and before any page is reserved:
-        // a wait is not spend.
-        let wait_budget = self
-            .job_budget
-            .saturating_sub(started.elapsed())
-            .saturating_sub(self.scrape_timeout.saturating_add(EXTRACT_RESERVE));
-        let permit = match tokio::time::timeout(
-            wait_budget,
-            self.scrape_slots.clone().acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(permit)) => permit,
-            // No slot came free in time; the semaphore is never closed.
-            _ => {
-                tracing::info!(
-                    host = %log_host(url),
-                    "page scraper skipped: no scrape slot before the job budget ran out"
-                );
-                return original.clone();
-            }
-        };
-        // The wait may have used the room the scrape itself needs.
-        if !self.room_for_a_scrape(started) {
-            tracing::info!(
-                host = %log_host(url),
-                "page scraper skipped: the slot wait used the job budget"
-            );
-            return original.clone();
-        }
-        match self.usage.reserve_page(self.monthly_budget_pages).await {
-            Ok(true) => {}
-            Ok(false) => {
-                if !self.budget_notice.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        budget = self.monthly_budget_pages,
-                        "page scraper skipped: this month's page budget is used up"
-                    );
-                }
-                return original.clone();
-            }
-            Err(error) => {
-                // Spending without accounting is worse than not spending.
-                tracing::warn!(
-                    error = %error,
-                    "page scraper skipped: the monthly budget could not be checked"
-                );
-                return original.clone();
-            }
-        }
-
-        // The adapter bounds itself too; this is the job's hard stop.
-        let page = match tokio::time::timeout(self.scrape_timeout, self.scraper.scrape(url)).await {
-            Err(_elapsed) => {
-                // No answer was seen, but a timeout usually means the vendor
-                // kept working: assume the page was billed rather than give
-                // the month's budget away.
-                self.note_failure(true).await;
-                tracing::info!(host = %log_host(url), "page scrape timed out");
-                return Err(ArticleFetchError::Transient(
-                    "page scraper timed out".to_string(),
-                ));
-            }
-            Ok(Ok(page)) => page,
-            Ok(Err(error)) => {
+        // Pacing, the vendor's cooldown, the slot and the page reservation all
+        // happen inside the turn, and none of the waits spends anything.
+        let page = match self.take_turn(url, started).await {
+            VendorTurn::Answered(Ok(page)) => page,
+            VendorTurn::Answered(Err(error)) => {
                 self.note_failure(error.billed()).await;
                 // Info, with the host and the error class only: a failed
                 // scrape that prod cannot see is a queue that stalls quietly.
@@ -325,6 +547,7 @@ where
                     error = %error,
                     "page scrape failed"
                 );
+                let message = error.message().to_string();
                 return match error {
                     ScrapeError::OutOfCredits => {
                         self.note_out_of_credits();
@@ -332,7 +555,7 @@ where
                     }
                     // The vendor said "not now": the ingest retry schedule is
                     // the right place to wait.
-                    ScrapeError::Retryable { message, .. } => {
+                    ScrapeError::Retryable { .. } | ScrapeError::RateLimited { .. } => {
                         Err(ArticleFetchError::Transient(message))
                     }
                     // The same request will fail the same way; the direct
@@ -340,10 +563,21 @@ where
                     ScrapeError::Final { .. } => original.clone(),
                 };
             }
+            // A wait is not spend, and a job that never reached the vendor
+            // keeps the direct result.
+            VendorTurn::Skipped => return original.clone(),
+            // The vendor's cooldown outlasts the job: no request went out and
+            // no page was reserved, so the schedule is the place to wait.
+            VendorTurn::Throttled => {
+                tracing::info!(
+                    host = %log_host(url),
+                    "page scraper skipped: the vendor's rate limit outlasts the job budget"
+                );
+                return Err(ArticleFetchError::Transient(
+                    "page scraper is waiting out the vendor's rate limit".to_string(),
+                ));
+            }
         };
-        // The vendor call is over: another job may take the slot while this
-        // one parses.
-        drop(permit);
 
         // From here the page was paid for, whatever comes of it.
         if page.locked {
@@ -416,6 +650,7 @@ fn scrape_error_class(error: &ScrapeError) -> &'static str {
         ScrapeError::Retryable { .. } => "retryable",
         ScrapeError::Final { .. } => "final",
         ScrapeError::OutOfCredits => "out_of_credits",
+        ScrapeError::RateLimited { .. } => "rate_limited",
     }
 }
 
@@ -1038,7 +1273,9 @@ mod tests {
             result: Err(ArticleFetchError::Permanent("HTTP 403".into())),
         };
         let fetcher = fetcher(direct, scraper.clone(), usage.clone(), 200)
-            .with_out_of_credits_cooldown(Duration::from_millis(50));
+            .with_out_of_credits_cooldown(Duration::from_millis(50))
+            // The 402 pause is the cap under test, not the pace.
+            .with_scrape_rate_per_minute(600);
 
         // First 402 trips the pause; the next calls do not reach the vendor.
         for _ in 0..2 {
@@ -1316,7 +1553,7 @@ mod tests {
                 let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 self.peak.fetch_max(in_flight, Ordering::SeqCst);
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
                 self.in_flight.fetch_sub(1, Ordering::SeqCst);
                 Ok(ScrapedPage {
                     html: ARTICLE_HTML.to_string(),
@@ -1330,8 +1567,8 @@ mod tests {
 
     /// Six permanent failures and a concurrency of 2: every job is scraped,
     /// and the vendor never sees more than 2 at once, which is what its plan
-    /// answers 429 for.
-    #[tokio::test]
+    /// answers 429 for. The rate is wide, so the cap under test is the slots.
+    #[tokio::test(start_paused = true)]
     async fn scrapes_in_flight_are_capped_at_the_configured_concurrency() {
         let scraper = PeakScraper::new();
         let fetcher = Arc::new(
@@ -1343,7 +1580,8 @@ mod tests {
                 FakeUsage::allowing(),
                 200,
             )
-            .with_scrape_concurrency(2),
+            .with_scrape_concurrency(2)
+            .with_scrape_rate_per_minute(600),
         );
         let mut jobs = Vec::new();
         for _ in 0..6 {
@@ -1392,7 +1630,9 @@ mod tests {
             // Room for one scrape (30 s) plus its extraction (30 s), and one
             // second of waiting on top of that.
             .with_job_budget(Duration::from_secs(61))
-            .with_scrape_concurrency(1),
+            .with_scrape_concurrency(1)
+            // The slots are the cap under test, not the pace.
+            .with_scrape_rate_per_minute(600),
         );
 
         let first = {
@@ -1412,5 +1652,267 @@ mod tests {
         assert_eq!(usage.reserves(), 1, "waiting reserves no page");
 
         assert_eq!(first.await.unwrap().unwrap().source, ContentSource::Scraped);
+    }
+
+    /// The page every scrape in these tests finds.
+    fn scraped(html: &str) -> ScrapedPage {
+        ScrapedPage {
+            html: html.to_string(),
+            final_url: PUBLIC_URL.to_string(),
+            html_bytes: html.len(),
+            locked: false,
+        }
+    }
+
+    /// A scraper that answers each URL from its own script and records when
+    /// every call went out on the (paused) clock.
+    struct TimedScraper {
+        /// One script per URL: its answers in order, the last one repeating.
+        /// An empty script means "not under test" and answers with the page.
+        scripts: Mutex<Vec<(String, VecDeque<Answer>)>>,
+        calls: Mutex<Vec<(String, Instant)>>,
+    }
+
+    impl TimedScraper {
+        /// `url` answers its script in order; the others answer with the page
+        /// whenever they are asked.
+        fn scripted(url: &'static str, answers: Vec<Answer>, others: &[&'static str]) -> Arc<Self> {
+            let mut scripts = vec![(url.to_string(), VecDeque::from(answers))];
+            scripts.extend(
+                others
+                    .iter()
+                    .map(|other| (other.to_string(), VecDeque::new())),
+            );
+            Arc::new(Self {
+                scripts: Mutex::new(scripts),
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+
+        /// Every URL answers with the page, however often it is asked.
+        fn pages(urls: &[&'static str]) -> Arc<Self> {
+            Self::scripted(
+                urls[0],
+                vec![Answer::Page(scraped(ARTICLE_HTML))],
+                &urls[1..],
+            )
+        }
+
+        /// When the calls to one URL went out, in order.
+        fn calls_to(&self, url: &str) -> Vec<Instant> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(called, _)| called == url)
+                .map(|(_, at)| *at)
+                .collect()
+        }
+    }
+
+    impl PageScraper for TimedScraper {
+        fn scrape(
+            &self,
+            url: &str,
+        ) -> crate::domain::ports::page_scraper::BoxFuture<'_, Result<ScrapedPage, ScrapeError>>
+        {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((url.to_string(), Instant::now()));
+            let answer = {
+                let mut scripts = self.scripts.lock().unwrap();
+                let (_, script) = scripts
+                    .iter_mut()
+                    .find(|(known, _)| known == url)
+                    .expect("the fake scraper was asked about a known URL");
+                if script.len() > 1 {
+                    script.pop_front().expect("the script was just checked")
+                } else {
+                    script
+                        .front()
+                        .cloned()
+                        .unwrap_or(Answer::Page(scraped(ARTICLE_HTML)))
+                }
+            };
+            Box::pin(async move {
+                match answer {
+                    Answer::Page(page) => Ok(page),
+                    Answer::Fail(error) => Err(error),
+                    Answer::Slow(delay, page) => {
+                        tokio::time::sleep(delay).await;
+                        Ok(page)
+                    }
+                }
+            })
+        }
+    }
+
+    /// The plan's other limit: at ten a minute, twenty queued jobs make at
+    /// most ten calls in any minute, and every one still gets its page when
+    /// the job budget is wide enough to wait.
+    #[tokio::test(start_paused = true)]
+    async fn the_scrape_rate_caps_the_vendors_requests_per_minute() {
+        const RATE: usize = 10;
+        let scraper = TimedScraper::pages(&[PUBLIC_URL]);
+        let fetcher = Arc::new(
+            fetcher(
+                FakeDirect {
+                    result: Err(ArticleFetchError::Permanent("HTTP 403".into())),
+                },
+                scraper.clone(),
+                FakeUsage::allowing(),
+                0,
+            )
+            // Wide enough for all twenty turns at ten a minute: the pacing is
+            // the cap under test, not the budget or the slots.
+            .with_job_budget(Duration::from_secs(600))
+            .with_scrape_concurrency(20)
+            .with_scrape_rate_per_minute(RATE),
+        );
+        let mut jobs = Vec::new();
+        for _ in 0..20 {
+            let fetcher = fetcher.clone();
+            jobs.push(tokio::spawn(async move {
+                fetcher.fetch(PUBLIC_URL).await.unwrap().source
+            }));
+        }
+        for job in jobs {
+            assert_eq!(job.await.unwrap(), ContentSource::Scraped);
+        }
+        let calls = scraper.calls_to(PUBLIC_URL);
+        assert_eq!(calls.len(), 20, "every job reached the vendor once");
+        // Eleven calls span a minute or more: no minute carries more than the
+        // configured ten.
+        assert!(
+            calls
+                .windows(RATE + 1)
+                .all(|window| window[RATE] - window[0] >= Duration::from_secs(60)),
+            "{calls:?}"
+        );
+    }
+
+    /// A 429 is the account's limit, not a page's: the pause holds every
+    /// scrape, and the job that hit it retries once when the ask fits.
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limit_pauses_every_scraper_until_the_vendors_wait_ends() {
+        const OTHER_URL: &str = "https://example.com/other-post";
+        const ASK: Duration = Duration::from_secs(30);
+        let scraper = TimedScraper::scripted(
+            PUBLIC_URL,
+            vec![
+                Answer::Fail(ScrapeError::RateLimited {
+                    retry_after: Some(ASK),
+                }),
+                Answer::Page(scraped(ARTICLE_HTML)),
+            ],
+            &[OTHER_URL],
+        );
+        let fetcher = Arc::new(fetcher(
+            FakeDirect {
+                result: Err(ArticleFetchError::Permanent("HTTP 403".into())),
+            },
+            scraper.clone(),
+            FakeUsage::allowing(),
+            0,
+        ));
+
+        let first = {
+            let fetcher = fetcher.clone();
+            tokio::spawn(async move { fetcher.fetch(PUBLIC_URL).await.unwrap().source })
+        };
+        // Let the first job take its 429 and start waiting.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+
+        let second = {
+            let fetcher = fetcher.clone();
+            tokio::spawn(async move { fetcher.fetch(OTHER_URL).await.unwrap().source })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(
+            scraper.calls_to(OTHER_URL).len(),
+            0,
+            "the pause holds the second job too"
+        );
+
+        assert_eq!(first.await.unwrap(), ContentSource::Scraped);
+        assert_eq!(second.await.unwrap(), ContentSource::Scraped);
+        let asked = scraper.calls_to(PUBLIC_URL);
+        assert_eq!(asked.len(), 2, "one 429 and one retry");
+        assert!(asked[1] - asked[0] >= ASK, "{asked:?}");
+        let other = scraper.calls_to(OTHER_URL);
+        assert_eq!(other.len(), 1);
+        assert!(
+            other[0] - asked[0] >= ASK,
+            "no scrape called the vendor inside the pause: {other:?} vs {asked:?}"
+        );
+    }
+
+    /// A 429 whose ask outlasts the job's budget is not waited out inside the
+    /// job, and a job that starts during the pause asks for nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_cooldown_that_outlasts_the_job_budget_returns_transient_without_a_request() {
+        const OTHER_URL: &str = "https://example.com/other-post";
+        let scraper = TimedScraper::scripted(
+            PUBLIC_URL,
+            vec![Answer::Fail(ScrapeError::RateLimited {
+                // Past the 120 s cap, and far past one job's budget.
+                retry_after: Some(Duration::from_secs(200)),
+            })],
+            &[OTHER_URL],
+        );
+        let usage = FakeUsage::allowing();
+        let fetcher = Arc::new(fetcher(
+            FakeDirect {
+                result: Err(ArticleFetchError::Permanent("HTTP 403".into())),
+            },
+            scraper.clone(),
+            usage.clone(),
+            0,
+        ));
+
+        let first = {
+            let fetcher = fetcher.clone();
+            tokio::spawn(async move { fetcher.fetch(PUBLIC_URL).await })
+        };
+        tokio::task::yield_now().await;
+        match first.await.unwrap().unwrap_err() {
+            ArticleFetchError::Transient(message) => {
+                assert!(message.contains("rate-limited"), "{message}")
+            }
+            other => panic!("expected a transient error, got {other:?}"),
+        }
+        assert_eq!(usage.reserves(), 1);
+        assert_eq!(
+            usage.failures(),
+            vec![false],
+            "the 429 is unbilled and refunded"
+        );
+
+        // Five seconds into a two-minute pause: this job has no budget for
+        // it, so it goes back to the schedule without a request.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        match fetcher.fetch(OTHER_URL).await.unwrap_err() {
+            ArticleFetchError::Transient(message) => {
+                assert!(message.contains("rate limit"), "{message}")
+            }
+            other => panic!("expected a transient error, got {other:?}"),
+        }
+        assert_eq!(
+            scraper.calls_to(OTHER_URL).len(),
+            0,
+            "no request went out during the pause"
+        );
+        assert_eq!(
+            usage.reserves(),
+            1,
+            "a scrape that never started reserves no page"
+        );
+        assert_eq!(
+            usage.failures(),
+            vec![false],
+            "and nothing is refunded twice"
+        );
     }
 }

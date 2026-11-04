@@ -9,6 +9,7 @@
 //! operator's account, so the key lives in the adapter's configuration.
 
 use std::fmt;
+use std::time::Duration;
 
 pub use crate::domain::ports::llm_client::BoxFuture;
 
@@ -49,6 +50,11 @@ pub enum ScrapeError {
     /// is topped up, so the fallback pauses and re-probes once an hour
     /// instead of burning a request per bookmark.
     OutOfCredits,
+    /// The vendor is throttling the account (HTTP 429). No page was billed.
+    /// The wait it named travels with the error, because it is the whole
+    /// account's limit: the fallback pauses every scrape for it rather than
+    /// spending a request per bookmark to learn the same answer again.
+    RateLimited { retry_after: Option<Duration> },
 }
 
 impl ScrapeError {
@@ -56,7 +62,7 @@ impl ScrapeError {
     pub fn billed(&self) -> bool {
         match self {
             Self::Retryable { billed, .. } | Self::Final { billed, .. } => *billed,
-            Self::OutOfCredits => false,
+            Self::OutOfCredits | Self::RateLimited { .. } => false,
         }
     }
 
@@ -65,6 +71,7 @@ impl ScrapeError {
         match self {
             Self::Retryable { message, .. } | Self::Final { message, .. } => message,
             Self::OutOfCredits => "the scraper account is out of credits",
+            Self::RateLimited { .. } => "the vendor rate-limited the scraper: HTTP 429",
         }
     }
 }
