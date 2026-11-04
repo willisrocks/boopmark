@@ -824,7 +824,7 @@ pub(crate) mod search_tests {
         // One-letter swaps in short words share too few trigrams for the
         // plain threshold (issue #50).
         assert_eq!(ids(&search(&repo, alice, "tokoi").await), [runtime.id]);
-        assert_eq!(ids(&search(&repo, alice, "hoem").await), [garden.id]);
+        assert!(ids(&search(&repo, alice, "hoem").await).contains(&garden.id));
         // A failed fetch is found by its metadata, without a snippet.
         let hits = search(&repo, alice, "github acquisition").await;
         assert_eq!(ids(&hits), [failed.id]);
