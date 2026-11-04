@@ -183,6 +183,32 @@ pub struct SearchIndexStatus {
     pub failing_domains: Vec<(String, i64)>,
 }
 
+/// The query plus its one-letter-swap spellings, for the trigram leg.
+///
+/// Two swapped letters in a short word share almost no trigrams (`form` and
+/// `from` share one of five), so `word_similarity` stays under its threshold
+/// and the typo is missed. Only a single short word is expanded: longer words
+/// keep enough trigrams, and phrases would multiply the variants.
+pub fn trigram_variants(text: &str) -> Vec<String> {
+    let mut variants = vec![text.to_string()];
+    let chars: Vec<char> = text.chars().collect();
+    if !(3..=8).contains(&chars.len()) || !chars.iter().all(|c| c.is_alphanumeric()) {
+        return variants;
+    }
+    for i in 0..chars.len() - 1 {
+        if chars[i] == chars[i + 1] {
+            continue;
+        }
+        let mut swapped = chars.clone();
+        swapped.swap(i, i + 1);
+        let word: String = swapped.into_iter().collect();
+        if !variants.contains(&word) {
+            variants.push(word);
+        }
+    }
+    variants
+}
+
 /// The parts of a `websearch_to_tsquery` query that must hold for every
 /// result, whichever leg found it: quoted phrases and `-exclusions`, as a
 /// websearch string of their own (`coffee "cold brew" -tea` gives
@@ -389,6 +415,17 @@ impl Snippet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn short_words_get_their_one_swap_spellings() {
+        use super::trigram_variants;
+        let v = trigram_variants("form");
+        assert_eq!(v, ["form", "ofrm", "from", "fomr"]);
+        assert_eq!(trigram_variants("aab"), ["aab", "aba"]);
+        assert_eq!(trigram_variants("rust async"), ["rust async"]);
+        assert_eq!(trigram_variants("ab"), ["ab"]);
+        assert_eq!(trigram_variants("understanding"), ["understanding"]);
+    }
+
     use super::*;
 
     #[test]
