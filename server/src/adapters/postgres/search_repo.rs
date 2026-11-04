@@ -5,7 +5,7 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::search_repo::SearchRepository;
 use crate::domain::search::{
     ContentSource, IngestFailure, IngestJob, MAX_INGEST_ATTEMPTS, MAX_SEARCH_RESULTS, SearchHit,
-    SearchQuery, Snippet, websearch_constraints,
+    SearchQuery, Snippet, trigram_variants, websearch_constraints,
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -96,6 +96,7 @@ fn search_sql(shape: SearchShape) -> String {
     };
     let tags = shape.has_tags.then(&mut param);
     let constraints = shape.has_constraints.then(&mut param);
+    let variants = param();
     let vector = shape.vector_dims.map(|dims| (dims, param(), param()));
     let limit = param();
     let offset = param();
@@ -210,9 +211,10 @@ fn search_sql(shape: SearchShape) -> String {
          trg AS (
              SELECT bookmark_id, row_number() OVER (ORDER BY sim DESC, bookmark_id) AS r
              FROM (
-                 SELECT c.bookmark_id, word_similarity($2, c.meta_text) AS sim
+                 SELECT c.bookmark_id,
+                        (SELECT max(word_similarity(v, c.meta_text)) FROM unnest({variants}::text[]) v) AS sim
                  FROM bookmark_contents c CROSS JOIN q{scope_join}
-                 WHERE c.user_id = $1 AND $2 <% c.meta_text{scope_filter}{leg_constraint}
+                 WHERE c.user_id = $1 AND c.meta_text %> ANY({variants}::text[]){scope_filter}{leg_constraint}
                  ORDER BY sim DESC, c.bookmark_id
                  LIMIT {LEG_DEPTH}
              ) t
@@ -268,6 +270,7 @@ impl SearchRepository for PostgresPool {
         if constraints.is_some() {
             q = q.bind(&constraints);
         }
+        q = q.bind(trigram_variants(&query.text));
         if let Some(vector) = &query.vector {
             q = q.bind(&vector.values).bind(&vector.model_id);
         }
@@ -818,6 +821,10 @@ pub(crate) mod search_tests {
         // Typo and prefix queries reach the trigram leg over title + description.
         assert_eq!(ids(&search(&repo, alice, "Microsft").await), [failed.id]);
         assert_eq!(ids(&search(&repo, alice, "Composti").await), [garden.id]);
+        // One-letter swaps in short words share too few trigrams for the
+        // plain threshold (issue #50).
+        assert_eq!(ids(&search(&repo, alice, "tokoi").await), [runtime.id]);
+        assert_eq!(ids(&search(&repo, alice, "hoem").await), [garden.id]);
         // A failed fetch is found by its metadata, without a snippet.
         let hits = search(&repo, alice, "github acquisition").await;
         assert_eq!(ids(&hits), [failed.id]);
