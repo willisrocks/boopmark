@@ -290,7 +290,8 @@ async fn main() {
                     config.page_scraper_monthly_budget_pages,
                     std::time::Duration::from_secs(config.page_scraper_timeout_seconds),
                 )
-                .with_scrape_concurrency(config.page_scraper_concurrency),
+                .with_scrape_concurrency(config.page_scraper_concurrency)
+                .with_scrape_rate_per_minute(config.page_scraper_rate_per_minute),
             ),
             config.article_ingest_concurrency,
         )

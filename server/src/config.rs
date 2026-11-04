@@ -57,6 +57,11 @@ pub struct Config {
     /// The vendor's plan caps concurrency, and a burst above the cap comes
     /// back as 429 for pages nobody gets.
     pub page_scraper_concurrency: usize,
+    /// `PAGE_SCRAPER_RATE_PER_MINUTE`: vendor requests one minute may carry.
+    /// Concurrency alone is not the plan's limit: Firecrawl also allows
+    /// about ten scrapes a minute, and answers a burst above that with 429
+    /// however few are in flight.
+    pub page_scraper_rate_per_minute: usize,
 }
 
 /// The measured p90 page was 437 KB, the largest 1.9 MB; 5 MiB leaves room
@@ -74,6 +79,13 @@ pub const DEFAULT_PAGE_SCRAPER_CONCURRENCY: usize = 2;
 /// A paid plan allows more, and scrapes also queue behind the ingest worker's
 /// own concurrency; ten is a sanity bound on a typo, not a vendor limit.
 pub const MAX_PAGE_SCRAPER_CONCURRENCY: usize = 10;
+
+/// Firecrawl's free plan documents about ten scrapes a minute beside its two
+/// concurrent renders, so ten is the default every plan can take.
+pub const DEFAULT_PAGE_SCRAPER_RATE_PER_MINUTE: usize = 10;
+/// A bound on a typo: past this, scrapes would only queue on the vendor's
+/// queue, and the job budget would expire while waiting.
+pub const MAX_PAGE_SCRAPER_RATE_PER_MINUTE: usize = 600;
 
 /// The server-side scraper of the fallback decorator. The companion eval
 /// chose Firecrawl and dropped Obscura
@@ -192,6 +204,9 @@ impl Config {
             page_scraper_concurrency: parse_scraper_concurrency(
                 env::var("PAGE_SCRAPER_CONCURRENCY").ok().as_deref(),
             ),
+            page_scraper_rate_per_minute: parse_scraper_rate(
+                env::var("PAGE_SCRAPER_RATE_PER_MINUTE").ok().as_deref(),
+            ),
         }
     }
 }
@@ -272,6 +287,16 @@ fn parse_scraper_concurrency(value: Option<&str>) -> usize {
         .clamp(1, MAX_PAGE_SCRAPER_CONCURRENCY)
 }
 
+/// Vendor requests a minute, the free plan's 10 by default and at most 600.
+/// A value below 1 would stop scraping entirely, so it is raised instead: a
+/// typo must not silently disable the feature.
+fn parse_scraper_rate(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PAGE_SCRAPER_RATE_PER_MINUTE)
+        .clamp(1, MAX_PAGE_SCRAPER_RATE_PER_MINUTE)
+}
+
 fn llm_settings_encryption_key() -> String {
     let raw_key =
         env::var("LLM_SETTINGS_ENCRYPTION_KEY").expect("LLM_SETTINGS_ENCRYPTION_KEY required");
@@ -294,11 +319,12 @@ fn llm_settings_encryption_key() -> String {
 mod tests {
     use super::{
         DEFAULT_PAGE_CAPTURE_MAX_BYTES, DEFAULT_PAGE_SCRAPER_CONCURRENCY,
-        DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, LoginAdapter, MAX_PAGE_SCRAPER_CONCURRENCY,
+        DEFAULT_PAGE_SCRAPER_RATE_PER_MINUTE, DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS, LoginAdapter,
+        MAX_PAGE_SCRAPER_CONCURRENCY, MAX_PAGE_SCRAPER_RATE_PER_MINUTE,
         MAX_PAGE_SCRAPER_TIMEOUT_SECONDS, MetadataFallbackBackend, PageScraperBackend,
         ScreenshotBackend, llm_settings_encryption_key, parse_capture_max_bytes, parse_flag,
         parse_ingest_concurrency, parse_page_scraper, parse_scraper_budget,
-        parse_scraper_concurrency, parse_scraper_timeout,
+        parse_scraper_concurrency, parse_scraper_rate, parse_scraper_timeout,
     };
 
     /// LOGIN_ADAPTER defaults to local_password for self-hosting convenience.
@@ -491,6 +517,31 @@ mod tests {
         }
         // 0 concurrent scrapes would disable the feature a typo away.
         assert_eq!(parse_scraper_concurrency(Some("0")), 1);
+    }
+
+    /// The vendor's other limit: ten requests a minute on the free plan, and
+    /// a typo may not stop scraping or ask for thousands a minute.
+    #[test]
+    fn scraper_rate_defaults_to_ten_a_minute_and_is_bounded() {
+        assert_eq!(parse_scraper_rate(None), 10);
+        assert_eq!(parse_scraper_rate(Some(" 60 ")), 60);
+        assert_eq!(
+            parse_scraper_rate(Some("600")),
+            MAX_PAGE_SCRAPER_RATE_PER_MINUTE
+        );
+        assert_eq!(
+            parse_scraper_rate(Some("601")),
+            MAX_PAGE_SCRAPER_RATE_PER_MINUTE
+        );
+        for bad in ["", "nope", "-2", "1.5"] {
+            assert_eq!(
+                parse_scraper_rate(Some(bad)),
+                DEFAULT_PAGE_SCRAPER_RATE_PER_MINUTE,
+                "{bad}"
+            );
+        }
+        // A rate below one a minute would never scrape at all.
+        assert_eq!(parse_scraper_rate(Some("0")), 1);
     }
 
     #[test]

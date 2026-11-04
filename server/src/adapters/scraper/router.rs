@@ -25,7 +25,10 @@ pub fn page_scraper(config: &Config) -> Arc<dyn PageScraper> {
     };
     let budget = config.page_scraper_monthly_budget_pages;
     let concurrency = config.page_scraper_concurrency;
-    tracing::info!("scraper enabled: {backend}, budget {budget}, concurrency {concurrency}");
+    let rate = config.page_scraper_rate_per_minute;
+    tracing::info!(
+        "scraper enabled: {backend}, budget {budget}, concurrency {concurrency}, rate {rate}/min"
+    );
     scraper
 }
 
@@ -90,6 +93,7 @@ mod tests {
         api_key: Option<&str>,
         budget: u64,
         concurrency: usize,
+        rate: usize,
     ) -> Config {
         Config {
             database_url: String::new(),
@@ -122,6 +126,7 @@ mod tests {
             page_scraper_timeout_seconds: DEFAULT_PAGE_SCRAPER_TIMEOUT_SECONDS,
             page_scraper_monthly_budget_pages: budget,
             page_scraper_concurrency: concurrency,
+            page_scraper_rate_per_minute: rate,
         }
     }
 
@@ -154,17 +159,18 @@ mod tests {
     }
 
     #[test]
-    fn the_startup_line_names_the_backend_budget_and_concurrency() {
+    fn the_startup_line_names_the_backend_budget_concurrency_and_rate() {
         let output = captured(|| {
             page_scraper(&config(
                 PageScraperBackend::Firecrawl,
                 Some("fc-test"),
                 200,
                 3,
+                10,
             ));
         });
         assert!(
-            output.contains("scraper enabled: firecrawl, budget 200, concurrency 3"),
+            output.contains("scraper enabled: firecrawl, budget 200, concurrency 3, rate 10/min"),
             "{output}"
         );
     }
@@ -175,10 +181,10 @@ mod tests {
     #[test]
     fn the_startup_line_says_disabled_without_a_key() {
         let output = captured(|| {
-            page_scraper(&config(PageScraperBackend::Firecrawl, None, 0, 2));
+            page_scraper(&config(PageScraperBackend::Firecrawl, None, 0, 2, 60));
         });
         assert!(
-            output.contains("scraper enabled: disabled, budget 0, concurrency 2"),
+            output.contains("scraper enabled: disabled, budget 0, concurrency 2, rate 60/min"),
             "{output}"
         );
     }
