@@ -88,6 +88,15 @@ pub trait TagAliasRepository: Send + Sync {
         request: &ManualMerge,
     ) -> Result<(ManualMergePlan, Option<TagChangeBatch>), DomainError>;
 
+    /// Delete a tag no bookmark uses, with its alias rows, as one
+    /// `ChangeKind::Delete` batch that `undo_batch` reverts. Checked under
+    /// the per-user lock ([`crate::domain::tag_library::plan_tag_delete`]).
+    async fn delete_unused_tag(
+        &self,
+        user_id: Uuid,
+        name: &str,
+    ) -> Result<TagChangeBatch, DomainError>;
+
     /// Undo an applied batch. Fails with `InvalidInput` if it is already
     /// undone, is older than the undo window
     /// ([`crate::domain::tag_alias::UNDO_WINDOW_DAYS`]), or a later,

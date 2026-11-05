@@ -9,7 +9,7 @@ use crate::domain::tag_alias::{
 use crate::domain::tag_consolidation::{
     ReviewedRow, TagSample, plan_reviewed_apply, resolve_through_aliases,
 };
-use crate::domain::tag_library::{ManualMerge, ManualMergePlan, library_rows, plan_manual_merge};
+use crate::domain::tag_library::{ManualMerge, ManualMergePlan, library_rows, plan_manual_merge, plan_tag_delete};
 use crate::domain::tag_normalize::{clean_tag, compact_key};
 use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, Postgres, Transaction};
@@ -661,6 +661,84 @@ impl TagAliasRepository for PostgresPool {
         Ok((plan, batch))
     }
 
+    async fn delete_unused_tag(
+        &self,
+        user_id: Uuid,
+        name: &str,
+    ) -> Result<TagChangeBatch, DomainError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        lock_user_tags(&mut tx, user_id).await?;
+        let aliases = load_aliases(&mut *tx, user_id).await?;
+        let counts = load_tag_counts(&mut *tx, user_id).await?;
+        plan_tag_delete(name, &library_rows(&counts, &aliases))?;
+
+        let removed = sqlx::query_as::<_, AliasImage>(
+            "SELECT alias_key, alias, canonical, source, batch_id, created_at FROM tag_aliases
+             WHERE user_id = $1 AND canonical = $2
+             ORDER BY alias_key",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let mut members = vec![name.to_string()];
+        members.extend(
+            removed
+                .iter()
+                .filter_map(|a| a.alias.clone())
+                .filter(|a| a != name),
+        );
+        let summary = TagChangeSummary {
+            merges: vec![TagMerge {
+                canonical: name.to_string(),
+                members,
+            }],
+            bookmarks_changed: 0,
+        };
+        let summary_json = serde_json::to_string(&summary)
+            .map_err(|e| DomainError::Internal(format!("bad tag batch summary: {e}")))?;
+        let batch = sqlx::query_as::<_, BatchRow>(&format!(
+            "INSERT INTO tag_change_batches (user_id, kind, summary)
+             VALUES ($1, $2, $3::jsonb)
+             RETURNING {BATCH_COLUMNS}"
+        ))
+        .bind(user_id)
+        .bind(ChangeKind::Delete.as_str())
+        .bind(&summary_json)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let batch = batch_from_row(batch)?;
+
+        for image in &removed {
+            sqlx::query(
+                "INSERT INTO tag_change_alias_snapshots
+                    (batch_id, alias_key, alias_before, canonical_before, source_before,
+                     batch_id_before, created_at_before)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(batch.id)
+            .bind(&image.alias_key)
+            .bind(&image.alias)
+            .bind(&image.canonical)
+            .bind(&image.source)
+            .bind(image.batch_id)
+            .bind(image.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        sqlx::query("DELETE FROM tag_aliases WHERE user_id = $1 AND canonical = $2")
+            .bind(user_id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(batch)
+    }
+
     async fn undo_batch(
         &self,
         user_id: Uuid,
@@ -1250,6 +1328,55 @@ mod tag_alias_postgres_tests {
         .unwrap();
         assert_eq!(k8s, winner);
         assert_eq!(svc.list_batches(user, 10).await.unwrap().len(), 1);
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
+        pool.close().await;
+    }
+
+    /// An unused tag is deleted with its aliases as one batch that undo
+    /// reverts; a tag with bookmarks is refused.
+    #[tokio::test]
+    #[ignore = "requires a Postgres database in DATABASE_URL"]
+    async fn tag_alias_delete_unused_tag_and_undo() {
+        let pool = connect().await;
+        let svc = TagAliasService::new(Arc::new(PostgresPool::new(pool.clone())));
+        let user = new_user(&pool).await;
+        let used = bookmark(&pool, user, &["kept"]).await;
+        sqlx::query(
+            "INSERT INTO tag_aliases (user_id, alias_key, alias, canonical, source)
+             VALUES ($1, 'stale', 'stale', 'stale', 'normalize'),
+                    ($1, 'old', 'old', 'stale', 'manual'),
+                    ($1, 'kept', 'kept', 'kept', 'normalize')",
+        )
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before = aliases(&pool, user).await;
+
+        assert!(matches!(
+            svc.delete_tag(user, "kept").await,
+            Err(DomainError::InvalidInput(_))
+        ));
+        assert_eq!(aliases(&pool, user).await, before);
+
+        let batch = svc.delete_tag(user, "stale").await.expect("delete");
+        assert_eq!(batch.kind, ChangeKind::Delete);
+        let left = aliases(&pool, user).await;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].2, "kept");
+        assert_eq!(tags_of(&pool, used).await, s(&["kept"]));
+        assert!(matches!(
+            svc.delete_tag(user, "stale").await,
+            Err(DomainError::InvalidInput(_))
+        ));
+
+        svc.undo_batch(user, batch.id).await.expect("undo");
+        assert_eq!(aliases(&pool, user).await, before);
 
         sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(user)
