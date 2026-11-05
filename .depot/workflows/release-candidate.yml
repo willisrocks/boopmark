@@ -1,0 +1,339 @@
+# Depot CI copy of .github/workflows/release-candidate.yml.
+#
+# Changes from the GitHub copy:
+# - macOS CLI and iOS builds run in .github/workflows/release-macos.yml. The macos job
+#   waits for that run, and publish downloads its artifacts.
+# - Production deploys run in .github/workflows/deploy.yml, so FLY_API_TOKEN never
+#   enters Depot. The deploy job dispatches that workflow and waits for it.
+# - The container builds through the Depot project and pushes with GHCR_PAT, because
+#   Depot's GITHUB_TOKEN cannot push to GHCR.
+
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      prepared_sha:
+        description: Exact candidate commit created by the Release workflow
+        required: true
+        type: string
+
+concurrency:
+  group: release-candidate
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Verify release candidate
+    runs-on: depot-ubuntu-latest
+    outputs:
+      version: ${{ steps.candidate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate candidate identity and versions
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_SHA: ${{ inputs.prepared_sha }}
+        run: |
+          printf '%s\n' "$PREPARED_SHA" | grep -Eq '^[0-9a-f]{40}$'
+          test "$GITHUB_SHA" = "$PREPARED_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')" = 2
+          PARENT=$(git rev-parse HEAD^)
+          git merge-base --is-ancestor "$PARENT" origin/${{ github.event.repository.default_branch }}
+          EXPECTED=$(printf '%s\n' \
+            Cargo.lock cli/Cargo.toml extensions/chrome/manifest.json \
+            mobile/ios/Boopmark/Info.plist mobile/ios/BoopmarkShareExtension/Info.plist \
+            mobile/ios/project.yml package-lock.json package.json server/Cargo.toml | sort)
+          ACTUAL=$(git diff-tree --no-commit-id --name-only -r HEAD | sort)
+          test "$ACTUAL" = "$EXPECTED"
+          VERSION=$(node -p "require('./package.json').version")
+          node scripts/release/verify-version.mjs "$VERSION"
+          cargo metadata --format-version=1 --locked >/dev/null
+          test "$GITHUB_REF" = "refs/heads/release/v$VERSION"
+          if git show-ref --verify --quiet "refs/tags/v$VERSION"; then
+            test "$(git rev-list -n 1 "v$VERSION")" = "$GITHUB_SHA"
+            gh release view "v$VERSION" --json targetCommitish,isDraft > release-state.json
+            test "$(jq -r .targetCommitish release-state.json)" = "$GITHUB_SHA"
+            test "$(jq -r .isDraft release-state.json)" = true
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  quality:
+    name: Full release validation
+    needs: metadata
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: {components: "rustfmt, clippy"}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm ci
+      - name: Verify committed release version
+        env: {VERSION: "${{ needs.metadata.outputs.version }}"}
+        run: |
+          cargo metadata --format-version=1 --locked >/dev/null
+          npm run release:verify -- "$VERSION"
+      - run: npm run test:release
+      - run: npm run test:extension
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+
+  cli:
+    name: CLI ${{ matrix.target }}
+    needs: metadata
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 40
+    strategy:
+      matrix:
+        include:
+          - {target: x86_64-unknown-linux-gnu}
+          - {target: aarch64-unknown-linux-gnu}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - uses: dtolnay/rust-toolchain@stable
+        with: {targets: "${{ matrix.target }}"}
+      - run: cargo metadata --format-version=1 --locked >/dev/null
+      - if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo install cross --version 0.2.5
+      - if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo build --locked --release -p boop --target ${{ matrix.target }}
+      - if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cross build --locked --release -p boop --target ${{ matrix.target }}
+      - name: Verify binary version
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        env: {VERSION: "${{ needs.metadata.outputs.version }}"}
+        run: target/${{ matrix.target }}/release/boop --version | grep -F "$VERSION"
+      - run: cp target/${{ matrix.target }}/release/boop boop-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: boop-${{ matrix.target }}
+          if-no-files-found: error
+
+  chrome:
+    name: Chrome artifacts
+    needs: metadata
+    runs-on: depot-ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm ci
+      - run: npm run test:extension
+      - name: Build Web Store and sideload packages
+        env: {VERSION: "${{ needs.metadata.outputs.version }}"}
+        run: |
+          npm run extension:package
+          test -f "dist/boopmark-chrome-$VERSION.zip"
+          mkdir -p "dist/boopmark-chrome-unpacked-$VERSION"
+          unzip -q "dist/boopmark-chrome-$VERSION.zip" -d "dist/boopmark-chrome-unpacked-$VERSION"
+          test "$(node -p "require('./dist/boopmark-chrome-unpacked-$VERSION/manifest.json').version")" = "$VERSION"
+          (cd dist && zip -X -q -r "boopmark-chrome-sideload-$VERSION.zip" "boopmark-chrome-unpacked-$VERSION")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chrome-${{ needs.metadata.outputs.version }}
+          path: |
+            dist/boopmark-chrome-${{ needs.metadata.outputs.version }}.zip
+            dist/boopmark-chrome-sideload-${{ needs.metadata.outputs.version }}.zip
+          if-no-files-found: error
+
+  macos:
+    name: Wait for macOS artifacts on GitHub
+    needs: metadata
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 60
+    permissions: {actions: read, contents: read}
+    outputs:
+      run_id: ${{ steps.github.outputs.run_id }}
+    steps:
+      - name: Wait for release-macos.yml on this commit
+        id: github
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          RUN_ID=""
+          for _ in $(seq 1 30); do
+            RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release-macos.yml \
+              --branch "release/v$VERSION" --event push --limit 20 --json databaseId,headSha \
+              --jq ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
+            test -n "$RUN_ID" && break
+            sleep 10
+          done
+          test -n "$RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30
+
+  container:
+    name: Versioned container
+    needs: [metadata, quality]
+    runs-on: depot-ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PAT }}
+      - uses: depot/setup-action@v1
+      # Depot CI injects a short-lived DEPOT_TOKEN into this job. No stored token is used.
+      - uses: depot/build-push-action@v1
+        with:
+          project: xs5gsx5k24
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}
+          build-args: |
+            BOOPMARK_VERSION=${{ needs.metadata.outputs.version }}
+            BOOPMARK_GIT_SHA=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.metadata.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  deploy:
+    name: Deploy and verify production on GitHub
+    needs: [metadata, quality, cli, chrome, macos, container]
+    runs-on: depot-ubuntu-latest
+    timeout-minutes: 45
+    permissions: {actions: write, contents: read}
+    steps:
+      - name: Dispatch deploy.yml and wait for it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          BRANCH="release/v$VERSION"
+          list_runs() {
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --branch "$BRANCH" \
+              --event workflow_dispatch --limit 50 --json databaseId,headSha \
+              --jq ".[] | select(.headSha == \"$SHA\") | .databaseId"
+          }
+          # A retry on the same commit also has older runs, so only a new run ID counts.
+          BEFORE=$(list_runs)
+          gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" \
+            -f version="$VERSION" -f image="ghcr.io/$GITHUB_REPOSITORY:$VERSION"
+          RUN_ID=""
+          for _ in $(seq 1 30); do
+            RUN_ID=$(list_runs | { grep -vxF -e "${BEFORE:-none}" || true; } | head -1)
+            test -n "$RUN_ID" && break
+            sleep 5
+          done
+          test -n "$RUN_ID"
+          gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status --interval 15
+
+  publish:
+    name: Stage GitHub Release
+    needs: [metadata, macos, deploy]
+    runs-on: depot-ubuntu-latest
+    permissions: {actions: read, contents: write}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: release
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chrome-*
+          path: release
+          merge-multiple: true
+      - name: Download macOS and iOS artifacts from GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.macos.outputs.run_id }}
+        run: |
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --dir github-artifacts
+          find github-artifacts -type f -exec mv -t release {} +
+      - name: Generate installation guide and checksums
+        env: {VERSION: "${{ needs.metadata.outputs.version }}"}
+        run: |
+          node scripts/release/generate-install.mjs "$VERSION" release/INSTALL.md "$GITHUB_REPOSITORY"
+          expected=(
+            boop-x86_64-apple-darwin boop-aarch64-apple-darwin
+            boop-x86_64-unknown-linux-gnu boop-aarch64-unknown-linux-gnu
+            "boopmark-chrome-$VERSION.zip" "boopmark-chrome-sideload-$VERSION.zip"
+            "boopmark-ios-simulator-$VERSION.zip" "boopmark-ios-unsigned-$VERSION.ipa" INSTALL.md
+          )
+          for file in "${expected[@]}"; do test -f "release/$file"; done
+          (cd release && sha256sum "${expected[@]}" > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boopmark-release-${{ needs.metadata.outputs.version }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Create or repair exact draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          if gh release view "v$VERSION" --json targetCommitish,isDraft > release-state.json 2>/dev/null; then
+            test "$(jq -r .targetCommitish release-state.json)" = "$RELEASE_SHA"
+            test "$(jq -r .isDraft release-state.json)" = true
+            gh release upload "v$VERSION" release/* --clobber
+          else
+            gh release create "v$VERSION" --target "$RELEASE_SHA" --title "Boopmark v$VERSION" \
+              --generate-notes --draft release/*
+          fi
+
+  promote:
+    name: Promote production container
+    needs: [metadata, deploy, publish]
+    runs-on: depot-ubuntu-latest
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PAT }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Point latest at the verified production image
+        run: |
+          docker buildx imagetools create \
+            --tag "ghcr.io/${{ github.repository }}:latest" \
+            "ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}"
+
+  finalize:
+    name: Publish GitHub Release
+    needs: [metadata, publish, promote]
+    runs-on: depot-ubuntu-latest
+    permissions: {contents: write}
+    steps:
+      - name: Publish the staged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          test "$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" = "$RELEASE_SHA"
+          gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
+          test "$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = false
