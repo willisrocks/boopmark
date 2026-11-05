@@ -1,0 +1,86 @@
+# Depot CI has no macOS runners, so these builds stay on GitHub. The Depot release
+# candidate waits for this run, by commit, and downloads its artifacts.
+name: Release macOS artifacts
+
+on:
+  push:
+    branches: ['release/v*']
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Verify release candidate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.candidate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Require a release candidate branch
+        id: candidate
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          node scripts/release/verify-version.mjs "$VERSION"
+          test "$GITHUB_REF" = "refs/heads/release/v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  cli:
+    name: CLI ${{ matrix.target }}
+    needs: metadata
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      matrix:
+        include:
+          - {target: x86_64-apple-darwin, os: macos-latest}
+          - {target: aarch64-apple-darwin, os: macos-latest}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - uses: dtolnay/rust-toolchain@stable
+        with: {targets: "${{ matrix.target }}"}
+      - run: cargo metadata --format-version=1 --locked >/dev/null
+      - run: cargo build --locked --release -p boop --target ${{ matrix.target }}
+      - name: Verify binary version
+        env: {VERSION: "${{ needs.metadata.outputs.version }}"}
+        run: target/${{ matrix.target }}/release/boop --version | grep -F "$VERSION"
+      - run: cp target/${{ matrix.target }}/release/boop boop-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: boop-${{ matrix.target }}
+          if-no-files-found: error
+
+  ios:
+    name: iOS artifacts
+    needs: metadata
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: brew install xcodegen
+      - run: swift test --package-path mobile/ios/BoopmarkShared
+      - name: Build iOS release packages
+        env: {VERSION: "${{ needs.metadata.outputs.version }}"}
+        run: bash scripts/release/package-ios.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ needs.metadata.outputs.version }}
+          path: |
+            dist/boopmark-ios-simulator-${{ needs.metadata.outputs.version }}.zip
+            dist/boopmark-ios-unsigned-${{ needs.metadata.outputs.version }}.ipa
+          if-no-files-found: error
