@@ -75,6 +75,19 @@ fn is_tracking(name: &str) -> bool {
     name.starts_with("utm_") || TRACKING_PARAMS.contains(&name.as_str())
 }
 
+/// Whether `raw` is hosted on Medium: `medium.com` or any subdomain of it.
+// No caller yet; the helper lands ahead of its use (issue #51).
+#[allow(dead_code)]
+pub fn is_medium_url(raw: &str) -> bool {
+    let Some(url) = parse_web_url(raw) else {
+        return false;
+    };
+    url.host_str().is_some_and(|host| {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        host == "medium.com" || host.ends_with(".medium.com")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +215,16 @@ mod tests {
             "https://example.com/a",
             "https://example.com:8443/a"
         ));
+    }
+
+    #[test]
+    fn medium_hosted_matches_medium_and_subdomains_only() {
+        assert!(is_medium_url("https://medium.com/@a/post-1"));
+        assert!(is_medium_url("https://Blog.Medium.com/post"));
+        assert!(is_medium_url("http://www.medium.com/"));
+        assert!(!is_medium_url("https://notmedium.com/a"));
+        assert!(!is_medium_url("https://medium.com.evil.example/a"));
+        assert!(!is_medium_url("https://example.com/medium.com"));
+        assert!(!is_medium_url("not a url"));
     }
 }
