@@ -321,6 +321,14 @@ mod tests {
             Ok((plan, Some(batch(request.kind))))
         }
 
+        async fn delete_unused_tag(
+            &self,
+            _user_id: Uuid,
+            _name: &str,
+        ) -> Result<TagChangeBatch, DomainError> {
+            Ok(batch(ChangeKind::Delete))
+        }
+
         async fn undo_batch(
             &self,
             _user_id: Uuid,
