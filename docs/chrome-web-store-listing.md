@@ -71,9 +71,9 @@ Regenerate artwork from the latest production E2E capture with `npm run extensio
 
 ## CI release artifacts
 
-Run **Actions → Chrome extension artifacts → Run workflow** on the exact revision intended for release. The workflow runs all extension tests and creates:
+Run the Depot CI workflow `.depot/workflows/chrome-extension-artifacts.yml` on the exact revision intended for release, from the Depot dashboard (**Run a workflow**) or with `depot ci dispatch --repo willisrocks/boopmark --workflow chrome-extension-artifacts.yml --ref <branch>`. The workflow runs all extension tests and creates:
 
 - `boopmark-chrome-web-store-<version>`: the upload-ready ZIP, SHA-256 checksum, and build metadata.
-- `boopmark-chrome-sideload-<version>`: the unpacked extension directory and build metadata. Download and unzip the GitHub artifact, then select its unpacked extension directory with Chrome's **Load unpacked** control.
+- `boopmark-chrome-sideload-<version>`: the unpacked extension directory and build metadata. Download and unzip the artifact from the Depot run, then select its unpacked extension directory with Chrome's **Load unpacked** control.
 
 The build reads the release version from `extensions/chrome/manifest.json`, rejects any package entry outside the production allowlist, records the source commit and workflow run, and retains both artifacts for 90 days.
