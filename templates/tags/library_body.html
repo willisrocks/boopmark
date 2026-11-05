@@ -59,7 +59,7 @@
                     {% if row.count == 0 %}
                     <span class="hidden text-gray-600 sm:inline" aria-hidden="true">&middot;</span>
                     <button type="button" data-testid="tag-delete" class="text-red-400 hover:text-red-300"
-                            hx-post="/tags/delete" hx-vals='{"tag": {{ row.name|json }}}'>Delete</button>
+                            name="tag" value="{{ row.name }}" hx-post="/tags/delete">Delete</button>
                     {% endif %}
                 </div>
             </td>
