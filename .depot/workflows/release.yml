@@ -84,7 +84,8 @@ jobs:
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
-          node scripts/release/sync-version.mjs "$VERSION" "$GITHUB_RUN_NUMBER"
+          # GITHUB_RUN_NUMBER can be 1 on Depot, and the iOS build number must rise.
+          node scripts/release/sync-version.mjs "$VERSION" "$(git rev-list --count HEAD)"
           cargo metadata --format-version=1 >/dev/null
           cargo metadata --format-version=1 --locked >/dev/null
           node scripts/release/verify-version.mjs "$VERSION"

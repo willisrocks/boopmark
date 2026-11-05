@@ -128,6 +128,37 @@ test('release workflow builds immutable source and promotes latest after product
   assert.match(deployJob, /then \(if \. > 1e11 then \(\. \/ 1000 \| floor\) else \. end\)/);
 });
 
+test('Depot release keeps registry and Fly credentials on GitHub', async () => {
+  const repository = resolve(import.meta.dirname, '../../..');
+  const read = (file) => readFile(resolve(repository, file), 'utf8');
+  const candidate = await read('.depot/workflows/release-candidate.yml');
+  const prepare = await read('.depot/workflows/release.yml');
+  const deploy = await read('.github/workflows/deploy.yml');
+
+  for (const workflow of [candidate, prepare]) {
+    assert.doesNotMatch(workflow, /FLY_API_TOKEN:|flyctl |GHCR_PAT:|secrets\.GHCR|docker\/login-action/);
+    assert.doesNotMatch(workflow, /^\s+environment:/m);
+  }
+  assert.doesNotMatch(candidate, /^\s+(push|pull_request\w*):/m);
+  assert.match(candidate, /deploy:\n[\s\S]*?needs: \[metadata, quality, cli, chrome, macos\]/);
+  assert.match(candidate, /gh workflow run deploy\.yml[\s\S]*?gh run watch "\$RUN_ID"[^\n]*--exit-status/);
+  assert.match(candidate, /publish:\n[\s\S]*?needs: \[metadata, macos, deploy\]/);
+  assert.match(prepare, /release-candidate=release\/v\$VERSION@\$SHA/);
+
+  // Both credential-bearing jobs refuse any ref but the exact release branch.
+  const gate = 'test "$GITHUB_REF" = "refs/heads/release/v$VERSION"';
+  const image = deploy.slice(deploy.indexOf('\n  publish-image:\n'), deploy.indexOf('\n  deploy:\n'));
+  const production = deploy.slice(deploy.indexOf('\n  deploy:\n'), deploy.indexOf('\n  promote:\n'));
+  for (const job of [image, production]) {
+    const firstStep = job.slice(job.indexOf('steps:'), job.indexOf('actions/checkout'));
+    assert.ok(firstStep.includes(gate), 'the gate is the first step');
+  }
+  assert.match(production, /environment: production/);
+  assert.match(production, /needs: publish-image/);
+  assert.match(production, /imagetools inspect[\s\S]*?\$DIGEST[\s\S]*?flyctl deploy/);
+  assert.match(deploy, /promote:\n[\s\S]*?needs: deploy[\s\S]*?:latest/);
+});
+
 test('deploy diagnostics judge breakage by the newest Fly machine event', async (t) => {
   if (spawnSync('jq', ['--version'], { encoding: 'utf8' }).error?.code === 'ENOENT') {
     return t.skip('jq is not installed');

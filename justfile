@@ -126,7 +126,7 @@ check:
     cargo clippy -p boop --all-targets -- -D warnings
     cargo test -p boop
 
-# Start the canonical GitHub release workflow (major, minor, or patch)
+# Start the Depot release (major, minor, or patch). This needs the Depot login on this Mac.
 release bump="patch":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -134,5 +134,28 @@ release bump="patch":
       major|minor|patch) ;;
       *) echo "Error: bump must be major, minor, or patch" >&2; exit 1 ;;
     esac
-    gh workflow run release.yml --ref main -f bump="{{bump}}"
-    echo "Release workflow triggered. Watch: gh run list --workflow=release.yml"
+    repo=willisrocks/boopmark
+    run=$(depot ci dispatch --repo "$repo" --workflow release.yml --ref main \
+      --input bump="{{bump}}" --output json | jq -r .run_id)
+    echo "Release workflow: https://depot.dev/orgs/r1n102m2f9/workflows/$run"
+    depot ci status "$run" --wait >/dev/null
+    candidate=$(depot ci logs "$run" --job prepare |
+      grep -oE 'release-candidate=release/v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{40}' | tail -1)
+    test -n "$candidate"
+    candidate=${candidate#release-candidate=}
+    branch=${candidate%@*}
+    sha=${candidate#*@}
+    # A dispatch right after the push can return not_found for a few seconds.
+    for _ in $(seq 1 12); do
+      if output=$(depot ci dispatch --repo "$repo" --workflow release-candidate.yml \
+        --ref "$branch" --input prepared_sha="$sha" 2>&1); then
+        echo "$output"
+        exit 0
+      fi
+      case "$output" in
+        *not_found*) sleep 5 ;;
+        *) echo "$output" >&2; exit 1 ;;
+      esac
+    done
+    echo "$output" >&2
+    exit 1
