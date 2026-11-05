@@ -105,12 +105,20 @@ jobs:
               mobile/ios/Boopmark/Info.plist mobile/ios/BoopmarkShareExtension/Info.plist
             git commit -m "chore: release v$VERSION"
             RELEASE_REF="refs/heads/release/v$VERSION"
-            REMOTE_SHA=$(git ls-remote --heads origin "$RELEASE_REF" | awk '{print $1}')
-            if test -n "$REMOTE_SHA"; then
-              git push --force-with-lease="$RELEASE_REF:$REMOTE_SHA" origin "HEAD:$RELEASE_REF"
-            else
-              git push origin "HEAD:$RELEASE_REF"
-            fi
+            # GitHub can reject a push for a short time with
+            # "fatal error in commit_refs_rules", so read the branch again and retry.
+            PUSHED=""
+            for _ in $(seq 1 10); do
+              REMOTE_SHA=$(git ls-remote --heads origin "$RELEASE_REF" | awk '{print $1}')
+              if test -n "$REMOTE_SHA"; then
+                git push --force-with-lease="$RELEASE_REF:$REMOTE_SHA" origin "HEAD:$RELEASE_REF" && PUSHED=1
+              else
+                git push origin "HEAD:$RELEASE_REF" && PUSHED=1
+              fi
+              test -n "$PUSHED" && break
+              sleep 15
+            done
+            test -n "$PUSHED"
             SHA=$(git rev-parse HEAD)
           fi
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"

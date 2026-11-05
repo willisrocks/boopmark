@@ -145,15 +145,15 @@ release bump="patch":
     candidate=${candidate#release-candidate=}
     branch=${candidate%@*}
     sha=${candidate#*@}
-    # A dispatch right after the push can return not_found for a few seconds.
-    for _ in $(seq 1 12); do
+    # Depot can return not_found for some minutes after the push.
+    for _ in $(seq 1 60); do
       if output=$(depot ci dispatch --repo "$repo" --workflow release-candidate.yml \
         --ref "$branch" --input prepared_sha="$sha" 2>&1); then
         echo "$output"
         exit 0
       fi
       case "$output" in
-        *not_found*) sleep 5 ;;
+        *not_found*) sleep 10 ;;
         *) echo "$output" >&2; exit 1 ;;
       esac
     done
