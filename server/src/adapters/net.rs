@@ -256,6 +256,10 @@ impl<L: Lookup> reqwest::dns::Resolve for PublicOnlyResolver<L> {
 }
 
 /// The User-Agent of every fetch of a user-supplied URL.
+///
+/// Note (issue #51): this self-identifying bot UA is a likely cause of
+/// medium.com articles failing to fetch; Medium sits behind Cloudflare and
+/// probably answers it with HTTP 403 or a challenge page.
 pub const USER_AGENT: &str = "Boopmark/1.0 (+https://boopmark.app)";
 /// Redirects followed by `guarded_get`.
 pub const MAX_REDIRECTS: usize = 5;
