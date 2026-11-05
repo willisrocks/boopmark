@@ -22,7 +22,7 @@ env:
 jobs:
   check:
     name: Rust workspace
-    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    runs-on: depot-ubuntu-24.04-4 # was: ubuntu-latest. 4x16 sandbox for Rust builds, same size as the GitHub runner for public repos.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,7 +51,7 @@ jobs:
 
   idempotency-postgres:
     name: Postgres idempotency
-    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    runs-on: depot-ubuntu-24.04-4 # was: ubuntu-latest. 4x16 sandbox for Rust builds, same size as the GitHub runner for public repos.
     services:
       postgres:
         image: pgvector/pgvector:pg16
