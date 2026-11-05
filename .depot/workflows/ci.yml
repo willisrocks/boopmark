@@ -1,0 +1,139 @@
+# Depot CI Migration
+# Source: .github/workflows/ci.yml
+#
+# Changes made:
+# - Changed GitHub runs-on labels to their Depot equivalents
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: "ci-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Rust workspace
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+
+  extension:
+    name: Chrome extension
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:release
+      - run: npm run test:extension
+
+  idempotency-postgres:
+    name: Postgres idempotency
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: boopmark
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: boopmark
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U boopmark -d boopmark"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://boopmark:devpassword@127.0.0.1:5432/boopmark
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Postgres client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+      - name: Apply migrations
+        run: |
+          for migration in migrations/*.sql; do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+          done
+      - name: Verify current image model default
+        run: |
+          test "$(psql "$DATABASE_URL" -X -A -t -c "SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'user_llm_settings' AND column_name = 'image_generation_model'")" = "'gpt-image-2'::text"
+      - name: Test durable create idempotency
+        run: >-
+          cargo test -p boopmark-server
+          adapters::postgres::bookmark_repo::idempotency_tests::durable_claims_are_atomic_scoped_and_headerless_creates_remain_distinct
+          -- --ignored --exact
+      - name: Test tag alias DB
+        run: >-
+          cargo test -p boopmark-server
+          adapters::postgres::tag_alias_repo::tag_alias_postgres_tests::
+          -- --ignored
+      - name: Test search and ingest DB
+        run: >-
+          cargo test -p boopmark-server
+          -- --ignored
+          adapters::postgres::search_repo::search_tests
+          adapters::postgres::embedding_repo::embedding_tests
+          adapters::postgres::vector_schema::vector_schema_tests::pgvector_ready_is_idempotent
+      - name: Test page capture DB
+        run: >-
+          cargo test -p boopmark-server
+          -- --ignored
+          adapters::postgres::page_capture_repo::page_capture_postgres_tests
+          web::api::page_capture::tests
+          adapters::postgres::scraper_usage_repo::scraper_usage_postgres_tests
+      - name: Test tag consolidation DB
+        run: >-
+          cargo test -p boopmark-server
+          adapters::postgres::tag_consolidation_job_repo::tag_consolidation_postgres_tests::
+          -- --ignored
+
+  install-script:
+    name: Install script tests
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run install script tests
+        run: sh tests/test_install.sh
+
+  screenshot-svc:
+    name: Screenshot service tests
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    defaults:
+      run:
+        working-directory: screenshot-svc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run SSRF guard and browser tests
+        run: npm test
