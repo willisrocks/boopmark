@@ -323,11 +323,19 @@ fn bookmarks_changed(batch: &TagChangeBatch) -> String {
     plural(batch.summary.bookmarks_changed as usize, "bookmark")
 }
 
+/// What a batch did, for the history list and the flash.
+fn batch_summary(batch: &TagChangeBatch) -> String {
+    match (batch.kind, batch.summary.merges.first()) {
+        (ChangeKind::Delete, Some(m)) => format!("“{}”", m.canonical),
+        _ => merges_summary(&batch.summary.merges),
+    }
+}
+
 fn batch_view(batch: &TagChangeBatch) -> BatchView {
     BatchView {
         id: batch.id,
         kind: kind_label(batch.kind),
-        summary: merges_summary(&batch.summary.merges),
+        summary: batch_summary(batch),
         when: batch.created_at.format("%b %d, %Y %H:%M").to_string(),
         bookmarks: bookmarks_changed(batch),
         undone: batch.undone_at.is_some(),
@@ -584,6 +592,32 @@ async fn apply_merge_form(
     ))
 }
 
+/// The delete button's fields.
+#[derive(Deserialize)]
+pub struct DeleteForm {
+    tag: String,
+    q: Option<String>,
+    sort: Option<String>,
+}
+
+/// `POST /tags/delete`: delete a tag no bookmark uses, as one undoable
+/// batch. No confirmation step; undo is in the flash and the history.
+pub async fn delete(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Form(form): Form<DeleteForm>,
+) -> axum::response::Response {
+    let view = LibraryView {
+        q: form.q,
+        sort: form.sort,
+    };
+    let flash = match state.tag_aliases.delete_tag(user.id, &form.tag).await {
+        Ok(batch) => Flash::ok(format!("Deleted “{}”.", form.tag), Some(batch.id)),
+        Err(e) => Flash::from_error(e),
+    };
+    render_body(&state, user.id, &view, TagNames::Refresh, Some(flash)).await
+}
+
 /// `POST /tags/batches/{id}/undo`: undo one batch as a unit.
 pub async fn undo(
     State(state): State<AppState>,
@@ -596,7 +630,7 @@ pub async fn undo(
             format!(
                 "Undid {}: {}.",
                 kind_label(batch.kind).to_lowercase(),
-                merges_summary(&batch.summary.merges)
+                batch_summary(&batch)
             ),
             None,
         ),

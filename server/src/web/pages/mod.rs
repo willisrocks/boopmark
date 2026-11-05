@@ -49,6 +49,7 @@ pub fn routes() -> Router<AppState> {
         .route("/tags", get(tags::library))
         .route("/tags/search", get(tags::search_tags))
         .route("/tags/merge", post(tags::merge))
+        .route("/tags/delete", post(tags::delete))
         .route("/tags/batches/{id}/undo", post(tags::undo))
         .route("/invite/{token}", get(invite::invite_landing))
         .route("/admin", get(admin::admin_page))

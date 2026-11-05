@@ -367,12 +367,51 @@ pub fn plan_manual_merge(
     })
 }
 
+/// Check that `name` can be deleted: it is in the library and no bookmark
+/// uses it. Only the alias rows of an unused tag are removed, so nothing a
+/// bookmark shows can change. The repository calls this under the per-user
+/// lock.
+pub fn plan_tag_delete(name: &str, rows: &[TagRow]) -> Result<(), DomainError> {
+    let row = rows
+        .iter()
+        .find(|r| r.name == name)
+        .ok_or_else(|| DomainError::InvalidInput(STALE_LIBRARY.to_string()))?;
+    if row.count > 0 {
+        return Err(DomainError::InvalidInput(format!(
+            "“{name}” is used by {} bookmarks and cannot be deleted. Merge it instead.",
+            row.count
+        )));
+    }
+    Ok(())
+}
+
 /// Shown when a manual merge names a tag that is no longer in the library.
 pub const STALE_LIBRARY: &str = "The tag list changed. Reload the page and try again.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_unused_tag_can_be_deleted() {
+        let rows = vec![
+            TagRow {
+                name: "used".into(),
+                count: 2,
+                aliases: vec![],
+            },
+            TagRow {
+                name: "unused".into(),
+                count: 0,
+                aliases: vec!["old".into()],
+            },
+        ];
+        assert!(plan_tag_delete("unused", &rows).is_ok());
+        let used = plan_tag_delete("used", &rows).unwrap_err().to_string();
+        assert!(used.contains("2 bookmarks"), "{used}");
+        let gone = plan_tag_delete("nope", &rows).unwrap_err().to_string();
+        assert!(gone.contains("Reload"), "{gone}");
+    }
     use crate::domain::tag_alias::AliasSource;
 
     fn alias(spelling: &str, canonical: &str) -> TagAlias {

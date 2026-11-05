@@ -106,6 +106,16 @@ where
         self.repo.apply_manual_merge(user_id, request).await
     }
 
+    /// Delete a tag with zero bookmarks and its alias rows, as one
+    /// undoable batch.
+    pub async fn delete_tag(
+        &self,
+        user_id: Uuid,
+        name: &str,
+    ) -> Result<TagChangeBatch, DomainError> {
+        self.repo.delete_unused_tag(user_id, name).await
+    }
+
     pub async fn undo_batch(
         &self,
         user_id: Uuid,
@@ -309,6 +319,14 @@ mod tests {
                 redirected_from: None,
             };
             Ok((plan, Some(batch(request.kind))))
+        }
+
+        async fn delete_unused_tag(
+            &self,
+            _user_id: Uuid,
+            _name: &str,
+        ) -> Result<TagChangeBatch, DomainError> {
+            Ok(batch(ChangeKind::Delete))
         }
 
         async fn undo_batch(
