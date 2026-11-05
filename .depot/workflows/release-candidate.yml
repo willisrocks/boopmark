@@ -3,10 +3,9 @@
 # Changes from the GitHub copy:
 # - macOS CLI and iOS builds run in .github/workflows/release-macos.yml. The macos job
 #   waits for that run, and publish downloads its artifacts.
-# - Production deploys run in .github/workflows/deploy.yml, so FLY_API_TOKEN never
-#   enters Depot. The deploy job dispatches that workflow and waits for it.
-# - The container builds through the Depot project and pushes with GHCR_PAT, because
-#   Depot's GITHUB_TOKEN cannot push to GHCR.
+# - The image build, the production deploy, and the latest tag run in
+#   .github/workflows/deploy.yml, so no GHCR or Fly credential enters Depot. The deploy
+#   job dispatches that workflow and waits for it.
 
 name: Release candidate
 
@@ -184,37 +183,9 @@ jobs:
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
           gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30
 
-  container:
-    name: Versioned container
-    needs: [metadata, quality]
-    runs-on: depot-ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_PAT }}
-      - uses: depot/setup-action@v1
-      # Depot CI injects a short-lived DEPOT_TOKEN into this job. No stored token is used.
-      - uses: depot/build-push-action@v1
-        with:
-          project: xs5gsx5k24
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}
-          build-args: |
-            BOOPMARK_VERSION=${{ needs.metadata.outputs.version }}
-            BOOPMARK_GIT_SHA=${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.version=${{ needs.metadata.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-
   deploy:
     name: Deploy and verify production on GitHub
-    needs: [metadata, quality, cli, chrome, macos, container]
+    needs: [metadata, quality, cli, chrome, macos]
     runs-on: depot-ubuntu-latest
     timeout-minutes: 45
     permissions: {actions: write, contents: read}
@@ -234,7 +205,7 @@ jobs:
           # A retry on the same commit also has older runs, so only a new run ID counts.
           BEFORE=$(list_runs)
           gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" \
-            -f version="$VERSION" -f image="ghcr.io/$GITHUB_REPOSITORY:$VERSION"
+            -f version="$VERSION" -f sha="$SHA"
           RUN_ID=""
           for _ in $(seq 1 30); do
             RUN_ID=$(list_runs | { grep -vxF -e "${BEFORE:-none}" || true; } | head -1)
@@ -305,26 +276,9 @@ jobs:
               --generate-notes --draft release/*
           fi
 
-  promote:
-    name: Promote production container
-    needs: [metadata, deploy, publish]
-    runs-on: depot-ubuntu-latest
-    steps:
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_PAT }}
-      - uses: docker/setup-buildx-action@v3
-      - name: Point latest at the verified production image
-        run: |
-          docker buildx imagetools create \
-            --tag "ghcr.io/${{ github.repository }}:latest" \
-            "ghcr.io/${{ github.repository }}:${{ needs.metadata.outputs.version }}"
-
   finalize:
     name: Publish GitHub Release
-    needs: [metadata, publish, promote]
+    needs: [metadata, publish]
     runs-on: depot-ubuntu-latest
     permissions: {contents: write}
     steps:
