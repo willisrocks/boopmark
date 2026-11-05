@@ -661,6 +661,7 @@ impl TagAliasRepository for PostgresPool {
         Ok((plan, batch))
     }
 
+    /// Removes an unused tag's alias rows and records them in a `delete` batch.
     async fn delete_unused_tag(
         &self,
         user_id: Uuid,
