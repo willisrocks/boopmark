@@ -9,7 +9,9 @@ use crate::domain::tag_alias::{
 use crate::domain::tag_consolidation::{
     ReviewedRow, TagSample, plan_reviewed_apply, resolve_through_aliases,
 };
-use crate::domain::tag_library::{ManualMerge, ManualMergePlan, library_rows, plan_manual_merge, plan_tag_delete};
+use crate::domain::tag_library::{
+    ManualMerge, ManualMergePlan, library_rows, plan_manual_merge, plan_tag_delete,
+};
 use crate::domain::tag_normalize::{clean_tag, compact_key};
 use chrono::{DateTime, Utc};
 use sqlx::{PgExecutor, Postgres, Transaction};
