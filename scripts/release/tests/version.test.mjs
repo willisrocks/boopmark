@@ -72,10 +72,10 @@ test('synchronizes Chrome, Rust, and every iOS version source', async () => {
 
 test('release workflow builds immutable source and promotes latest after production', async () => {
   const repository = resolve(import.meta.dirname, '../../..');
-  const dispatcher = await readFile(resolve(repository, '.github/workflows/release.yml'), 'utf8');
-  const workflow = await readFile(resolve(repository, '.github/workflows/release-candidate.yml'), 'utf8');
+  const dispatcher = await readFile(resolve(repository, '.depot/workflows/release.yml'), 'utf8');
+  const workflow = await readFile(resolve(repository, '.depot/workflows/release-candidate.yml'), 'utf8');
+  const deploy = await readFile(resolve(repository, '.github/workflows/deploy.yml'), 'utf8');
 
-  assert.match(dispatcher, /gh workflow run release-candidate\.yml --ref "release\/v\$VERSION" -f prepared_sha="\$SHA"/);
   assert.doesNotMatch(workflow, /needs\.prepare\.outputs\.sha/);
   assert.doesNotMatch(workflow, /ref:.*needs\./);
   assert.match(workflow, /test "\$GITHUB_SHA" = "\$PREPARED_SHA"/);
@@ -86,23 +86,19 @@ test('release workflow builds immutable source and promotes latest after product
   assert.match(dispatcher, /gh release list --exclude-drafts --exclude-pre-releases/);
   assert.match(dispatcher, /reuse_sha=\$REUSE_SHA/);
   assert.match(dispatcher, /if test -n "\$REUSE_SHA"; then[\s\S]*?SHA="\$REUSE_SHA"/);
-  assert.match(workflow, /container:\n[\s\S]*?needs: \[metadata, quality\]/);
-  assert.match(workflow, /publish:\n[\s\S]*?needs: \[metadata, deploy\]/);
   assert.match(workflow, /pattern: cli-\*/);
   assert.match(workflow, /pattern: chrome-\*/);
-  assert.match(workflow, /pattern: ios-\*/);
   assert.doesNotMatch(workflow, /with: \{path: release, merge-multiple: true\}/);
   assert.match(workflow, /gh release create[\s\S]*?--draft/);
   assert.match(workflow, /gh release upload[\s\S]*?--clobber/);
   assert.doesNotMatch(workflow, /git push origin "v\$VERSION"/);
-  assert.match(workflow, /promote:\n[\s\S]*?needs: \[metadata, deploy, publish\]/);
-  assert.match(workflow, /docker buildx imagetools create[\s\S]*?:latest/);
-  assert.match(workflow, /finalize:\n[\s\S]*?needs: \[metadata, publish, promote\]/);
+  assert.match(workflow, /finalize:\n[\s\S]*?needs: \[metadata, publish\]/);
   assert.match(workflow, /gh release edit[\s\S]*?--draft=false/);
+  assert.match(deploy, /docker buildx imagetools create[\s\S]*?:latest/);
 
   // A deploy that cannot start must report the Fly machine state and app logs and
   // fail on positive evidence, without shortening the healthy ten-minute window.
-  const deployJob = workflow.slice(workflow.indexOf('\n  deploy:\n'), workflow.indexOf('\n  publish:\n'));
+  const deployJob = deploy.slice(deploy.indexOf('\n  deploy:\n'), deploy.indexOf('\n  promote:\n'));
   assert.match(deployJob, /id: deploy/);
   assert.match(deployJob, /FLY_API_TOKEN/);
   assert.match(deployJob, /flyctl status --app "\$app" --json/);
@@ -165,7 +161,7 @@ test('deploy diagnostics judge breakage by the newest Fly machine event', async 
   }
 
   const repository = resolve(import.meta.dirname, '../../..');
-  const workflow = await readFile(resolve(repository, '.github/workflows/release-candidate.yml'), 'utf8');
+  const workflow = await readFile(resolve(repository, '.github/workflows/deploy.yml'), 'utf8');
   const program = workflow.match(/(def epoch:[\s\S]*?)' 2>\/dev\/null/)?.[1];
   assert.ok(program, 'the analysis jq program is in the workflow');
 

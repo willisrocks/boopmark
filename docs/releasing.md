@@ -2,7 +2,7 @@
 
 The `just release` recipe on a Mac with the Depot login is the supported production release path. Choose exactly one semantic increment: `patch`, `minor`, or `major`.
 
-The GitHub copies of `release.yml` and `release-candidate.yml` stay until a real release proves this path. A GitHub ruleset allows only the Depot Code Access app and repository admins to create a `release/v*` branch, so the GitHub copy cannot create its branch while that ruleset is active.
+v0.10.4 proved this path end to end, and the GitHub Actions copies of the release workflows are gone. Only `deploy.yml` and `release-macos.yml` still run on GitHub, because Depot CI has no `environment` gate and no macOS sandboxes. A GitHub ruleset allows only the Depot Code Access app and repository admins to create a `release/v*` branch.
 
 ## How a release runs
 
