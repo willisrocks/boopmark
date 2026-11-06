@@ -35,15 +35,15 @@
           <p id="existing-status" role="status" aria-live="polite">Already saved in Boopmark.</p>
           <button id="capture-button" class="secondary" type="button">Capture text</button>
         </div>
-        <label for="url">URL</label>
+        <label id="url-label" for="url">URL</label>
         <input id="url" name="url" type="url" required placeholder="https://example.com" spellcheck="false" aria-describedby="url-error">
         <p id="url-error" class="error" role="status" hidden></p>
-        <div class="metadata-row"><p id="metadata-status" role="status" aria-live="polite">Fetching metadata…</p><button id="autofill-button" class="text-button" type="button">Autofill</button></div>
-        <label for="title">Title <span class="optional">optional</span></label>
+        <div id="metadata-row" class="metadata-row"><p id="metadata-status" role="status" aria-live="polite">Fetching metadata…</p><button id="autofill-button" class="text-button" type="button">Autofill</button></div>
+        <label id="title-label" for="title">Title <span class="optional">optional</span></label>
         <input id="title" name="title" type="text" placeholder="Page title">
-        <label for="description">Description <span class="optional">optional</span></label>
+        <label id="description-label" for="description">Description <span class="optional">optional</span></label>
         <textarea id="description" name="description" rows="3" placeholder="A little context for later"></textarea>
-        <label for="tags">Tags <span class="optional">optional</span></label>
+        <label id="tags-label" for="tags">Tags <span class="optional">optional</span></label>
         <input id="tags" name="tags" type="text" placeholder="design, software, tools" aria-describedby="tags-hint">
         <p id="tags-hint" class="hint">Comma separated</p>
         <p id="save-status" role="status" aria-live="polite"></p>

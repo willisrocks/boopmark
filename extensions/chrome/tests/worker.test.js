@@ -273,7 +273,10 @@ test('worker OPEN starts one automatic suggestion and SAVE sends one reviewed pa
 
   const opened = await ui.send({ type: 'OPEN', tab });
   assert.equal(opened.ok, true);
-  assert.equal(opened.draft.metadataStatus, 'loading');
+  // The saved-page lookup decides first: no suggestion is in flight while it
+  // is loading, so the draft still shows its browser fallback.
+  assert.equal(opened.existing.status, 'loading');
+  assert.equal(opened.draft.metadataStatus, 'empty');
   assert.equal(opened.draft.title, 'Browser fallback title');
   await wait(25);
 
@@ -437,12 +440,14 @@ test('a late suggestion from the previous connection cannot overwrite a rebound 
   const ui = harness({ localValues: { 'boopmark.settings': settings(server) }, fetchImpl });
   const tab = { id: 213, url: 'https://example.com/reconnect', title: 'Original title' };
   const opened = await ui.send({ type: 'OPEN', tab });
+  await wait(5);
   assert.equal(pending.length, 1);
   await ui.send({ type: 'UPDATE', draftId: opened.draft.id, field: 'title', value: 'Authored title' });
 
   const connected = await ui.send({ type: 'CONNECT', server, apiKey: 'replacement-key' });
   assert.equal(connected.ok, true);
   const rebound = await ui.send({ type: 'OPEN', tab });
+  await wait(5);
   assert.equal(pending.length, 2, 'reconnect starts one fresh suggestion');
   pending[1].request.resolve(response(200, { title: 'Fresh title', description: 'Fresh description', tags: ['fresh'] }));
   await wait(25);
@@ -546,6 +551,7 @@ test('user edits and intentional clears survive a delayed suggestion', async () 
   const ui = harness({ localValues: { 'boopmark.settings': settings() }, fetchImpl });
   const tab = { id: 214, url: 'https://example.com/delayed-edit', title: 'Browser fallback' };
   const opened = await ui.send({ type: 'OPEN', tab });
+  await wait(5);
   assert.equal(pending.length, 1);
   await ui.send({ type: 'UPDATE', draftId: opened.draft.id, field: 'title', value: 'Authored title' });
   await ui.send({ type: 'UPDATE', draftId: opened.draft.id, field: 'description', value: '' });
@@ -579,6 +585,7 @@ test('a delayed A suggestion cannot suppress or overwrite debounced B then A req
   const original = { id: 22, url: 'https://example.com/a', title: 'A browser title' };
   const opened = await ui.send({ type: 'OPEN', tab: original });
   const draftId = opened.draft.id;
+  await wait(5);
   assert.equal(pending.length, 1);
 
   await ui.send({ type: 'UPDATE', draftId, field: 'url', value: 'https://example.com/b' });
@@ -622,10 +629,12 @@ test('a canceled suggestion cannot overwrite a replacement capture with the same
   const ui = harness({ localValues: { 'boopmark.settings': settings(server) }, fetchImpl });
   const tab = { id: 28, url: 'https://example.com/cancel-reopen', title: 'Browser title' };
   const first = await ui.send({ type: 'OPEN', tab });
+  await wait(5);
   assert.equal(pending.length, 1);
   await ui.send({ type: 'CANCEL', draftId: first.draft.id });
 
   const reopened = await ui.send({ type: 'OPEN', tab });
+  await wait(5);
   assert.equal(reopened.draft.id, first.draft.id);
   assert.equal(pending.length, 2);
   pending[1].request.resolve(response(200, { title: 'NEW title', description: 'NEW description', tags: ['new'] }));
@@ -643,8 +652,10 @@ test('a canceled suggestion cannot overwrite a replacement capture with the same
   // arrive first, but must not remove or settle the replacement request.
   const secondTab = { id: 29, url: 'https://example.com/cancel-reopen-early', title: 'Second browser title' };
   const secondFirst = await ui.send({ type: 'OPEN', tab: secondTab });
+  await wait(5);
   await ui.send({ type: 'CANCEL', draftId: secondFirst.draft.id });
   await ui.send({ type: 'OPEN', tab: secondTab });
+  await wait(5);
   assert.equal(pending.length, 4);
   pending[2].request.resolve(response(200, { title: 'STALE early', description: 'STALE early', tags: ['stale'] }));
   await wait(25);
