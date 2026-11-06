@@ -310,6 +310,50 @@ test('an already saved page offers Capture text and never saves a duplicate', as
   assert.equal(ui.messages.includes('SAVE'), false, 'capture never dispatches a create');
 });
 
+test('an already saved page hides the Add form and offers only Close', async () => {
+  const ui = await setup();
+  ui.override(() => ({
+    ...structuredClone(ui.data),
+    existing: { status: 'found', bookmarkId: 'bookmark-1', capture: null },
+  }));
+  ui.change();
+  await flush();
+  for (const id of ['url', 'title', 'description', 'tags', 'url-label', 'title-label',
+    'description-label', 'tags-label', 'metadata-row', 'tags-hint', 'save-button']) {
+    assert.equal(ui.elements[id].hidden, true, `${id} is hidden for a saved page`);
+  }
+  assert.equal(ui.elements.existing.hidden, false);
+  assert.equal(ui.elements['capture-button'].disabled, false);
+  assert.match(ui.elements['existing-status'].textContent, /already saved/i);
+  assert.equal(ui.elements['cancel-button'].hidden, false);
+  assert.equal(ui.elements['cancel-button'].textContent, 'Close');
+  assert.equal(ui.elements['save-button'].disabled, true, 'Add Bookmark cannot submit');
+
+  // A draft form comes back as soon as the page is no longer reported as saved.
+  ui.override(() => structuredClone(ui.data));
+  ui.change();
+  await flush();
+  for (const id of ['url', 'title', 'description', 'tags', 'metadata-row', 'save-button']) {
+    assert.equal(ui.elements[id].hidden, false, `${id} returns to the form`);
+  }
+  assert.equal(ui.elements.existing.hidden, true);
+  assert.equal(ui.elements['cancel-button'].textContent, 'Cancel');
+});
+
+test('the form reports the saved-page lookup instead of fetching metadata', async () => {
+  const ui = await setup();
+  ui.override(() => ({
+    ...structuredClone(ui.data),
+    draft: { ...ui.data.draft, metadataStatus: 'empty', suggestionAttempted: false },
+    existing: { status: 'loading', bookmarkId: null, capture: null },
+  }));
+  ui.change();
+  await flush();
+  assert.equal(ui.elements['metadata-status'].textContent, 'Checking Boopmark…');
+  assert.equal(ui.elements['autofill-button'].disabled, true, 'no suggestion can be asked for while checking');
+  assert.equal(ui.elements.url.hidden, false, 'the form stays usable while the lookup loads');
+});
+
 test('a successful save shows the capture annotation', async () => {
   const ui = await setup();
   ui.override(() => ({

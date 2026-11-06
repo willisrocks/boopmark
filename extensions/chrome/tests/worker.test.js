@@ -1326,6 +1326,122 @@ test('unsupported pages are never read, and disconnect drops a pending capture',
   assert.deepEqual(active.session.values, {});
 });
 
+test('an already saved page never asks for a suggestion', async () => {
+  const pageUrl = 'https://example.com/already-saved';
+  const { calls, fetchImpl } = captureFetch({ existing: [{ id: CAPTURE_BOOKMARK_ID, url: pageUrl, title: 'Saved page' }] });
+  const ui = harness({ localValues: { 'boopmark.settings': settings() }, fetchImpl });
+  const tab = { id: 51, url: pageUrl, title: 'Saved page' };
+
+  const opened = await ui.send({ type: 'OPEN', tab });
+  assert.equal(opened.existing.status, 'loading');
+  await wait(25);
+  const found = await ui.send({ type: 'OPEN', tab });
+  assert.equal(found.existing.status, 'found');
+  assert.equal(found.existing.bookmarkId, CAPTURE_BOOKMARK_ID);
+  assert.equal(found.draft.metadataStatus, 'empty', 'the draft is never enriched for a saved page');
+  assert.equal(calls.filter(call => call.url.endsWith('/api/v1/bookmarks/suggest')).length, 0, 'no suggestion call is made');
+});
+
+test('the suggestion waits for the lookup and runs once for an unsaved page', async () => {
+  const pageUrl = 'https://example.com/not-saved-yet';
+  const gate = deferred();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init: init || {} });
+    if (String(url).includes('/api/v1/bookmarks?url=')) {
+      await gate.promise;
+      return response(200, []);
+    }
+    if (String(url).endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: 'Suggested title', description: '', tags: [] });
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const ui = harness({ localValues: { 'boopmark.settings': settings() }, fetchImpl });
+  const tab = { id: 52, url: pageUrl, title: 'Unsaved page' };
+  const suggests = () => calls.filter(call => call.url.endsWith('/api/v1/bookmarks/suggest')).length;
+
+  const opened = await ui.send({ type: 'OPEN', tab });
+  assert.equal(opened.existing.status, 'loading');
+  assert.equal(opened.draft.metadataStatus, 'empty');
+  await wait(25);
+  assert.equal(suggests(), 0, 'no suggestion while the lookup is still loading');
+
+  gate.resolve();
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  assert.equal(ready.existing.status, 'none');
+  assert.equal(ready.draft.metadataStatus, 'filled');
+  assert.equal(ready.draft.title, 'Suggested title');
+  assert.equal(suggests(), 1, 'one suggestion once the lookup reports an unsaved page');
+});
+
+test('a failed lookup still suggests once and the page stays saveable', async () => {
+  const pageUrl = 'https://example.com/lookup-error';
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init: init || {} });
+    if (String(url).includes('/api/v1/bookmarks?url=')) return response(500, { error: 'lookup failed' });
+    if (String(url).endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: 'Suggested title', description: '', tags: [] });
+    if (String(url).endsWith('/api/v1/bookmarks') && init?.method === 'POST') return response(201, { id: 'saved-after-lookup-error' });
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const ui = harness({ localValues: { 'boopmark.settings': settings() }, fetchImpl });
+  const tab = { id: 53, url: pageUrl, title: 'Lookup error' };
+
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  assert.equal(ready.existing.status, 'error');
+  assert.equal(ready.draft.metadataStatus, 'filled');
+  assert.equal(calls.filter(call => call.url.endsWith('/api/v1/bookmarks/suggest')).length, 1, 'a lookup error falls back to one suggestion');
+
+  const saved = await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: {
+    url: ready.draft.url, title: ready.draft.title, description: '', tags: '',
+  } });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.operation.state, 'pending');
+  await wait(50);
+  const confirmed = await ui.send({ type: 'OPEN', tab });
+  assert.equal(confirmed.operation.state, 'success');
+});
+
+test('a confirmed save makes the next open look the page up again', async () => {
+  const pageUrl = 'https://example.com/save-then-reopen';
+  const calls = [];
+  let stored = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init: init || {} });
+    if (String(url).includes('/api/v1/bookmarks?url=')) return response(200, stored);
+    if (String(url).endsWith('/api/v1/bookmarks/suggest')) return response(200, { title: 'Suggested title', description: '', tags: [] });
+    if (String(url).endsWith('/api/v1/bookmarks') && init?.method === 'POST') {
+      stored = [{ id: 'saved-1', url: pageUrl }];
+      return response(201, { id: 'saved-1' });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const ui = harness({ localValues: { 'boopmark.settings': settings() }, fetchImpl });
+  const tab = { id: 54, url: pageUrl, title: 'Pick me' };
+  const suggests = () => calls.filter(call => call.url.endsWith('/api/v1/bookmarks/suggest')).length;
+
+  await ui.send({ type: 'OPEN', tab });
+  await wait(25);
+  const ready = await ui.send({ type: 'OPEN', tab });
+  assert.equal(ready.existing.status, 'none');
+  await ui.send({ type: 'SAVE', draftId: ready.draft.id, fields: { url: pageUrl, title: 'Pick me', description: '', tags: '' } });
+  await wait(50);
+  const confirmed = await ui.send({ type: 'OPEN', tab });
+  assert.equal(confirmed.operation.state, 'success');
+  await ui.send({ type: 'ACK', operationId: confirmed.operation.id });
+
+  const reopened = await ui.send({ type: 'OPEN', tab });
+  assert.equal(reopened.existing.status, 'loading', 'a confirmed save restarts the lookup');
+  await wait(25);
+  const found = await ui.send({ type: 'OPEN', tab });
+  assert.equal(found.existing.status, 'found', 'the page saved here is found on the next open');
+  assert.equal(found.existing.bookmarkId, 'saved-1');
+  assert.equal(calls.filter(call => call.url.includes('?url=')).length, 2, 'the saved page is looked up again');
+  assert.equal(suggests(), 1, 'the saved page never asks for another suggestion');
+});
+
 test('a lookup result for a different page never offers a capture', async () => {
   const { fetchImpl } = captureFetch({ existing: [{ id: CAPTURE_BOOKMARK_ID, url: 'https://example.com/somewhere-else', title: 'Other' }] });
   const ui = harness({

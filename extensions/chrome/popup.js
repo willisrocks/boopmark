@@ -56,12 +56,21 @@ function sentence(text) {
   return /[.!?]$/.test(capitalised) ? capitalised : `${capitalised}.`;
 }
 function formValues() { return Object.fromEntries(fields.map(field => [field, $(field).value])); }
+// A page the lookup reports as saved owns the popup: only its capture row and a
+// Close button remain. A save in progress or a recorded operation takes
+// precedence, and a page saved here shows its normal result instead.
+function existingOnly() {
+  const existing = state.existing;
+  return Boolean(state.connection?.connected && existing?.status === 'found' && existing.bookmarkId
+    && !state.operation && !saving);
+}
 function validateForm() {
   const valid = validURL($('url').value);
   $('url-error').hidden = valid;
   $('url-error').textContent = valid ? '' : 'Open a web page to add a bookmark, or enter a valid HTTP(S) URL without embedded credentials.';
-  $('save-button').disabled = !valid || saving || Boolean(state.operation && ['pending', 'unknown', 'success'].includes(state.operation.state)) || !state.connection?.connected;
-  $('autofill-button').disabled = !valid || saving || Boolean(state.operation) || state.draft?.metadataStatus === 'loading' || state.existing?.status === 'loading' || !state.connection?.connected;
+  const saved = existingOnly();
+  $('save-button').disabled = saved || !valid || saving || Boolean(state.operation && ['pending', 'unknown', 'success'].includes(state.operation.state)) || !state.connection?.connected;
+  $('autofill-button').disabled = saved || !valid || saving || Boolean(state.operation) || state.draft?.metadataStatus === 'loading' || state.existing?.status === 'loading' || !state.connection?.connected;
 }
 function render() {
   const connected = Boolean(state.connection?.connected);
@@ -89,12 +98,11 @@ function render() {
   const existing = state.existing;
   const uploading = Boolean(existing && existing.capture?.state === 'capturing');
   const canCaptureExisting = Boolean(connected && existing?.status === 'found' && existing.bookmarkId);
-  // An already-saved page shows only its capture row. The Add form would save a
-  // duplicate, so it stays hidden; a save in progress or a recorded operation
-  // still owns the popup, and a page that ended up saved shows its result.
-  const existingOnly = canCaptureExisting && !operation && !saving;
+  // An already-saved page shows only its capture row: the Add form would save a
+  // duplicate, so it stays hidden.
+  const savedOnly = existingOnly();
   for (const id of ['url-label', 'url', 'url-error', 'metadata-row', 'title-label', 'title',
-    'description-label', 'description', 'tags-label', 'tags', 'tags-hint', 'save-button']) $(id).hidden = existingOnly;
+    'description-label', 'description', 'tags-label', 'tags', 'tags-hint', 'save-button']) $(id).hidden = savedOnly;
   $('existing').hidden = setup || !canCaptureExisting;
   $('capture-button').disabled = !canCaptureExisting || capturing || uploading || locked;
   $('capture-button').textContent = capturing || uploading ? 'Capturing…' : 'Capture text';
@@ -105,7 +113,7 @@ function render() {
       ? sentence(existing.capture.text)
       : 'Already saved in Boopmark. Capture the page text so it is searchable.';
   $('save-button').textContent = operation?.state === 'pending' || saving ? 'Saving…' : 'Add Bookmark';
-  $('cancel-button').textContent = operation || existingOnly ? 'Close' : 'Cancel';
+  $('cancel-button').textContent = operation || savedOnly ? 'Close' : 'Cancel';
   $('close-button').setAttribute('aria-label', operation ? 'Close bookmark popup' : 'Cancel and discard bookmark');
   const metadata = {
     loading: 'Fetching metadata…', filled: 'Metadata filled. Review before saving.',

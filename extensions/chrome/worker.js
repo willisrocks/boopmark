@@ -672,7 +672,12 @@ function executeSave(settings, marker, fields) {
       const outcome = !failure ? { state: "success", bookmarkId: bookmark.id, capture }
         : { state: failure.kind === "unknown" ? "unknown" : "error", error: failure.message };
       await putOperation(Core.transitionOperation(marker, outcome));
-      if (!failure) await clearDraft(marker.draftId);
+      if (!failure) {
+        await clearDraft(marker.draftId);
+        // The page is saved now, so the next popup open must look it up again
+        // instead of trusting the "not saved" answer this popup started with.
+        existingBookmarks.clear();
+      }
       else {
         const draft = await getDraft(marker.draftId);
         if (draft) { draft.status = "ready"; draft.revision += 1; await putDraft(draft); }
