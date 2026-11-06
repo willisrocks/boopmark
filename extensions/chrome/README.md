@@ -9,11 +9,11 @@ A small Manifest V3 extension for the same capture → review → save flow as B
 3. Pin Boopmark in the toolbar and click its icon on a web page.
 4. Connect to `https://boopmark.com` (or your HTTPS server) using a Boopmark API key from your server's Settings → API keys. Grant access to that server when Chrome asks.
 
-Your AI-provider key/model stays in Boopmark Settings. With an eligible account, opening the popup automatically requests metadata and AI suggestions. No separate extension AI toggle or provider key is needed. You can edit or save while metadata loads; edits and intentional clears are preserved.
+Your AI-provider key/model stays in Boopmark Settings. Opening the popup first checks whether the page is already in Boopmark, and only when it is not does an eligible account automatically request metadata and AI suggestions. No separate extension AI toggle or provider key is needed. You can edit or save while metadata loads; edits and intentional clears are preserved.
 
 Review the URL, title, description, and comma-separated tags, then choose **Add Bookmark**. Saving sends your reviewed values without another AI request. Success is shown only after confirmed creation.
 
-Saving also hands the page's HTML to your server, gzip-compressed, so Boopmark can extract the article text and make the full text searchable even when the server cannot fetch the page itself. The result is a small note on the saved state ("article text captured", "article text pending", "no article text on this page"); a capture that fails never fails the save and is never retried automatically. Opening the popup on a page you already saved shows **Already saved** with a **Capture text** button that uploads the same page text without creating a second bookmark.
+Saving also hands the page's HTML to your server, gzip-compressed, so Boopmark can extract the article text and make the full text searchable even when the server cannot fetch the page itself. The result is a small note on the saved state ("article text captured", "article text pending", "no article text on this page"); a capture that fails never fails the save and is never retried automatically. Opening the popup on a page you already saved shows **Already saved** with a **Capture text** button that uploads the same page text without creating a second bookmark, and no Add form.
 
 Cancel/× discards an unsaved draft; clicking outside retains it for the browser session. A save already sent cannot be canceled by closing the popup. If its outcome is unknown, check the web library before an explicit retry—there is no automatic replay or offline queue.
 

@@ -252,6 +252,7 @@ function queueAutoSuggestion(draftId) {
       const settings = await requireConnection();
       const draft = await getDraft(draftId);
       if (!draft || draft.suggestionAttempted || !Core.validBookmarkURL(draft.url) || await getOperation()) return;
+      if (existingFor(settings, draft)?.status === "found") return;
       await beginSuggestion(settings, draft);
       publish();
     }).catch(() => {});
@@ -479,23 +480,27 @@ function existingFor(settings, draft) {
 }
 
 // One lookup per popup open, cached per connection and URL so state refreshes
-// never repeat the request.
+// never repeat the request. Returns a promise for the settled status so the
+// caller can decide whether a metadata suggestion is still worth making;
+// null means no lookup applies to this draft.
 function startLookup(settings, draft) {
-  if (!settings || settings.authError || !draft || !Core.validBookmarkURL(draft.url)) return;
+  if (!settings || settings.authError || !draft || !Core.validBookmarkURL(draft.url)) return null;
   const key = lookupKey(settings, draft.url);
-  if (existingBookmarks.has(key)) return;
-  const entry = { status: "loading", bookmarkId: null, capture: null };
-  existingBookmarks.set(key, entry);
+  const cached = existingBookmarks.get(key);
+  if (cached) return cached.promise;
+  const entry = { status: "loading", bookmarkId: null, capture: null, promise: null };
   const token = { server: settings.server, connectionEpoch: settings.epoch };
-  (async () => {
+  entry.promise = (async () => {
     let found = null;
     let failed = false;
     try {
       found = await new Api.BoopmarkApiClient({ server: settings.server, apiKey: settings.apiKey }).lookupByURL(draft.url);
     } catch { failed = true; }
-    if (existingBookmarks.get(key) !== entry) return;
+    // A replaced connection drops the entry; the next open looks up again, and
+    // this stale answer must not decide the new connection's flow.
+    if (existingBookmarks.get(key) !== entry) return "error";
     const current = await getSettings();
-    if (!sameConnection(current, token)) { existingBookmarks.delete(key); return; }
+    if (!sameConnection(current, token)) { existingBookmarks.delete(key); return "error"; }
     entry.status = failed ? "error" : found ? "found" : "none";
     entry.bookmarkId = found ? found.id : null;
     // Never offer a capture for a bookmark of a different page, even if a
@@ -505,7 +510,27 @@ function startLookup(settings, draft) {
       entry.bookmarkId = null;
     }
     publish();
-  })().catch(() => {});
+    return entry.status;
+  })().catch(() => "error");
+  existingBookmarks.set(key, entry);
+  return entry.promise;
+}
+
+// A page that is already saved needs no metadata suggestion, so the automatic
+// one waits for the lookup and is skipped when that page is found. A lookup
+// error must not block saving, so it falls back to the normal flow.
+function suggestAfterLookup(draft, lookup) {
+  lookup.then(status => {
+    if (status === "found") return undefined;
+    return serialize(async () => {
+      const settings = await requireConnection();
+      const current = await getDraft(draft.id);
+      if (!current || current.suggestionAttempted || !Core.validBookmarkURL(current.url) || await getOperation()) return;
+      if (existingFor(settings, current)?.status === "found") return;
+      await beginSuggestion(settings, current);
+      publish();
+    });
+  }).catch(() => {});
 }
 
 async function connect(message) {
@@ -575,9 +600,13 @@ async function open(message) {
   // the DOM only for a page the user opened it on, and only when saving or
   // capturing explicitly.
   startCapture(settings, draft);
-  startLookup(settings, draft);
+  const lookup = startLookup(settings, draft);
   if (!draft.suggestionAttempted && Core.validBookmarkURL(draft.url) && !settings.authError && !autoSuggestionTimers.has(id)) {
-    draft = await beginSuggestion(settings, draft);
+    // The lookup decides: a page that is already saved must not spend a
+    // suggestion call, and anything else (not saved, lookup failed) keeps the
+    // normal metadata flow once the lookup has settled.
+    if (lookup) suggestAfterLookup(draft, lookup);
+    else draft = await beginSuggestion(settings, draft);
   } else if (draft.metadataStatus === "loading" && !activeSuggestions.has(suggestionKey(id, Core.requestToken(draft)))) {
     draft.metadataStatus = "error";
     draft.error = "Metadata lookup was interrupted. Retry or save as-is.";
@@ -643,7 +672,12 @@ function executeSave(settings, marker, fields) {
       const outcome = !failure ? { state: "success", bookmarkId: bookmark.id, capture }
         : { state: failure.kind === "unknown" ? "unknown" : "error", error: failure.message };
       await putOperation(Core.transitionOperation(marker, outcome));
-      if (!failure) await clearDraft(marker.draftId);
+      if (!failure) {
+        await clearDraft(marker.draftId);
+        // The page is saved now, so the next popup open must look it up again
+        // instead of trusting the "not saved" answer this popup started with.
+        existingBookmarks.clear();
+      }
       else {
         const draft = await getDraft(marker.draftId);
         if (draft) { draft.status = "ready"; draft.revision += 1; await putDraft(draft); }
