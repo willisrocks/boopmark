@@ -360,7 +360,6 @@ mod tests {
             screenshot_backend: ScreenshotBackend::Disabled,
             screenshot_service_url: None,
             metadata_fallback_backend: MetadataFallbackBackend::None,
-            iframely_api_key: None,
             opengraph_io_api_key: None,
             article_ingest_enabled: false,
             article_ingest_concurrency: 2,

@@ -196,7 +196,7 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<UrlMetadata, DomainError>> + Send + '_>> {
             Box::pin(async {
                 Err(DomainError::Internal(
-                    "iframely returned HTTP 500".to_string(),
+                    "opengraph.io returned HTTP 500".to_string(),
                 ))
             })
         }
