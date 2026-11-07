@@ -142,8 +142,7 @@ Copy `.env.example` to `.env` and customize. Only three variables are required; 
 | `S3_IMAGES_PUBLIC_URL` | — | Public URL prefix for stored images |
 | `SCREENSHOT_BACKEND` | `disabled` | `disabled` or `playwright` |
 | `SCREENSHOT_SERVICE_URL` | — | Required when `SCREENSHOT_BACKEND=playwright` |
-| `METADATA_FALLBACK_BACKEND` | — | `iframely` or `opengraph_io` (optional) |
-| `IFRAMELY_API_KEY` | — | Required when `METADATA_FALLBACK_BACKEND=iframely` |
+| `METADATA_FALLBACK_BACKEND` | — | `opengraph_io` (optional) |
 | `OPENGRAPH_IO_API_KEY` | — | Required when `METADATA_FALLBACK_BACKEND=opengraph_io` |
 | `EMBEDDING_BACKEND` | `disabled` | `disabled`, `openai` or `local` (`local` needs a build with `--features local-embeddings`) |
 | `EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model; `BAAI/bge-small-en-v1.5` by default for `local` |

@@ -29,7 +29,6 @@ pub struct Config {
     pub screenshot_backend: ScreenshotBackend,
     pub screenshot_service_url: Option<String>,
     pub metadata_fallback_backend: MetadataFallbackBackend,
-    pub iframely_api_key: Option<String>,
     pub opengraph_io_api_key: Option<String>,
     /// `ARTICLE_INGEST_ENABLED=0` stops fetching articles; text that was
     /// already stored stays searchable.
@@ -111,7 +110,6 @@ pub enum StorageBackend {
 
 #[derive(Debug, Clone)]
 pub enum MetadataFallbackBackend {
-    Iframely,
     OpengraphIo,
     None,
 }
@@ -168,11 +166,9 @@ impl Config {
                 .unwrap_or_else(|_| "none".into())
                 .as_str()
             {
-                "iframely" => MetadataFallbackBackend::Iframely,
                 "opengraph_io" => MetadataFallbackBackend::OpengraphIo,
                 _ => MetadataFallbackBackend::None,
             },
-            iframely_api_key: env::var("IFRAMELY_API_KEY").ok(),
             opengraph_io_api_key: env::var("OPENGRAPH_IO_API_KEY").ok(),
             article_ingest_enabled: parse_flag(
                 env::var("ARTICLE_INGEST_ENABLED").ok().as_deref(),
@@ -386,7 +382,6 @@ mod tests {
     #[test]
     fn metadata_fallback_backend_default_is_none() {
         let backend: MetadataFallbackBackend = match "none" {
-            "iframely" => MetadataFallbackBackend::Iframely,
             "opengraph_io" => MetadataFallbackBackend::OpengraphIo,
             _ => MetadataFallbackBackend::None,
         };
@@ -394,19 +389,8 @@ mod tests {
     }
 
     #[test]
-    fn metadata_fallback_backend_parses_iframely() {
-        let backend: MetadataFallbackBackend = match "iframely" {
-            "iframely" => MetadataFallbackBackend::Iframely,
-            "opengraph_io" => MetadataFallbackBackend::OpengraphIo,
-            _ => MetadataFallbackBackend::None,
-        };
-        assert!(matches!(backend, MetadataFallbackBackend::Iframely));
-    }
-
-    #[test]
     fn metadata_fallback_backend_parses_opengraph_io() {
         let backend: MetadataFallbackBackend = match "opengraph_io" {
-            "iframely" => MetadataFallbackBackend::Iframely,
             "opengraph_io" => MetadataFallbackBackend::OpengraphIo,
             _ => MetadataFallbackBackend::None,
         };

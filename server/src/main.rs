@@ -12,7 +12,6 @@ use adapters::login::google::GoogleLoginProvider;
 use adapters::login::local_password::LocalPasswordLoginProvider;
 use adapters::metadata::fallback::FallbackMetadataExtractor;
 use adapters::metadata::html::HtmlMetadataExtractor;
-use adapters::metadata::iframely::IframelyExtractor;
 use adapters::metadata::opengraph_io::OpengraphIoExtractor;
 use adapters::openai_image::OpenAiImageGenerator;
 use adapters::postgres::PostgresPool;
@@ -85,14 +84,6 @@ async fn main() {
         vec![Box::new(html_extractor)];
 
     match &config.metadata_fallback_backend {
-        MetadataFallbackBackend::Iframely => {
-            let api_key = config
-                .iframely_api_key
-                .clone()
-                .expect("IFRAMELY_API_KEY required when METADATA_FALLBACK_BACKEND=iframely");
-            tracing::info!("metadata fallback: iframely");
-            extractors.push(Box::new(IframelyExtractor::new(api_key)));
-        }
         MetadataFallbackBackend::OpengraphIo => {
             let api_key = config.opengraph_io_api_key.clone().expect(
                 "OPENGRAPH_IO_API_KEY required when METADATA_FALLBACK_BACKEND=opengraph_io",
