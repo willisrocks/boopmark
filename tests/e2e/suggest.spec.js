@@ -45,6 +45,8 @@ test("suggest fills metadata on blur and the submitted card shows the stored pre
   const imageLink = firstCard.getByTestId("bookmark-card-image-link");
   await expect(imageLink).toHaveAttribute("href", /github\.com/);
 
+  await expect(firstCard.getByTestId("bookmark-card-domain")).toHaveText("github.com");
+
   // Existing assertions: card image still shows on homepage
   await expect(firstCard.getByTestId("bookmark-card-image")).toHaveAttribute("src", /\/uploads\/images\//);
   await expect(firstCard.locator("text=🔖")).toHaveCount(0);
