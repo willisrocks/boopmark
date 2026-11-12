@@ -29,7 +29,15 @@
         {% endif %}
         <div class="flex flex-wrap gap-1 mt-3">
             {% for tag in bookmark.tags %}
-            <span class="px-2 py-0.5 text-xs rounded-full bg-[#2a2d45] text-gray-400">{{ tag }}</span>
+            <a href="{{ bookmark.tag_filter_url(tag) }}"
+               data-testid="bookmark-tag-chip"
+               title="Filter by this tag"
+               class="px-2 py-0.5 text-xs rounded-full bg-[#2a2d45] text-gray-400 transition-colors hover:bg-[#343a5c] hover:text-gray-200"
+               hx-get="{{ bookmark.tag_filter_url(tag) }}"
+               hx-target="#bookmark-grid"
+               hx-swap="innerHTML"
+               hx-push-url="true"
+               hx-include="[name='search'],[name='sort']">{{ tag }}</a>
             {% endfor %}
         </div>
         <div class="flex items-center justify-between mt-3">

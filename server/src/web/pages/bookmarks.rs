@@ -102,6 +102,14 @@ impl From<SearchHit> for BookmarkView {
     }
 }
 
+impl BookmarkView {
+    /// The `/bookmarks` URL that filters by one tag: the shape the filter
+    /// bar's chips use, so a card's tag chip can swap the grid the same way.
+    fn tag_filter_url(&self, tag: &str) -> String {
+        format!("/bookmarks?tags={}", urlencoding::encode(tag))
+    }
+}
+
 fn render(t: &impl Template) -> axum::response::Response {
     match t.render() {
         Ok(body) => Html(body).into_response(),
