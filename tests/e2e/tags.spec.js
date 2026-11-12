@@ -127,6 +127,32 @@ test("the filter bar shows the top tags, a More popover and multi-select", async
   await expect(page.getByTestId("active-tag-chip")).toHaveText(/cooking/);
 });
 
+// A card's tag chip is a link to the same /bookmarks?tags= filter the bar's
+// chips use, so the swapped-in bar shows the tag as active too.
+test("a card's tag chip filters the grid by that tag", async ({ page }) => {
+  await signIn(page);
+
+  const card = cards(page).filter({ hasText: "Tag test 3" });
+  const chip = card.getByTestId("bookmark-tag-chip").filter({ hasText: "docker" });
+  await expect(chip).toHaveCount(1);
+  await expect(chip).toHaveAttribute("title", "Filter by this tag");
+  await expect(chip).toHaveAttribute("href", "/bookmarks?tags=docker");
+
+  await chip.click();
+  await expectTagFilter(page, "docker");
+  await expect(page.getByTestId("active-tag-chip")).toHaveText(/docker/);
+  await expect(cards(page)).toHaveCount(3);
+
+  // Only the bookmarks tagged docker are left, each still showing the chip.
+  const shown = await cards(page).evaluateAll((els) =>
+    els.map((el) => (el.textContent.match(/Tag test \d+/) || [""])[0]),
+  );
+  expect(shown.sort()).toEqual(["Tag test 0", "Tag test 3", "Tag test 6"]);
+  for (const shownCard of await cards(page).all()) {
+    await expect(shownCard.getByTestId("bookmark-tag-chip").filter({ hasText: "docker" })).toHaveCount(1);
+  }
+});
+
 test("a merge on /tags makes the old name an alias that the filter search finds", async ({ page }) => {
   await signIn(page);
   await page.getByTestId("profile-menu-trigger").hover();
