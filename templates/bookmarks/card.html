@@ -15,6 +15,9 @@
            class="text-sm font-medium text-gray-200 hover:text-white line-clamp-2">
             {% if let Some(title) = bookmark.title %}{{ title }}{% else %}{{ bookmark.url }}{% endif %}
         </a>
+        {% if let Some(domain) = bookmark.domain %}
+        <p class="text-xs text-gray-500 mt-1" data-testid="bookmark-card-domain">{{ domain }}</p>
+        {% endif %}
         {% if let Some(desc) = bookmark.description %}
         <p class="text-xs text-gray-500 mt-1 line-clamp-2">{{ desc }}</p>
         {% endif %}

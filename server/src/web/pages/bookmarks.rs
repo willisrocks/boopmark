@@ -53,15 +53,30 @@ struct BookmarkView {
     image_url: Option<String>,
     tags: Vec<String>,
     created_at_display: String,
+    /// Host of the URL without a leading `www.`; None when there is no host.
+    domain: Option<String>,
     /// Why a search matched, with the matched terms highlighted.
     snippet: Option<Vec<SnippetSegment>>,
     /// Found by meaning only (the vector leg), with no keyword match.
     semantic: bool,
 }
 
+/// Host of a URL with a leading `www.` removed; None for a bad URL or no host.
+fn url_domain(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw).ok()?;
+    let host = parsed.host_str()?;
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
 impl From<Bookmark> for BookmarkView {
     fn from(b: Bookmark) -> Self {
         let image_url = b.effective_image_url().map(str::to_string);
+        let domain = url_domain(&b.url);
         Self {
             id: b.id,
             url: b.url,
@@ -70,6 +85,7 @@ impl From<Bookmark> for BookmarkView {
             image_url,
             tags: b.tags,
             created_at_display: b.created_at.format("%b %d, %Y").to_string(),
+            domain,
             snippet: None,
             semantic: false,
         }
@@ -746,6 +762,20 @@ fn fill_if_blank(current: Option<String>, suggested: Option<String>) -> String {
 mod tests {
     use super::*;
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+
+    #[test]
+    fn url_domain_strips_www_keeps_subdomain_and_rejects_bad_urls() {
+        assert_eq!(
+            url_domain("https://www.medium.com/p/x").as_deref(),
+            Some("medium.com")
+        );
+        assert_eq!(
+            url_domain("https://blog.example.com/a").as_deref(),
+            Some("blog.example.com")
+        );
+        assert_eq!(url_domain("not a url"), None);
+        assert_eq!(url_domain("mailto:a@b.com"), None);
+    }
 
     fn bookmark(title: &str) -> Bookmark {
         Bookmark {
